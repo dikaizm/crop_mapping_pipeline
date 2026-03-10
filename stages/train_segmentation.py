@@ -275,10 +275,13 @@ def evaluate_test_set(model, loader, num_classes, device):
         all_labels.append(masks.cpu())
     all_logits = torch.cat(all_logits)
     all_labels = torch.cat(all_labels)
+    preds      = all_logits.argmax(dim=1)
     return {
         "miou":          compute_miou(all_logits, all_labels, num_classes),
-        "oa":            (all_logits.argmax(1) == all_labels).float().mean().item(),
+        "oa":            (preds == all_labels).float().mean().item(),
         "per_class_iou": compute_per_class_iou(all_logits, all_labels, num_classes),
+        "preds":         preds,
+        "labels":        all_labels,
     }
 
 
@@ -308,6 +311,50 @@ def build_model(arch, in_channels, num_classes):
     return model.to(DEVICE)
 
 
+# ── Confusion matrix ──────────────────────────────────────────────────────────
+
+def _plot_confusion_matrix(preds, labels, save_path):
+    """
+    Normalized (row-wise) confusion matrix over all NUM_CLASSES classes.
+    Rows = ground truth, columns = predicted.
+    """
+    p = preds.view(-1).numpy()
+    l = labels.view(-1).numpy()
+
+    cm = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
+    for t, pred in zip(l, p):
+        if 0 <= t < NUM_CLASSES and 0 <= pred < NUM_CLASSES:
+            cm[t, pred] += 1
+
+    row_sums = cm.sum(axis=1, keepdims=True)
+    cm_norm  = np.divide(cm.astype(float), row_sums,
+                         out=np.zeros_like(cm, dtype=float), where=row_sums > 0)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    im = ax.imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_xticks(range(NUM_CLASSES))
+    ax.set_yticks(range(NUM_CLASSES))
+    ax.set_xticklabels(CLASS_LABELS, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(CLASS_LABELS, fontsize=8)
+    ax.set_xlabel("Predicted", fontsize=11)
+    ax.set_ylabel("Ground Truth", fontsize=11)
+    ax.set_title("Confusion Matrix (row-normalized)", fontsize=12, fontweight="bold")
+
+    for i in range(NUM_CLASSES):
+        for j in range(NUM_CLASSES):
+            v = cm_norm[i, j]
+            if not np.isnan(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                        fontsize=6, color="white" if v > 0.5 else "black")
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    log.info(f"  Saved: {save_path}")
+
+
 # ── Main experiment runner ────────────────────────────────────────────────────
 
 def run_experiment(
@@ -319,10 +366,12 @@ def run_experiment(
     s2_processed,
     class_weights_tensor,
     force=False,
+    skip_viz=False,
 ):
     cfg        = ARCH_CFG[arch]
     exp_dir    = MODELS_DIR / exp_name
     best_ckpt  = exp_dir / "best_model.pth"
+    last_ckpt  = exp_dir / "last_model.pth"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     if not force and best_ckpt.exists():
@@ -478,6 +527,19 @@ def run_experiment(
                 f"{ep_t:.0f}s  {total_min:.1f}min"
             )
 
+            # Save last checkpoint every epoch (overwrites previous)
+            torch.save({
+                "epoch":            epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state":  optimizer.state_dict(),
+                "val_miou":         val_m["miou"],
+                "band_indices":     band_indices,
+                "band_names":       band_names_list,
+                "in_channels":      in_channels,
+                "num_classes":      NUM_CLASSES,
+                "architecture":     arch,
+            }, last_ckpt)
+
             if no_improve >= EARLY_STOP:
                 log.info(f"  Early stopping at epoch {epoch + 1}")
                 break
@@ -503,29 +565,68 @@ def run_experiment(
                 )
 
         # ── Artifacts ─────────────────────────────────────────────────────────
+
+        # Training history CSV
         hist_df  = pd.DataFrame(history)
         hist_csv = exp_dir / "training_history.csv"
         hist_df.to_csv(hist_csv, index=False)
 
+        # Training curve PNG
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         ax1.plot(hist_df["epoch"], hist_df["train_loss"], "--", label="Train")
         ax1.plot(hist_df["epoch"], hist_df["val_loss"],         label="Val")
         ax1.set(xlabel="Epoch", ylabel="Loss", title=f"{exp_name} — Loss")
         ax1.legend(); ax1.grid(True)
-
         ax2.plot(hist_df["epoch"], hist_df["val_miou"], color="green", label="Val mIoU")
         ax2.axhline(best_miou, linestyle="--", color="gray", label=f"Best={best_miou:.4f}")
         ax2.set(xlabel="Epoch", ylabel="mIoU", title=f"{exp_name} — mIoU")
         ax2.legend(); ax2.grid(True)
-
         plt.tight_layout()
         curve_path = exp_dir / "training_curve.png"
         plt.savefig(curve_path, dpi=150)
         plt.close()
 
+        # Per-class IoU CSV
+        iou_rows = []
+        for cls_id, iou in test_r["per_class_iou"].items():
+            cdl_id = KEEP_CLASSES[cls_id - 1]
+            iou_rows.append({
+                "class_id":   cls_id,
+                "cdl_id":     cdl_id,
+                "class_name": CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}"),
+                "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
+            })
+        iou_csv = exp_dir / "test_per_class_iou.csv"
+        pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
+
+        # Confusion matrix PNG
+        cm_path = exp_dir / "confusion_matrix.png"
+        _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
+
+        # Segmentation map PNG (full-tile inference)
+        seg_path = None
+        if not skip_viz:
+            log.info(f"  Running full-image inference for {exp_name}...")
+            gt_map, _    = load_gt_remap(str(test_cdl))
+            pred_map, _  = run_full_inference(
+                model, test_s2, band_indices, patch_size=PATCH_SIZE, stride=PATCH_SIZE
+            )
+            seg_path = exp_dir / "test_segmentation_map.png"
+            save_segmentation_map(
+                pred_map, gt_map,
+                title=f"{exp_name} — Test Segmentation ({TEST_YEAR})",
+                save_path=str(seg_path),
+            )
+            del pred_map, gt_map
+
         mlflow.log_artifact(str(best_ckpt))
+        mlflow.log_artifact(str(last_ckpt))
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
+        mlflow.log_artifact(str(iou_csv))
+        mlflow.log_artifact(str(cm_path))
+        if seg_path is not None:
+            mlflow.log_artifact(str(seg_path))
 
         run_id = run.info.run_id
 
@@ -650,17 +751,18 @@ def main(
     skip_viz=False,
 ):
     # Override data directories
+    # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        import crop_mapping_pipeline.config as _cfg
+        global S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR
         data_dir = Path(data_dir)
-        _cfg.S2_PROCESSED_DIR = data_dir / "s2"
-        _cfg.CDL_BY_YEAR      = {
+        S2_PROCESSED_DIR = data_dir / "s2"
+        CDL_BY_YEAR      = {
             yr: data_dir / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
             for yr in ["2022", "2023", "2024"]
         }
+        MODELS_DIR  = data_dir / "models"
+        FIGURES_DIR = data_dir / "figures"
         log.info(f"Data dir overridden to {data_dir}")
-
-    from crop_mapping_pipeline.config import S2_PROCESSED_DIR, CDL_BY_YEAR
 
     s2_processed = sorted(glob(str(S2_PROCESSED_DIR / "*_processed.tif")))
     if not s2_processed:
@@ -730,6 +832,7 @@ def main(
             s2_processed=s2_processed,
             class_weights_tensor=cw_tensor,
             force=force,
+            skip_viz=skip_viz,
         )
         if result is not None:
             all_results.append(result)
@@ -746,55 +849,7 @@ def main(
         ]].to_string(index=False))
         log.info(f"Saved: {summary_csv}")
 
-    # ── Full-image visualization (optional) ───────────────────────────────
-    if skip_viz:
-        return
-
-    test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
-    test_cdl = CDL_BY_YEAR[TEST_YEAR]
-    if not test_s2 or not test_cdl.exists():
-        log.warning("Test-year data missing — skipping full-image visualization")
-        return
-
-    log.info("Loading ground truth CDL for visualization...")
-    gt_map, _ = load_gt_remap(str(test_cdl))
-
-    viz_plan = [
-        ("A", "deeplabv3plus_cbam", exp_A_idx),
-        ("A", "segformer",          exp_A_idx),
-        ("B", "deeplabv3plus_cbam", exp_B_idx),
-        ("B", "segformer",          exp_B_idx),
-        ("C", "deeplabv3plus_cbam", exp_C_idx),
-        ("C", "segformer",          exp_C_idx),
-    ]
-    for exp_key, arch, b_idx in viz_plan:
-        if b_idx is None:
-            continue
-        exp_name  = f"exp_{exp_key}_{arch}"
-        ckpt_path = MODELS_DIR / exp_name / "best_model.pth"
-        if not ckpt_path.exists():
-            log.warning(f"Skipping viz for {exp_name} — checkpoint not found")
-            continue
-
-        log.info(f"\nVisualizing {exp_name} ({len(b_idx)} channels)...")
-        ckpt  = torch.load(ckpt_path, map_location=DEVICE)
-        model = build_model(arch, len(b_idx), NUM_CLASSES)
-        model.load_state_dict(ckpt["model_state_dict"])
-
-        pred_map, _ = run_full_inference(
-            model, test_s2, b_idx, patch_size=PATCH_SIZE, stride=PATCH_SIZE
-        )
-        save_path = FIGURES_DIR / f"test_segmentation_{exp_name}.png"
-        save_segmentation_map(
-            pred_map, gt_map,
-            title=f"{exp_name} — Full Test Segmentation ({TEST_YEAR})",
-            save_path=str(save_path),
-        )
-        del pred_map, model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    log.info("\nAll visualizations done.")
+    log.info("All experiments done — segmentation maps, confusion matrices, and IoU CSVs logged to MLflow.")
 
 
 if __name__ == "__main__":

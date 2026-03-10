@@ -19,6 +19,7 @@ Logs are written to logs/pipeline_YYYYMMDD_HHMMSS.log in addition to stdout.
 
 import sys
 import os
+import subprocess
 import argparse
 import logging
 import time
@@ -29,7 +30,12 @@ from pathlib import Path
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from crop_mapping_pipeline.config import LOGS_DIR
+os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
+import mlflow
+
+from crop_mapping_pipeline.config import (
+    LOGS_DIR, MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_PIPELINE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +80,7 @@ STAGE_FNS = {
 }
 
 
-def run_pipeline(stages, force=False, data_dir=None):
+def run_pipeline(stages, force=False, data_dir=None, log_file=None):
     """Execute each stage in order, recording timing and errors."""
     if "all" in stages:
         stages = ["fetch", "feature", "train"]
@@ -120,9 +126,60 @@ def run_pipeline(stages, force=False, data_dir=None):
 
     if any_error:
         log.error("One or more stages failed — check logs above")
-        sys.exit(1)
     else:
         log.info("All stages completed successfully")
+
+    _upload_log(stages, results, total, log_file, any_error)
+
+    if any_error:
+        sys.exit(1)
+
+
+def _schedule_shutdown(delay_min: int = 8) -> None:
+    """Schedule a system shutdown after `delay_min` minutes (Linux only)."""
+    log.warning("=" * 60)
+    log.warning(f"SERVER SHUTDOWN in {delay_min} minutes.")
+    log.warning("Cancel with:  sudo shutdown -c")
+    log.warning("=" * 60)
+    try:
+        subprocess.run(["sudo", "shutdown", "-h", f"+{delay_min}"], check=True)
+    except Exception as e:
+        log.error(f"Failed to schedule shutdown: {e}")
+
+
+def _upload_log(stages, results, total_s, log_file, any_error):
+    """Upload the pipeline log file + summary metrics to MLflow."""
+    try:
+        # Flush all log handlers so the file is complete before uploading
+        for handler in logging.root.handlers:
+            handler.flush()
+
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_PIPELINE)
+
+        ts        = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_name  = f"pipeline_{'_'.join(stages)}_{ts}"
+        final_status = "FAILED" if any_error else "FINISHED"
+
+        with mlflow.start_run(run_name=run_name) as pipeline_run:
+            mlflow.log_params({
+                "stages":    str(stages),
+                "n_stages":  len(stages),
+            })
+            mlflow.log_metric("total_wall_time_min", round(total_s / 60, 2))
+            for stage, r in results.items():
+                mlflow.log_metric(f"{stage}_elapsed_s", r["elapsed_s"])
+                mlflow.set_tag(f"{stage}_status", r["status"])
+            mlflow.set_tag("pipeline_status", "error" if any_error else "ok")
+
+            if log_file and Path(log_file).exists():
+                mlflow.log_artifact(str(log_file), artifact_path="logs")
+                log.info(f"Log uploaded to MLflow run: {pipeline_run.info.run_id}")
+
+        mlflow.end_run(status=final_status)
+
+    except Exception:
+        log.warning(f"MLflow log upload failed (non-fatal):\n{traceback.format_exc()}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -150,6 +207,11 @@ def main():
         metavar="PATH",
         help="Override data/processed directory (absolute path)",
     )
+    parser.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="Shut down the server 8 minutes after the pipeline finishes (Linux only)",
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -165,9 +227,12 @@ def main():
     )
 
     log.info(f"Pipeline log: {log_file}")
-    log.info(f"Stages: {args.stages}  force={args.force}  data_dir={args.data_dir}")
+    log.info(f"Stages: {args.stages}  force={args.force}  data_dir={args.data_dir}  shutdown={args.shutdown}")
 
-    run_pipeline(stages=args.stages, force=args.force, data_dir=args.data_dir)
+    run_pipeline(stages=args.stages, force=args.force, data_dir=args.data_dir, log_file=log_file)
+
+    if args.shutdown:
+        _schedule_shutdown(delay_min=8)
 
 
 if __name__ == "__main__":

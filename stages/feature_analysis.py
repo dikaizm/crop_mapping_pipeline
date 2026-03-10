@@ -547,11 +547,20 @@ def _mlflow_setup() -> None:
 
 def main(force: bool = False, data_dir: str = None) -> None:
     # Override data paths if requested
+    # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        import crop_mapping_pipeline.config as _cfg
-        _cfg.PROCESSED_DIR    = pathlib.Path(data_dir)
-        _cfg.S2_PROCESSED_DIR = pathlib.Path(data_dir) / "s2"
-        _cfg.CDL_DIR          = pathlib.Path(data_dir) / "cdl"
+        global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, \
+               STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS
+        processed          = pathlib.Path(data_dir)
+        PROCESSED_DIR      = processed
+        S2_PROCESSED_DIR   = processed / "s2"
+        CDL_BY_YEAR        = {
+            yr: processed / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
+            for yr in ["2022", "2023", "2024"]
+        }
+        STAGE2_RESULTS_CSV = processed / "stage2v2_per_crop_results.csv"
+        STAGE3_EXP_C_BANDS = processed / "stage3_exp_c_bands.txt"
+        log.info(f"Data dir overridden to {processed}")
 
     # Skip if outputs already exist
     if not force and os.path.exists(STAGE3_EXP_C_BANDS):

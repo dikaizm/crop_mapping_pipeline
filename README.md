@@ -81,9 +81,7 @@ Edit `config.py` and fill in the Google Drive IDs for each dataset:
 
 ```python
 GDRIVE_FILES = {
-    "s2_2022": {"type": "folder", "id": "<YOUR_FOLDER_ID>", ...},
-    "s2_2023": {"type": "folder", "id": "<YOUR_FOLDER_ID>", ...},
-    "s2_2024": {"type": "folder", "id": "<YOUR_FOLDER_ID>", ...},
+    "s2":      {"type": "folder", "id": "<YOUR_FOLDER_ID>", ...},  # all years in one folder
     "cdl_2022": {"type": "file",  "id": "<YOUR_FILE_ID>",   ...},
     "cdl_2023": {"type": "file",  "id": "<YOUR_FILE_ID>",   ...},
     "cdl_2024": {"type": "file",  "id": "<YOUR_FILE_ID>",   ...},

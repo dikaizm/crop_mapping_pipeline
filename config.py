@@ -32,25 +32,15 @@ STAGE3_EXP_C_BANDS = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 #   type="folder" → gdown.download_folder (e.g. GEE export folder per year)
 #   type="file"   → gdown.download         (single file)
 #
-# Example (folder):
-#   "s2_2022": {"type": "folder", "id": "1ABC...", "output_dir": str(S2_PROCESSED_DIR)}
+# Example (folder — all S2 files in one GDrive folder):
+#   "s2": {"type": "folder", "id": "1ABC...", "output_dir": str(S2_PROCESSED_DIR)}
 # Example (file):
 #   "cdl_2022": {"type": "file", "id": "1DEF...", "output_path": str(CDL_BY_YEAR["2022"])}
 
 GDRIVE_FILES = {
-    "s2_2022": {
+    "s2": {
         "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2022 S2 processed TIFs
-        "output_dir": str(S2_PROCESSED_DIR),
-    },
-    "s2_2023": {
-        "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2023 S2 processed TIFs
-        "output_dir": str(S2_PROCESSED_DIR),
-    },
-    "s2_2024": {
-        "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2024 S2 processed TIFs
+        "id":         "",          # <-- GDrive folder ID for all years' S2 processed TIFs
         "output_dir": str(S2_PROCESSED_DIR),
     },
     "cdl_2022": {
@@ -96,9 +86,10 @@ for _cdl_id, _model_id in CLASS_REMAP.items():
         REMAP_LUT[_cdl_id] = _model_id
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
-MLFLOW_TRACKING_URI       = "https://mlflow-geoai.stelarea.com"
-MLFLOW_EXPERIMENT_FEATURE = "cropmap_feature_analysis_s2"
-MLFLOW_EXPERIMENT_TRAIN   = "cropmap_segmentation_s2"
+MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
+MLFLOW_EXPERIMENT_PIPELINE = "cropmap_pipeline_runs"
+MLFLOW_EXPERIMENT_FEATURE  = "cropmap_feature_analysis_s2"
+MLFLOW_EXPERIMENT_TRAIN    = "cropmap_segmentation_s2"
 
 # ── Stage 1 hyperparameters ────────────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5 % of labeled crop pixels for GSI computation
