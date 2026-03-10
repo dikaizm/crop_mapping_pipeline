@@ -58,7 +58,7 @@ from crop_mapping_pipeline.config import (
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from geoai.geoai.utils.device import get_device
-from src.models import DeepLabV3PlusCBAM, build_segformer
+from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
 
 log = logging.getLogger(__name__)
 DEVICE = get_device()

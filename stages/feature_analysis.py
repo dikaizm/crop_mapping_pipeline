@@ -39,7 +39,7 @@ sys.path.insert(0, str(_ROOT))
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow
 
-import src.utils.band_selection as bs
+import crop_mapping_pipeline.utils.band_selection as bs
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR,
     S2_BAND_NAMES, S2_NODATA, KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
@@ -354,12 +354,17 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
                s2_files: list, cdl_path: str, run_ts: str) -> dict:
     """
     Per-crop binary CNN forward selection.
+
+    MLflow structure:
+        stage2v2_binary_fwd_{ts}          — parent: hyperparams + summary
+        └── stage2v2_{crop_name}_{ts}     — child per crop: IoU curve, K*, accepted bands
+
     Returns selected_per_crop = {crop_id: [band_name, ...]}.
     """
     band_index = {name: i for i, name in enumerate(all_bandnames)}
 
     _mlflow_setup()
-    stage2_run = mlflow.start_run(run_name=f"stage2v2_binary_fwd_{run_ts}")
+    parent_run = mlflow.start_run(run_name=f"stage2v2_binary_fwd_{run_ts}")
     mlflow.log_params({
         "stage":          "2_per_crop_binary_forward",
         "version":        "v2",
@@ -374,11 +379,12 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
         "max_bands":      S2_MAX_BANDS,
         "top_k_per_crop": TOP_K_PER_CROP,
         "device":         DEVICE,
+        "n_crops":        len(KEEP_CLASSES),
     })
 
     selected_per_crop: dict[int, list] = {}
     history_per_crop:  dict[int, list] = {}
-    global_step = 0
+    crop_run_ids:      dict[int, str]  = {}
 
     try:
         for crop_id in KEEP_CLASSES:
@@ -393,60 +399,83 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
 
             selected, prev_iou, no_improve_cnt, history = [], 0.0, 0, []
 
-            for step, band in enumerate(candidates):
-                if len(selected) >= S2_MAX_BANDS:
-                    log.info(f"  max_bands={S2_MAX_BANDS} reached — stopping")
-                    break
-                if no_improve_cnt >= S2_NO_IMPROVE:
-                    log.info(f"  {S2_NO_IMPROVE} consecutive rejections — stopping")
-                    break
-
-                trial_indices = [band_index[b] for b in selected + [band]]
-                t0            = time.time()
-                iou           = _train_eval_binary(trial_indices, crop_id, binary_lut,
-                                                   s2_files, cdl_path)
-                elapsed       = time.time() - t0
-                gain          = iou - prev_iou
-                accepted      = gain >= S2_DELTA
-
-                if accepted:
-                    selected = selected + [band]
-                    prev_iou = iou
-                    no_improve_cnt = 0
-                else:
-                    no_improve_cnt += 1
-
-                history.append({
-                    "crop_id":   crop_id, "crop_name": crop_name,
-                    "step":      step,    "band":      band,
-                    "n_bands":   len(selected),
-                    "iou_class1":round(iou,  4), "gain":  round(gain, 4),
-                    "accepted":  accepted,        "elapsed_s": round(elapsed),
+            # ── Nested run per crop ───────────────────────────────────────────
+            with mlflow.start_run(
+                run_name=f"stage2v2_{crop_name.replace('/', '-')}_{run_ts}",
+                nested=True,
+            ) as crop_run:
+                mlflow.log_params({
+                    "crop_id":         crop_id,
+                    "crop_name":       crop_name,
+                    "n_candidates":    len(candidates),
                 })
 
-                mlflow.log_metrics({
-                    f"crop_{crop_id}_iou":      iou,
-                    f"crop_{crop_id}_gain":     gain,
-                    f"crop_{crop_id}_accepted": int(accepted),
-                }, step=global_step)
-                global_step += 1
+                for step, band in enumerate(candidates):
+                    if len(selected) >= S2_MAX_BANDS:
+                        log.info(f"  max_bands={S2_MAX_BANDS} reached — stopping")
+                        break
+                    if no_improve_cnt >= S2_NO_IMPROVE:
+                        log.info(f"  {S2_NO_IMPROVE} consecutive rejections — stopping")
+                        break
 
-                tag = "✅" if accepted else "❌"
-                log.info(f"  {tag} +{band:<22} IoU={iou:.4f} gain={gain:+.4f} ({elapsed:.0f}s)")
+                    trial_indices = [band_index[b] for b in selected + [band]]
+                    t0            = time.time()
+                    iou           = _train_eval_binary(trial_indices, crop_id, binary_lut,
+                                                       s2_files, cdl_path)
+                    elapsed       = time.time() - t0
+                    gain          = iou - prev_iou
+                    accepted      = gain >= S2_DELTA
+
+                    if accepted:
+                        selected = selected + [band]
+                        prev_iou = iou
+                        no_improve_cnt = 0
+                    else:
+                        no_improve_cnt += 1
+
+                    history.append({
+                        "crop_id":    crop_id,   "crop_name": crop_name,
+                        "step":       step,       "band":      band,
+                        "n_bands":    len(selected),
+                        "iou_class1": round(iou,  4), "gain":  round(gain, 4),
+                        "accepted":   accepted,        "elapsed_s": round(elapsed),
+                    })
+
+                    # step = band rank within this crop → clean IoU curve per crop
+                    mlflow.log_metrics({
+                        "iou_class1": iou,
+                        "gain":       gain,
+                        "accepted":   int(accepted),
+                        "n_selected": len(selected),
+                    }, step=step)
+
+                    tag = "✅" if accepted else "❌"
+                    log.info(f"  {tag} +{band:<22} IoU={iou:.4f} gain={gain:+.4f} ({elapsed:.0f}s)")
+
+                # Summary metrics + tags for this crop
+                mlflow.log_metrics({"final_iou": prev_iou, "k_star": len(selected)})
+                mlflow.set_tag("selected_bands", str(selected))
+                mlflow.set_tag("stop_reason",
+                    "max_bands" if len(selected) >= S2_MAX_BANDS
+                    else "no_improve" if no_improve_cnt >= S2_NO_IMPROVE
+                    else "exhausted"
+                )
+
+                crop_run_ids[crop_id] = crop_run.info.run_id
 
             selected_per_crop[crop_id] = selected
             history_per_crop[crop_id]  = history
-
-            mlflow.log_metrics({
-                f"crop_{crop_id}_final_iou":  prev_iou,
-                f"crop_{crop_id}_n_selected": len(selected),
-            }, step=global_step)
-            mlflow.set_tag(f"stage2_selected_{crop_id}", str(selected))
             log.info(f"  → {crop_name}: K*={len(selected)}, final IoU={prev_iou:.4f}")
 
-        _save_results(selected_per_crop, history_per_crop, stage2_run.info.run_id)
+            # Mirror summary to parent so it's visible without drilling into children
+            mlflow.log_metrics({
+                f"crop_{crop_id}_final_iou": prev_iou,
+                f"crop_{crop_id}_k_star":    len(selected),
+            })
+
+        _save_results(selected_per_crop, history_per_crop, crop_run_ids)
         mlflow.end_run(status="FINISHED")
-        log.info(f"Stage 2 MLflow run_id: {stage2_run.info.run_id}")
+        log.info(f"Stage 2 parent run_id: {parent_run.info.run_id}")
 
     except Exception as e:
         mlflow.end_run(status="FAILED")
@@ -455,12 +484,13 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
     return selected_per_crop
 
 
-def _save_results(selected_per_crop: dict, history_per_crop: dict, run_id: str) -> None:
+def _save_results(selected_per_crop: dict, history_per_crop: dict,
+                  crop_run_ids: dict) -> None:
     """Save stage2v2_per_crop_results.csv and stage3_exp_c_bands.txt."""
     rows = []
     for crop_id in KEEP_CLASSES:
-        sel      = selected_per_crop.get(crop_id, [])
-        hist     = history_per_crop.get(crop_id, [])
+        sel       = selected_per_crop.get(crop_id, [])
+        hist      = history_per_crop.get(crop_id, [])
         final_iou = max((r["iou_class1"] for r in hist if r["accepted"]), default=0.0)
 
         dates    = sorted(set(
@@ -477,7 +507,7 @@ def _save_results(selected_per_crop: dict, history_per_crop: dict, run_id: str) 
             "key_bands":      ", ".join(spectral),
             "selected_bands": str(sel),
             "final_iou_c1":   round(final_iou, 4),
-            "mlflow_run_id":  run_id,
+            "mlflow_run_id":  crop_run_ids.get(crop_id, ""),
         })
 
     os.makedirs(os.path.dirname(STAGE2_RESULTS_CSV), exist_ok=True)

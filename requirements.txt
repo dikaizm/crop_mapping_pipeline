@@ -1,0 +1,24 @@
+# crop_mapping_pipeline dependencies
+# Python >= 3.10 required
+
+# ── Core scientific stack ──────────────────────────────────────────────────────
+numpy>=2.2
+pandas>=2.3
+scikit-learn>=1.7
+matplotlib>=3.10
+
+# ── Geospatial ─────────────────────────────────────────────────────────────────
+rasterio>=1.4
+
+# ── Deep learning ─────────────────────────────────────────────────────────────
+# For GPU server, install PyTorch with the appropriate CUDA version instead:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.9
+segmentation-models-pytorch>=0.5
+timm>=1.0
+
+# ── Experiment tracking ────────────────────────────────────────────────────────
+mlflow>=3.10
+
+# ── Data download ─────────────────────────────────────────────────────────────
+gdown>=5.2
