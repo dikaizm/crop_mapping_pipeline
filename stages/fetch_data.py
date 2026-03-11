@@ -100,14 +100,7 @@ def _build_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def download_files_by_name(filenames: list, year: str, output_dir: str,
-                           overwrite: bool = False, raw: bool = False) -> None:
-    """
-    Download specific files by filename from a GDrive folder for a given year.
-
-    raw=False → looks up in GDRIVE_FILES s2_{year} (processed folder)
-    raw=True  → looks up in GDRIVE_RAW_S2_FOLDER_IDS (raw folder)
-    """
+def _get_folder_id(year: str, raw: bool) -> str:
     if raw:
         folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(year)
         if not folder_id:
@@ -117,9 +110,48 @@ def download_files_by_name(filenames: list, year: str, output_dir: str,
         if not folder_entry or not folder_entry.get("id"):
             raise ValueError(f"No GDrive folder configured for year {year} (s2_{year})")
         folder_id = folder_entry["id"]
+    return folder_id
 
-    service   = _build_drive_service()
+
+def _list_folder_gdown(folder_id: str) -> list:
+    """Return list of {id, name} dicts by scraping the GDrive folder via gdown internals."""
+    import gdown.folder as gdf
+    # gdown.folder.get_directory_structure returns a nested dict; use _parse_folder
+    files = gdf._get_directory_structure(folder_id, remaining_ok=True, use_cookies=False)
+    return files  # list of (title, id) or similar depending on gdown version
+
+
+def _list_folder_contents(folder_id: str) -> dict:
+    """Return {filename: file_id} mapping via gdown (no OAuth needed)."""
+    entries = gdown.download_folder(id=folder_id, skip_download=True, quiet=True)
+    if not entries:
+        return {}
+    return {e.path: e.id for e in entries}
+
+
+def list_gdrive_files(year: str, raw: bool = False) -> None:
+    """List all filenames in the GDrive folder for a given year (no OAuth needed)."""
+    folder_id = _get_folder_id(year, raw)
+    log.info(f"Listing GDrive folder {folder_id} ...")
+    name_to_id = _list_folder_contents(folder_id)
+    print(f"\nFiles in GDrive folder (year={year}, raw={raw}) — {len(name_to_id)} total:")
+    for name in sorted(name_to_id.keys()):
+        print(f"  {name}")
+
+
+def download_files_by_name(filenames: list, year: str, output_dir: str,
+                           overwrite: bool = False, raw: bool = False) -> None:
+    """
+    Download specific files by filename from a GDrive folder for a given year.
+
+    Uses gdown (public link access) — no OAuth required.
+    Resolves filename → file ID via gdown folder listing, then downloads individually.
+    """
+    folder_id = _get_folder_id(year, raw)
     os.makedirs(output_dir, exist_ok=True)
+
+    log.info(f"Fetching file listing for folder {folder_id} ...")
+    name_to_id = _list_folder_contents(folder_id)
 
     for fname in filenames:
         out_path = os.path.join(output_dir, fname)
@@ -127,20 +159,16 @@ def download_files_by_name(filenames: list, year: str, output_dir: str,
             log.info(f"Already exists — skip: {fname}")
             continue
 
-        # Query GDrive for the file by name within the folder
-        query  = f"name = '{fname}' and '{folder_id}' in parents and trashed = false"
-        result = service.files().list(q=query, fields="files(id, name)").execute()
-        items  = result.get("files", [])
-
-        if not items:
-            log.error(f"File not found in GDrive folder (year={year}): {fname}")
+        file_id = name_to_id.get(fname)
+        if not file_id:
+            log.error(
+                f"File not found in GDrive folder (year={year}): {fname}\n"
+                f"  Run --list-files to see available filenames."
+            )
             continue
-        if len(items) > 1:
-            log.warning(f"Multiple matches for '{fname}' — using first result")
 
-        file_id = items[0]["id"]
         log.info(f"Downloading {fname}  (id={file_id})")
-        url = f"https://drive.google.com/uc?id={file_id}"
+        url    = f"https://drive.google.com/uc?id={file_id}"
         result = gdown.download(url=url, output=out_path, quiet=False, resume=not overwrite)
         if result is None:
             log.error(f"Download failed: {fname}")
@@ -215,6 +243,7 @@ def main(
     files       : list = None,
     overwrite   : bool = False,
     verify_only : bool = False,
+    list_files  : bool = False,
     delete      : bool = False,
     raw         : bool = False,
     raw_s2_dir  : str  = None,
@@ -224,6 +253,11 @@ def main(
     if verify_only:
         ok = verify_data(years)
         sys.exit(0 if ok else 1)
+
+    if list_files:
+        for yr in years:
+            list_gdrive_files(yr, raw=raw)
+        return
 
     # ── Download specific files by filename ───────────────────────────────────
     if files:
@@ -322,6 +356,10 @@ if __name__ == "__main__":
         "--raw-s2-dir", default=None,
         help="Output directory for raw S2 files (default: data/raw/s2/)",
     )
+    parser.add_argument(
+        "--list-files", action="store_true",
+        help="List all filenames in the GDrive folder for the given year(s) without downloading",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -335,6 +373,7 @@ if __name__ == "__main__":
         files       = args.files,
         overwrite   = args.overwrite,
         verify_only = args.verify_only,
+        list_files  = args.list_files,
         delete      = args.delete,
         raw         = args.raw,
         raw_s2_dir  = args.raw_s2_dir,
