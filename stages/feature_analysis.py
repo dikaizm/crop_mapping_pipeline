@@ -334,7 +334,8 @@ def _compute_iou_class1(preds: torch.Tensor, labels: torch.Tensor) -> float:
 
 
 def _train_eval_binary(band_indices: list, crop_id: int, binary_lut: np.ndarray,
-                       s2_files: list, cdl_path: str) -> float:
+                       s2_files: list, cdl_path: str,
+                       band_label: str = "") -> float:
     """Train a binary U-Net oracle for crop_id vs. rest. Returns best IoU(class 1)."""
     dataset = RasterPatchDataset(
         s2_paths=s2_files, cdl_path=cdl_path,
@@ -360,15 +361,24 @@ def _train_eval_binary(band_indices: list, crop_id: int, binary_lut: np.ndarray,
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()   # no ignore_index: binary, class 0 is informative
 
+    log.info(f"    U-Net  in_ch={len(band_indices)}  "
+             f"train={n_train} patches  val={n_val} patches  "
+             f"max_epochs={S2_EPOCHS}  patience={S2_PATIENCE}"
+             + (f"  [{band_label}]" if band_label else ""))
+
     best_iou, no_improve = 0.0, 0
 
-    for _ in range(S2_EPOCHS):
+    for epoch in range(S2_EPOCHS):
         model.train()
+        train_loss, n_batches = 0.0, 0
         for imgs, masks in train_dl:
             imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
             optimizer.zero_grad()
-            criterion(model(imgs), masks).backward()
+            loss = criterion(model(imgs), masks)
+            loss.backward()
             optimizer.step()
+            train_loss += loss.item()
+            n_batches  += 1
 
         model.eval()
         all_preds, all_labels = [], []
@@ -378,13 +388,20 @@ def _train_eval_binary(band_indices: list, crop_id: int, binary_lut: np.ndarray,
                 all_preds.append(preds.cpu())
                 all_labels.append(masks)
 
-        iou = _compute_iou_class1(torch.cat(all_preds), torch.cat(all_labels))
+        iou       = _compute_iou_class1(torch.cat(all_preds), torch.cat(all_labels))
+        avg_loss  = train_loss / max(n_batches, 1)
+        improved  = iou > best_iou + 1e-4
+        marker    = " *" if improved else ""
+        log.info(f"    epoch {epoch+1:>2}/{S2_EPOCHS}  loss={avg_loss:.4f}  "
+                 f"IoU(c1)={iou:.4f}{marker}  "
+                 f"[best={best_iou:.4f}  no_improve={no_improve}/{S2_PATIENCE}]")
 
-        if iou > best_iou + 1e-4:
+        if improved:
             best_iou, no_improve = iou, 0
         else:
             no_improve += 1
             if no_improve >= S2_PATIENCE:
+                log.info(f"    Early stop at epoch {epoch+1} (patience={S2_PATIENCE})")
                 break
 
     return best_iou
@@ -426,13 +443,22 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
     history_per_crop:  dict[int, list] = {}
     crop_run_ids:      dict[int, str]  = {}
 
+    n_crops     = len(KEEP_CLASSES)
+    total_cands = sum(len(v) for v in candidates_per_crop.values())
+    log.info(f"\nStage 2 — per-crop binary CNN forward selection")
+    log.info(f"  Crops: {n_crops}  |  Total candidates: {total_cands}  "
+             f"|  δ={S2_DELTA}  max_bands={S2_MAX_BANDS}  no_improve={S2_NO_IMPROVE}")
+    log.info(f"  Epochs={S2_EPOCHS}  patience={S2_PATIENCE}  "
+             f"batch={S2_BATCH_SIZE}  patch={S2_PATCH_SIZE}px  stride={S2_STRIDE}px")
+
     try:
-        for crop_id in KEEP_CLASSES:
+        for crop_idx, crop_id in enumerate(KEEP_CLASSES, 1):
             crop_name  = CDL_CLASS_NAMES[crop_id]
             candidates = candidates_per_crop[crop_id]
 
-            log.info(f"\n{'='*55}")
-            log.info(f"Crop: {crop_name} (id={crop_id}) — {len(candidates)} candidates")
+            log.info(f"\n{'='*60}")
+            log.info(f"[{crop_idx}/{n_crops}] Crop: {crop_name} (CDL id={crop_id}) "
+                     f"— {len(candidates)} candidates")
 
             binary_lut          = np.zeros(256, dtype=np.int64)
             binary_lut[crop_id] = 1
@@ -458,11 +484,15 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
                         log.info(f"  {S2_NO_IMPROVE} consecutive rejections — stopping")
                         break
 
-                    trial_indices = [band_index[b] for b in selected + [band]]
-                    t0            = time.time()
-                    iou           = _train_eval_binary(trial_indices, crop_id, binary_lut,
-                                                       s2_files, cdl_path)
-                    elapsed       = time.time() - t0
+                    trial_bands   = selected + [band]
+                    trial_indices = [band_index[b] for b in trial_bands]
+                    log.info(f"\n  --- step {step+1}/{len(candidates)}  "
+                             f"trial band: {band}  "
+                             f"(selected so far: {len(selected)}) ---")
+                    t0      = time.time()
+                    iou     = _train_eval_binary(trial_indices, crop_id, binary_lut,
+                                                 s2_files, cdl_path, band_label=band)
+                    elapsed = time.time() - t0
                     gain          = iou - prev_iou
                     accepted      = gain >= S2_DELTA
 
@@ -505,7 +535,10 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
 
             selected_per_crop[crop_id] = selected
             history_per_crop[crop_id]  = history
-            log.info(f"  → {crop_name}: K*={len(selected)}, final IoU={prev_iou:.4f}")
+            log.info(f"\n  → [{crop_idx}/{n_crops}] {crop_name}: "
+                     f"K*={len(selected)}  final IoU(c1)={prev_iou:.4f}")
+            if selected:
+                log.info(f"     Selected bands: {selected}")
 
             # Mirror summary to parent so it's visible without drilling into children
             mlflow.log_metrics({
