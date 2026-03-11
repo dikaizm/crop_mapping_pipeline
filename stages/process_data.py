@@ -390,7 +390,7 @@ def generate_oauth_token():
 
     flow  = InstalledAppFlow.from_client_secrets_file(
         str(GDRIVE_OAUTH_SECRET),
-        scopes=["https://www.googleapis.com/auth/drive.file"],
+        scopes=["https://www.googleapis.com/auth/drive"],
     )
     creds = flow.run_local_server(port=0)
 

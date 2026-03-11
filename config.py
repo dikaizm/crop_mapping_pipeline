@@ -68,7 +68,7 @@ GDRIVE_FILES = {
 # Raw S2 GDrive folder IDs — used by process_data.py to fetch raw files before processing
 GDRIVE_RAW_S2_FOLDER_IDS = {
     "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
-    "2023": "1m6d1o0TULs4Bpy_34q1LTZwsdg1jG74o",
+    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
     "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
 }
 

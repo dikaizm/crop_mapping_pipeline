@@ -122,16 +122,28 @@ def _list_folder_gdown(folder_id: str) -> list:
 
 
 def _list_folder_contents(folder_id: str) -> dict:
-    """Return {filename: file_id} mapping via gdown (no OAuth needed)."""
-    entries = gdown.download_folder(id=folder_id, skip_download=True, quiet=True)
-    if not entries:
-        return {}
-    return {e.path: e.id for e in entries}
+    """Return {filename: file_id} mapping via OAuth GDrive API."""
+    service    = _build_drive_service()
+    name_to_id = {}
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="nextPageToken, files(id, name)",
+            pageSize=1000,
+            pageToken=page_token,
+        ).execute()
+        for f in resp.get("files", []):
+            name_to_id[f["name"]] = f["id"]
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return name_to_id
 
 
 def list_gdrive_files(year: str, raw: bool = False) -> None:
-    """List all filenames in the GDrive folder for a given year (no OAuth needed)."""
-    folder_id = _get_folder_id(year, raw)
+    """List all filenames in the GDrive folder for a given year."""
+    folder_id  = _get_folder_id(year, raw)
     log.info(f"Listing GDrive folder {folder_id} ...")
     name_to_id = _list_folder_contents(folder_id)
     print(f"\nFiles in GDrive folder (year={year}, raw={raw}) — {len(name_to_id)} total:")
@@ -142,12 +154,14 @@ def list_gdrive_files(year: str, raw: bool = False) -> None:
 def download_files_by_name(filenames: list, year: str, output_dir: str,
                            overwrite: bool = False, raw: bool = False) -> None:
     """
-    Download specific files by filename from a GDrive folder for a given year.
-
-    Uses gdown (public link access) — no OAuth required.
-    Resolves filename → file ID via gdown folder listing, then downloads individually.
+    Download specific files by filename from a GDrive folder via OAuth API.
+    Requires token generated with 'drive' scope (python stages/process_data.py --auth).
     """
-    folder_id = _get_folder_id(year, raw)
+    from googleapiclient.http import MediaIoBaseDownload
+    import io
+
+    folder_id  = _get_folder_id(year, raw)
+    service    = _build_drive_service()
     os.makedirs(output_dir, exist_ok=True)
 
     log.info(f"Fetching file listing for folder {folder_id} ...")
@@ -167,11 +181,16 @@ def download_files_by_name(filenames: list, year: str, output_dir: str,
             )
             continue
 
-        log.info(f"Downloading {fname}  (id={file_id})")
-        url    = f"https://drive.google.com/uc?id={file_id}"
-        result = gdown.download(url=url, output=out_path, quiet=False, resume=not overwrite)
-        if result is None:
-            log.error(f"Download failed: {fname}")
+        log.info(f"Downloading {fname}  (id={file_id}) → {out_path}")
+        request = service.files().get_media(fileId=file_id)
+        with open(out_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    log.info(f"  {fname}: {int(status.progress() * 100)}%")
+        log.info(f"  Done: {fname}")
 
 
 # ── Delete helpers ─────────────────────────────────────────────────────────────
