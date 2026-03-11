@@ -67,15 +67,62 @@ def download_file(file_id: str, output_path: str, overwrite: bool = False) -> st
 
 
 def download_folder(folder_id: str, output_dir: str, overwrite: bool = False) -> None:
-    """Download an entire Google Drive folder."""
+    """Download an entire Google Drive folder.
+
+    Uses OAuth API (drive scope) if token exists — avoids gdown rate limits.
+    Falls back to gdown for public folders without a token.
+    """
     os.makedirs(output_dir, exist_ok=True)
     log.info(f"Downloading GDrive folder {folder_id} → {output_dir}")
-    gdown.download_folder(
-        id=folder_id,
-        output=output_dir,
-        quiet=False,
-        resume=not overwrite,
-    )
+
+    if GDRIVE_OAUTH_TOKEN.exists():
+        _download_folder_oauth(folder_id, output_dir, overwrite)
+    else:
+        log.info("No OAuth token found — falling back to gdown")
+        gdown.download_folder(
+            id=folder_id,
+            output=output_dir,
+            quiet=False,
+            resume=not overwrite,
+        )
+
+
+def _download_folder_oauth(folder_id: str, output_dir: str, overwrite: bool) -> None:
+    """Download all files in a GDrive folder via OAuth API (MediaIoBaseDownload)."""
+    from googleapiclient.http import MediaIoBaseDownload
+
+    service    = _build_drive_service()
+    name_to_id = {}
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="nextPageToken, files(id, name)",
+            pageSize=1000,
+            pageToken=page_token,
+        ).execute()
+        for f in resp.get("files", []):
+            name_to_id[f["name"]] = f["id"]
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    log.info(f"  {len(name_to_id)} files found in folder")
+    for fname, file_id in sorted(name_to_id.items()):
+        out_path = os.path.join(output_dir, fname)
+        if not overwrite and os.path.exists(out_path):
+            log.info(f"  Already exists — skip: {fname}")
+            continue
+        log.info(f"  Downloading {fname} ...")
+        request = service.files().get_media(fileId=file_id)
+        with open(out_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    log.info(f"    {fname}: {int(status.progress() * 100)}%")
+        log.info(f"  Done: {fname}")
 
 
 # ── GDrive file-by-name download ───────────────────────────────────────────────
