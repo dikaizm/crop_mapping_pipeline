@@ -34,6 +34,7 @@ import sys
 import logging
 import argparse
 import pathlib
+import subprocess
 from glob import glob
 
 import numpy as np
@@ -245,6 +246,20 @@ def delete_raw_s2(s2_raw_paths: list) -> None:
     log.info(f"  Freed: {freed/1e9:.2f} GB")
 
 
+# ── Shutdown ───────────────────────────────────────────────────────────────────
+
+def _schedule_shutdown(delay_min: int = 8) -> None:
+    """Schedule a VPS shutdown after `delay_min` minutes (Linux only)."""
+    log.warning("=" * 60)
+    log.warning(f"VPS SHUTDOWN in {delay_min} minutes.")
+    log.warning("Cancel with:  sudo shutdown -c")
+    log.warning("=" * 60)
+    try:
+        subprocess.run(["sudo", "shutdown", "-h", f"+{delay_min}"], check=True)
+    except Exception as e:
+        log.error(f"Failed to schedule shutdown: {e}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(
@@ -254,6 +269,7 @@ def main(
     data_dir    : str   = None,
     skip_upload : bool  = False,
     skip_delete : bool  = False,
+    shutdown    : bool  = False,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
 
@@ -322,6 +338,9 @@ def main(
 
         log.info(f"Year {yr} done.\n")
 
+    if shutdown:
+        _schedule_shutdown(delay_min=8)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -354,6 +373,10 @@ if __name__ == "__main__":
         "--skip-delete", action="store_true",
         help="Keep raw S2 files after processing (do not delete).",
     )
+    parser.add_argument(
+        "--shutdown", action="store_true",
+        help="Shut down the VPS 8 minutes after all processing completes (Linux only).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -369,4 +392,5 @@ if __name__ == "__main__":
         data_dir    = args.data_dir,
         skip_upload = args.skip_upload,
         skip_delete = args.skip_delete,
+        shutdown    = args.shutdown,
     )
