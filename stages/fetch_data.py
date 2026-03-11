@@ -126,9 +126,8 @@ def verify_data(years=None) -> bool:
             all_ok = False
 
     print("\nCDL filtered rasters:")
-    for yr in sorted(years):
-        path   = CDL_BY_YEAR.get(yr, "")
-        exists = path and os.path.exists(path)
+    for yr, path in sorted(CDL_BY_YEAR.items()):
+        exists = os.path.exists(path)
         status = "✅" if exists else "❌ MISSING"
         print(f"  {yr}: {status}  {path}")
         if not exists:

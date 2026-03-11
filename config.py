@@ -38,43 +38,38 @@ STAGE3_EXP_C_BANDS = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 #   "cdl_2022": {"type": "file", "id": "1DEF...", "output_path": str(CDL_BY_YEAR["2022"])}
 
 GDRIVE_FILES = {
-    # S2 processed TIFs — one GDrive folder per year (set each ID separately)
+    # S2 processed TIFs — one GDrive folder per year
     "s2_2022": {
         "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2022 processed S2 TIFs
+        "id":         "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",
         "output_dir": str(S2_PROCESSED_DIR),
         "year":       "2022",
     },
     "s2_2023": {
         "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2023 processed S2 TIFs
+        "id":         "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
         "output_dir": str(S2_PROCESSED_DIR),
         "year":       "2023",
     },
     "s2_2024": {
         "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for 2024 processed S2 TIFs
+        "id":         "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
         "output_dir": str(S2_PROCESSED_DIR),
         "year":       "2024",
     },
-    "cdl_2022": {
-        "type":        "file",
-        "id":          "",         # <-- GDrive file ID for cdl_2022_study_area_filtered.tif
-        "output_path": str(CDL_BY_YEAR["2022"]),
-        "year":        "2022",
+    # CDL filtered rasters — all years in one folder (small files, download together)
+    "cdl": {
+        "type":       "folder",
+        "id":         "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0",
+        "output_dir": str(CDL_DIR),
     },
-    "cdl_2023": {
-        "type":        "file",
-        "id":          "",
-        "output_path": str(CDL_BY_YEAR["2023"]),
-        "year":        "2023",
-    },
-    "cdl_2024": {
-        "type":        "file",
-        "id":          "",
-        "output_path": str(CDL_BY_YEAR["2024"]),
-        "year":        "2024",
-    },
+}
+
+# Raw S2 GDrive folder IDs — used by process_data.py to fetch raw files before processing
+GDRIVE_RAW_S2_FOLDER_IDS = {
+    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
+    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
+    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
 }
 
 # ── S2 metadata ────────────────────────────────────────────────────────────────
@@ -107,14 +102,14 @@ for _cdl_id, _model_id in CLASS_REMAP.items():
 # GDRIVE_CREDENTIALS: path to a Google service-account JSON key file.
 #   Create one at: console.cloud.google.com → IAM → Service Accounts → Keys
 #   Share the target GDrive folders with the service-account email.
-GDRIVE_CREDENTIALS = PROJECT_ROOT / "ssh" / "gdrive_service_account.json"
-# One GDrive folder per year — must match the folder IDs in GDRIVE_FILES above
+GDRIVE_CREDENTIALS = Path(__file__).parent / "ssh" / "gdrive_service_account.json"
+# Same folder IDs as GDRIVE_FILES above — upload destination matches download source
 GDRIVE_PROCESSED_S2_FOLDER_IDS = {
-    "2022": "",   # <-- GDrive folder ID to upload 2022 processed S2 TIFs
-    "2023": "",   # <-- GDrive folder ID to upload 2023 processed S2 TIFs
-    "2024": "",   # <-- GDrive folder ID to upload 2024 processed S2 TIFs
+    "2022": "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",
+    "2023": "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
+    "2024": "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
 }
-GDRIVE_PROCESSED_CDL_FOLDER_ID = ""   # <-- GDrive folder ID to upload processed CDL TIFs
+GDRIVE_PROCESSED_CDL_FOLDER_ID = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
 MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
