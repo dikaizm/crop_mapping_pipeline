@@ -118,7 +118,6 @@ def download_files_by_name(filenames: list, year: str, output_dir: str,
             raise ValueError(f"No GDrive folder configured for year {year} (s2_{year})")
         folder_id = folder_entry["id"]
 
-    folder_id = folder_entry["id"]
     service   = _build_drive_service()
     os.makedirs(output_dir, exist_ok=True)
 
