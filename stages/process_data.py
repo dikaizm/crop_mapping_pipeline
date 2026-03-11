@@ -324,7 +324,7 @@ def main(
         log.info("=" * 60)
 
         # ── Locate raw S2 files for this year ─────────────────────────────────
-        s2_dir      = pathlib.Path(raw_s2_dir) if raw_s2_dir else _ROOT / "data" / "raw" / "s2"
+        s2_dir      = pathlib.Path(raw_s2_dir) / yr if raw_s2_dir else _ROOT / "data" / "raw" / "s2" / yr
         s2_raw_year = sorted(glob(str(s2_dir / f"S2H_{yr}_*.tif")))
         if not s2_raw_year:
             log.warning(f"  No raw S2 files found for {yr} in {s2_dir} — skipping")
@@ -350,7 +350,7 @@ def main(
 
         # ── Process S2 ────────────────────────────────────────────────────────
         log.info(f"  Processing {len(s2_raw_year)} S2 files...")
-        s2_processed = process_s2_year(s2_raw_year, str(S2_PROCESSED_DIR))
+        s2_processed = process_s2_year(s2_raw_year, str(S2_PROCESSED_DIR / yr))
 
         # ── Upload ────────────────────────────────────────────────────────────
         if not skip_upload:

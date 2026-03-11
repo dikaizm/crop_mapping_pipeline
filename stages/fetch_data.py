@@ -28,6 +28,7 @@ import sys
 import argparse
 import logging
 from glob import glob
+import pathlib
 from pathlib import Path
 
 import gdown
@@ -80,7 +81,7 @@ def download_folder(folder_id: str, output_dir: str, overwrite: bool = False) ->
 
 def delete_s2_year(year: str) -> None:
     """Delete all processed S2 files for a given year."""
-    pattern = str(S2_PROCESSED_DIR / f"S2H_{year}_*_processed.tif")
+    pattern = str(S2_PROCESSED_DIR / year / f"S2H_{year}_*_processed.tif")
     files   = sorted(glob(pattern))
     if not files:
         log.info(f"  [{year}] No S2 files to delete")
@@ -112,7 +113,7 @@ def verify_data(years=None) -> bool:
     years   = years or ALL_YEARS
     all_ok  = True
 
-    s2_files = sorted(glob(str(S2_PROCESSED_DIR / "*_processed.tif")))
+    s2_files = sorted(glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")))
     by_year: dict[str, list] = {}
     for p in s2_files:
         yr = os.path.basename(p).split("_")[1]
@@ -156,14 +157,15 @@ def main(
 
     if raw:
         # ── Download raw S2 files ─────────────────────────────────────────────
-        raw_dir = raw_s2_dir or str(PROCESSED_DIR.parent / "raw" / "s2")
+        base_raw_dir = raw_s2_dir or str(PROCESSED_DIR.parent / "raw" / "s2")
         for yr in years:
             folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(yr)
             if not folder_id:
                 log.warning(f"GDRIVE_RAW_S2_FOLDER_IDS['{yr}'] not set — skipping")
                 continue
-            log.info(f"Downloading raw S2 for {yr} → {raw_dir}")
-            download_folder(folder_id, raw_dir, overwrite=overwrite)
+            yr_dir = str(pathlib.Path(base_raw_dir) / yr)
+            log.info(f"Downloading raw S2 for {yr} → {yr_dir}")
+            download_folder(folder_id, yr_dir, overwrite=overwrite)
     else:
         # ── Download processed files ──────────────────────────────────────────
         missing_ids = [k for k, v in GDRIVE_FILES.items() if not v.get("id")]

@@ -167,8 +167,7 @@ def load_data(s2_year: str = "2022", stage: int = 1):
     df and n_channels are None when stage=2.
     """
     s2_files = sorted([
-        p for p in glob(f"{S2_PROCESSED_DIR}/*_processed.tif")
-        if os.path.basename(p).split("_")[1] == s2_year
+        p for p in glob(f"{S2_PROCESSED_DIR}/{s2_year}/*_processed.tif")
     ])
     assert s2_files, f"No processed S2 files for year {s2_year} in {S2_PROCESSED_DIR}"
 

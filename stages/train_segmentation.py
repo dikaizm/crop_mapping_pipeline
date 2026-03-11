@@ -768,7 +768,7 @@ def main(
         FIGURES_DIR = data_dir / "figures"
         log.info(f"Data dir overridden to {data_dir}")
 
-    s2_processed = sorted(glob(str(S2_PROCESSED_DIR / "*_processed.tif")))
+    s2_processed = sorted(glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")))
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 

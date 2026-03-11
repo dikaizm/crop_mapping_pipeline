@@ -42,19 +42,19 @@ GDRIVE_FILES = {
     "s2_2022": {
         "type":       "folder",
         "id":         "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",
-        "output_dir": str(S2_PROCESSED_DIR),
+        "output_dir": str(S2_PROCESSED_DIR / "2022"),
         "year":       "2022",
     },
     "s2_2023": {
         "type":       "folder",
         "id":         "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
-        "output_dir": str(S2_PROCESSED_DIR),
+        "output_dir": str(S2_PROCESSED_DIR / "2023"),
         "year":       "2023",
     },
     "s2_2024": {
         "type":       "folder",
         "id":         "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
-        "output_dir": str(S2_PROCESSED_DIR),
+        "output_dir": str(S2_PROCESSED_DIR / "2024"),
         "year":       "2024",
     },
     # CDL filtered rasters — all years in one folder (small files, download together)
