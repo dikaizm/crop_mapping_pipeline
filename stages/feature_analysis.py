@@ -55,7 +55,7 @@ from crop_mapping_pipeline.config import (
 )
 
 # Handoff file written by Stage 1, read by Stage 2 when run separately
-STAGE1_CANDIDATES_JSON = PROCESSED_DIR / "stage1v2_candidates.json"
+STAGE1_CANDIDATES_JSON = PROCESSED_DIR / "s2" / "2022" / "stage1v2_candidates.json"
 
 log = logging.getLogger(__name__)
 
@@ -591,7 +591,7 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         }
         STAGE2_RESULTS_CSV      = processed / "stage2v2_per_crop_results.csv"
         STAGE3_EXP_C_BANDS      = processed / "stage3_exp_c_bands.txt"
-        STAGE1_CANDIDATES_JSON  = processed / "stage1v2_candidates.json"
+        STAGE1_CANDIDATES_JSON  = processed / "s2" / "2022" / "stage1v2_candidates.json"
         log.info(f"Data dir overridden to {processed}")
 
     os.makedirs(FIGURES_DIR, exist_ok=True)
