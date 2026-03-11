@@ -457,6 +457,13 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
     """
     band_index = {name: i for i, name in enumerate(all_bandnames)}
 
+    # Attach a file handler so all log output is also written to disk
+    log_path    = PROCESSED_DIR / f"stage2_run_{run_ts}.log"
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    _fh         = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+
     _mlflow_setup()
     parent_run = mlflow.start_run(run_name=f"stage2v2_binary_fwd_{run_ts}")
     mlflow.log_params({
@@ -584,10 +591,20 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
             })
 
         _save_results(selected_per_crop, history_per_crop, crop_run_ids)
-        mlflow.end_run(status="FINISHED")
+        mlflow.log_artifact(str(STAGE2_RESULTS_CSV))
+        mlflow.log_artifact(str(STAGE3_EXP_C_BANDS))
         log.info(f"Stage 2 parent run_id: {parent_run.info.run_id}")
+        logging.getLogger().removeHandler(_fh)
+        _fh.flush()
+        _fh.close()
+        mlflow.log_artifact(str(log_path))
+        mlflow.end_run(status="FINISHED")
 
     except Exception as e:
+        logging.getLogger().removeHandler(_fh)
+        _fh.flush()
+        _fh.close()
+        mlflow.log_artifact(str(log_path))
         mlflow.end_run(status="FAILED")
         raise e
 
