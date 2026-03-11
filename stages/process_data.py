@@ -135,7 +135,7 @@ def process_s2_year(s2_raw_paths: list, out_dir: str) -> list:
 
         with rasterio.open(src_path) as src:
             profile = src.profile.copy()
-            profile.update(dtype="float32", nodata=S2_NODATA, compress="lzw")
+            profile.update(dtype="float32", nodata=S2_NODATA, compress="deflate", predictor=2)
             data = src.read().astype(np.float32)
 
         invalid      = (data < 0) | np.isnan(data) | np.isinf(data)
