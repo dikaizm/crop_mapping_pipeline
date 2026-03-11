@@ -69,6 +69,15 @@ def _get_device() -> str:
         return "mps"
     return "cpu"
 
+
+def _device_label() -> str:
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        return f"cuda ({name})"
+    if torch.backends.mps.is_available():
+        return "mps (Apple Silicon)"
+    return "cpu"
+
 DEVICE = _get_device()
 
 
@@ -602,7 +611,7 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
             log.info(f"Stage 1 output already exists: {STAGE1_CANDIDATES_JSON}")
             log.info("Use --force to re-run.")
         else:
-            log.info(f"Device: {DEVICE}")
+            log.info(f"Device: {_device_label()}")
             df, all_bandnames, n_channels, s2_files, cdl_path = load_data(s2_year="2022")
             run_stage1(df, all_bandnames, n_channels, s2_files)
             log.info("Stage 1 complete.")
@@ -629,7 +638,7 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         run_ts              = payload["run_ts"]
         log.info(f"Loaded Stage 1 candidates from {STAGE1_CANDIDATES_JSON}  (run_ts={run_ts})")
 
-        log.info(f"Device: {DEVICE}")
+        log.info(f"Device: {_device_label()}")
         _, all_bandnames, _, s2_files, cdl_path = load_data(s2_year="2022", stage=2)
         run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
         log.info("Stage 2 complete.")
