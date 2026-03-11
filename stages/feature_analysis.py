@@ -35,7 +35,7 @@ import rasterio
 import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
 
 _ROOT = pathlib.Path(__file__).parent.parent   # crop_mapping_pipeline/
 sys.path.insert(0, str(_ROOT.parent))
@@ -160,6 +160,31 @@ class RasterPatchDataset(Dataset):
                 src.close()
             except Exception:
                 pass
+
+
+def _preload_patches(dataset: "RasterPatchDataset") -> TensorDataset:
+    """
+    Eagerly load all patches from a RasterPatchDataset into a TensorDataset.
+
+    RasterPatchDataset holds open rasterio file handles that cannot be pickled,
+    so DataLoader must use num_workers=0, starving the GPU.  By loading all patches
+    into RAM once we get a picklable TensorDataset that supports num_workers>0
+    and pin_memory=True, keeping the GPU fed.
+    """
+    n = len(dataset)
+    t0 = time.time()
+    log.info(f"  Pre-loading {n} patches into RAM...")
+    imgs_list, masks_list = [], []
+    for i in range(n):
+        img, mask = dataset[i]
+        imgs_list.append(img)
+        masks_list.append(mask)
+    imgs_t  = torch.stack(imgs_list)
+    masks_t = torch.stack(masks_list)
+    elapsed = time.time() - t0
+    mem_mb  = (imgs_t.nbytes + masks_t.nbytes) / 1e6
+    log.info(f"  Pre-load done: {n} patches  {mem_mb:.1f} MB  ({elapsed:.1f}s)")
+    return TensorDataset(imgs_t, masks_t)
 
 
 # ── Data loading ───────────────────────────────────────────────────────────────
@@ -348,22 +373,34 @@ def _train_eval_binary(band_indices: list, crop_id: int, binary_lut: np.ndarray,
         log.warning(f"    Only {len(dataset)} patches for crop {crop_id} — returning 0.0")
         return 0.0
 
-    n_val   = max(1, int(0.2 * len(dataset)))
-    n_train = len(dataset) - n_val
+    # Pre-load all patches into RAM so DataLoader can use multiple workers + pin_memory.
+    # RasterPatchDataset holds open rasterio handles (not picklable), forcing num_workers=0
+    # which starves the GPU.  TensorDataset is fully picklable.
+    tensor_ds = _preload_patches(dataset)
+
+    n_val   = max(1, int(0.2 * len(tensor_ds)))
+    n_train = len(tensor_ds) - n_val
     train_ds, val_ds = random_split(
-        dataset, [n_train, n_val],
+        tensor_ds, [n_train, n_val],
         generator=torch.Generator().manual_seed(42),
     )
 
-    train_dl  = DataLoader(train_ds, batch_size=S2_BATCH_SIZE, shuffle=True,  num_workers=0)
-    val_dl    = DataLoader(val_ds,   batch_size=S2_BATCH_SIZE, shuffle=False, num_workers=0)
+    use_pin  = DEVICE.startswith("cuda")
+    n_workers = min(4, os.cpu_count() or 1)
+    train_dl  = DataLoader(train_ds, batch_size=S2_BATCH_SIZE, shuffle=True,
+                           num_workers=n_workers, pin_memory=use_pin,
+                           persistent_workers=n_workers > 0)
+    val_dl    = DataLoader(val_ds,   batch_size=S2_BATCH_SIZE, shuffle=False,
+                           num_workers=n_workers, pin_memory=use_pin,
+                           persistent_workers=n_workers > 0)
     model     = _build_unet(len(band_indices))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()   # no ignore_index: binary, class 0 is informative
 
     log.info(f"    U-Net  in_ch={len(band_indices)}  "
              f"train={n_train} patches  val={n_val} patches  "
-             f"max_epochs={S2_EPOCHS}  patience={S2_PATIENCE}"
+             f"max_epochs={S2_EPOCHS}  patience={S2_PATIENCE}  "
+             f"workers={n_workers}  pin_memory={use_pin}"
              + (f"  [{band_label}]" if band_label else ""))
 
     best_iou, no_improve = 0.0, 0
