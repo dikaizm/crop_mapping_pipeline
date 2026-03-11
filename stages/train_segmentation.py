@@ -201,7 +201,7 @@ def _fetch_exp_c_bands_from_mlflow(run_id=None):
         dst_path=str(PROCESSED_DIR),
     )
     log.info(f"Downloaded stage3_exp_c_bands.txt → {local_path}")
-    return Path(local_path)
+    return Path(local_path), run_id
 
 
 def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
@@ -214,12 +214,13 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
     of the latest Stage 2 run (or the run specified by stage2_run_id).
     """
     bands_path = STAGE3_EXP_C_BANDS
+    resolved_stage2_run_id = stage2_run_id
     if not bands_path.exists():
         log.info(
             "stage3_exp_c_bands.txt not found locally — fetching from MLflow "
             f"({'run_id=' + stage2_run_id if stage2_run_id else 'latest Stage 2 run'})"
         )
-        bands_path = _fetch_exp_c_bands_from_mlflow(run_id=stage2_run_id)
+        bands_path, resolved_stage2_run_id = _fetch_exp_c_bands_from_mlflow(run_id=stage2_run_id)
 
     with open(bands_path) as f:
         lines = [l.strip() for l in f if l.strip()]
@@ -255,7 +256,9 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
         log.warning(f"Exp C: {skipped} band(s) from {bands_path.name} could not be matched")
 
     log.info(f"Exp C: {len(exp_C_idx)} channels from {bands_path.name}")
-    return exp_C_idx, exp_C_names
+    if resolved_stage2_run_id:
+        log.info(f"Exp C source Stage 2 run_id: {resolved_stage2_run_id}")
+    return exp_C_idx, exp_C_names, resolved_stage2_run_id
 
 
 def _fetch_projected_from_mlflow(run_id=None):
@@ -295,7 +298,7 @@ def _fetch_projected_from_mlflow(run_id=None):
         dst_path=str(PROCESSED_DIR),
     )
     log.info(f"Downloaded stage3_exp_c_bands_projected.json → {local_path}")
-    return Path(local_path)
+    return Path(local_path), run_id
 
 
 def build_exp_C_indices_projected(s2_processed, project_run_id=None):
@@ -309,6 +312,7 @@ def build_exp_C_indices_projected(s2_processed, project_run_id=None):
     import json as _json
 
     p = STAGE3_EXP_C_BANDS_PROJECTED
+    resolved_project_run_id = project_run_id
 
     if not p.exists():
         log.info(
@@ -316,10 +320,10 @@ def build_exp_C_indices_projected(s2_processed, project_run_id=None):
             f"({'run_id=' + project_run_id if project_run_id else 'latest project run'})"
         )
         try:
-            p = _fetch_projected_from_mlflow(run_id=project_run_id)
+            p, resolved_project_run_id = _fetch_projected_from_mlflow(run_id=project_run_id)
         except RuntimeError as e:
             log.warning(f"Could not fetch projected bands: {e}")
-            return None   # caller falls back to single-ref-year behaviour
+            return None, None   # caller falls back to single-ref-year behaviour
 
     with open(p) as f:
         projected = _json.load(f)   # {"2022": ["B4_20220730", ...], "2023": [...], ...}
@@ -359,7 +363,9 @@ def build_exp_C_indices_projected(s2_processed, project_run_id=None):
         log.info(f"Exp C projected {yr}: {len(idx)} channels")
         result[yr] = (idx, names)
 
-    return result if result else None
+    if resolved_project_run_id:
+        log.info(f"Exp C source project run_id: {resolved_project_run_id}")
+    return (result if result else None), resolved_project_run_id
 
 
 # ── Class weights ─────────────────────────────────────────────────────────────
@@ -531,6 +537,8 @@ def run_experiment(
     class_weights_tensor,
     force=False,
     skip_viz=False,
+    source_stage2_run_id=None,
+    source_project_run_id=None,
 ):
     """
     band_indices can be:
@@ -655,6 +663,10 @@ def run_experiment(
         })
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
+        if source_stage2_run_id:
+            mlflow.set_tag("source_stage2_run_id", source_stage2_run_id)
+        if source_project_run_id:
+            mlflow.set_tag("source_project_run_id", source_project_run_id)
 
         # ── Training loop ─────────────────────────────────────────────────────
         best_miou  = 0.0
@@ -973,13 +985,16 @@ def main(
         local_date_to_idx, local_band_to_idx
     )
     # Exp C: prefer per-year projected indices; fall back to single-ref-year
-    exp_C_projected = build_exp_C_indices_projected(s2_processed, project_run_id=project_run_id)
+    exp_C_projected, resolved_project_run_id = build_exp_C_indices_projected(
+        s2_processed, project_run_id=project_run_id
+    )
+    resolved_stage2_run_id = None
     if exp_C_projected:
         exp_C_idx   = exp_C_projected          # dict {yr: (idx, names)}
         exp_C_names = exp_C_projected[TRAIN_YEARS[0]][1]   # ref names for logging
         log.info("Exp C: using per-year projected band indices")
     else:
-        exp_C_idx, exp_C_names = build_exp_C_indices(
+        exp_C_idx, exp_C_names, resolved_stage2_run_id = build_exp_C_indices(
             mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
         )
         log.info("Exp C: using single reference-year band indices (no projected file)")
@@ -1022,6 +1037,10 @@ def main(
     all_results = []
     for exp_key, arch, band_idx, band_names, description in plan:
         exp_name = f"exp_{exp_key}_{arch}"
+        extra_kw = {}
+        if exp_key == "C":
+            extra_kw["source_stage2_run_id"]  = resolved_stage2_run_id
+            extra_kw["source_project_run_id"] = resolved_project_run_id
         result   = run_experiment(
             exp_name=exp_name,
             arch=arch,
@@ -1032,6 +1051,7 @@ def main(
             class_weights_tensor=cw_tensor,
             force=force,
             skip_viz=skip_viz,
+            **extra_kw,
         )
         if result is not None:
             all_results.append(result)

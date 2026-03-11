@@ -772,10 +772,38 @@ def run_project() -> None:
     # Log as MLflow artifact
     _mlflow_setup()
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Identify the Stage 2 run that produced stage3_exp_c_bands.txt
+    source_stage2_run_id = None
+    source_stage2_run_name = None
+    try:
+        client = mlflow.tracking.MlflowClient()
+        exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_FEATURE)
+        if exp:
+            runs = client.search_runs(
+                experiment_ids=[exp.experiment_id],
+                filter_string="attributes.run_name LIKE 'stage2v2_binary_fwd_%'",
+                order_by=["attributes.start_time DESC"],
+                max_results=1,
+            )
+            if runs:
+                source_stage2_run_id   = runs[0].info.run_id
+                source_stage2_run_name = runs[0].info.run_name
+                log.info(
+                    f"Source Stage 2 run: {source_stage2_run_name} "
+                    f"(run_id={source_stage2_run_id})"
+                )
+    except Exception as e:
+        log.warning(f"Could not look up source Stage 2 run: {e}")
+
     with mlflow.start_run(run_name=f"stage2v2_project_{ts}"):
         mlflow.set_tag("stage", "project")
         for yr, bands in projected.items():
             mlflow.log_param(f"n_bands_{yr}", len(bands))
+            mlflow.set_tag(f"bands_{yr}", str(bands))
+        if source_stage2_run_id:
+            mlflow.set_tag("source_stage2_run_id",   source_stage2_run_id)
+            mlflow.set_tag("source_stage2_run_name", source_stage2_run_name)
         mlflow.log_artifact(str(STAGE3_EXP_C_BANDS_PROJECTED))
         mlflow.log_artifact(str(STAGE3_EXP_C_BANDS))
     log.info("MLflow artifact logged.")
