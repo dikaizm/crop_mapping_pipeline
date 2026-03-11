@@ -36,7 +36,8 @@ _ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
 sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
-    GDRIVE_FILES, S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
+    GDRIVE_FILES, GDRIVE_RAW_S2_FOLDER_IDS,
+    S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
 )
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,8 @@ def main(
     overwrite   : bool = False,
     verify_only : bool = False,
     delete      : bool = False,
+    raw         : bool = False,
+    raw_s2_dir  : str  = None,
 ) -> None:
     years = years or ALL_YEARS
 
@@ -151,35 +154,46 @@ def main(
         ok = verify_data(years)
         sys.exit(0 if ok else 1)
 
-    # ── Download ──────────────────────────────────────────────────────────────
-    missing_ids = [k for k, v in GDRIVE_FILES.items() if not v.get("id")]
-    if missing_ids:
-        log.warning(
-            f"GDrive IDs not set for: {missing_ids}. "
-            "Edit config.py GDRIVE_FILES before running."
-        )
+    if raw:
+        # ── Download raw S2 files ─────────────────────────────────────────────
+        raw_dir = raw_s2_dir or str(PROCESSED_DIR.parent / "raw" / "s2")
+        for yr in years:
+            folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(yr)
+            if not folder_id:
+                log.warning(f"GDRIVE_RAW_S2_FOLDER_IDS['{yr}'] not set — skipping")
+                continue
+            log.info(f"Downloading raw S2 for {yr} → {raw_dir}")
+            download_folder(folder_id, raw_dir, overwrite=overwrite)
+    else:
+        # ── Download processed files ──────────────────────────────────────────
+        missing_ids = [k for k, v in GDRIVE_FILES.items() if not v.get("id")]
+        if missing_ids:
+            log.warning(
+                f"GDrive IDs not set for: {missing_ids}. "
+                "Edit config.py GDRIVE_FILES before running."
+            )
 
-    for name, entry in GDRIVE_FILES.items():
-        entry_year = entry.get("year")
-        if entry_year and entry_year not in years:
-            continue   # skip years not requested
+        for name, entry in GDRIVE_FILES.items():
+            entry_year = entry.get("year")
+            if entry_year and entry_year not in years:
+                continue
 
-        if not entry.get("id"):
-            log.warning(f"Skipping '{name}' — GDrive ID not configured")
-            continue
+            if not entry.get("id"):
+                log.warning(f"Skipping '{name}' — GDrive ID not configured")
+                continue
 
-        log.info(f"Fetching '{name}' ...")
-        try:
-            if entry["type"] == "folder":
-                download_folder(entry["id"], entry["output_dir"], overwrite=overwrite)
-            elif entry["type"] == "file":
-                download_file(entry["id"], entry["output_path"], overwrite=overwrite)
-            else:
-                log.error(f"Unknown type for '{name}': {entry['type']}")
-        except Exception as e:
-            log.error(f"Failed to download '{name}': {e}")
+            log.info(f"Fetching '{name}' ...")
+            try:
+                if entry["type"] == "folder":
+                    download_folder(entry["id"], entry["output_dir"], overwrite=overwrite)
+                elif entry["type"] == "file":
+                    download_file(entry["id"], entry["output_path"], overwrite=overwrite)
+                else:
+                    log.error(f"Unknown type for '{name}': {entry['type']}")
+            except Exception as e:
+                log.error(f"Failed to download '{name}': {e}")
 
-    verify_data(years)
+        verify_data(years)
 
     # ── Delete ────────────────────────────────────────────────────────────────
     if delete:
@@ -210,6 +224,14 @@ if __name__ == "__main__":
         "--delete", action="store_true",
         help="Delete downloaded files after verification (frees disk space)",
     )
+    parser.add_argument(
+        "--raw", action="store_true",
+        help="Download raw S2 files (from GDRIVE_RAW_S2_FOLDER_IDS) instead of processed files",
+    )
+    parser.add_argument(
+        "--raw-s2-dir", default=None,
+        help="Output directory for raw S2 files (default: data/raw/s2/)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -223,4 +245,6 @@ if __name__ == "__main__":
         overwrite   = args.overwrite,
         verify_only = args.verify_only,
         delete      = args.delete,
+        raw         = args.raw,
+        raw_s2_dir  = args.raw_s2_dir,
     )
