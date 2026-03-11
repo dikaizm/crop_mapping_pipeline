@@ -64,6 +64,14 @@ log = logging.getLogger(__name__)
 DEVICE = get_device()
 
 
+def _device_label() -> str:
+    if torch.cuda.is_available():
+        return f"cuda ({torch.cuda.get_device_name(0)})"
+    if torch.backends.mps.is_available():
+        return "mps (Apple Silicon)"
+    return "cpu"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _s2_for_year(s2_processed, yr):
@@ -885,7 +893,7 @@ if __name__ == "__main__":
             ),
         ],
     )
-    log.info(f"Device: {DEVICE}  PyTorch: {torch.__version__}")
+    log.info(f"Device: {_device_label()}  PyTorch: {torch.__version__}")
 
     main(
         exps=args.exp,
