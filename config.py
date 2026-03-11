@@ -102,7 +102,12 @@ for _cdl_id, _model_id in CLASS_REMAP.items():
 # GDRIVE_CREDENTIALS: path to a Google service-account JSON key file.
 #   Create one at: console.cloud.google.com → IAM → Service Accounts → Keys
 #   Share the target GDrive folders with the service-account email.
-GDRIVE_CREDENTIALS = Path(__file__).parent / "ssh" / "gdrive_service_account.json"
+GDRIVE_CREDENTIALS  = Path(__file__).parent / "ssh" / "gdrive_service_account.json"
+GDRIVE_OAUTH_SECRET = Path(__file__).parent / "ssh" / next(
+    (f.name for f in (Path(__file__).parent / "ssh").glob("client_secret_*.json")),
+    "client_secret.json",
+)
+GDRIVE_OAUTH_TOKEN  = Path(__file__).parent / "ssh" / "gdrive_token.pickle"
 # Same folder IDs as GDRIVE_FILES above — upload destination matches download source
 GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2022": "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",

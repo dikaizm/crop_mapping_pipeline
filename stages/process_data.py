@@ -49,7 +49,7 @@ sys.path.insert(0, str(_ROOT.parent))
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
     S2_NODATA, KEEP_CLASSES,
-    GDRIVE_CREDENTIALS,
+    GDRIVE_OAUTH_TOKEN,
     GDRIVE_PROCESSED_S2_FOLDER_IDS,
     GDRIVE_PROCESSED_CDL_FOLDER_ID,
 )
@@ -153,26 +153,29 @@ def process_s2_year(s2_raw_paths: list, out_dir: str) -> list:
 # ── Google Drive upload ────────────────────────────────────────────────────────
 
 def _build_drive_service():
-    """Build an authenticated Google Drive API v3 service."""
-    try:
-        from googleapiclient.discovery import build
-        from google.oauth2 import service_account
-    except ImportError:
-        raise ImportError(
-            "Google API client not installed.\n"
-            "Run: pip install google-api-python-client google-auth"
-        )
+    """Build an authenticated Google Drive API v3 service using OAuth 2.0 token."""
+    import pickle
+    from googleapiclient.discovery import build
+    from google.auth.transport.requests import Request
 
-    if not GDRIVE_CREDENTIALS.exists():
+    if not GDRIVE_OAUTH_TOKEN.exists():
         raise FileNotFoundError(
-            f"Service account credentials not found: {GDRIVE_CREDENTIALS}\n"
-            "See the module docstring for setup instructions."
+            f"OAuth token not found: {GDRIVE_OAUTH_TOKEN}\n"
+            "Generate it locally with:\n"
+            "  python crop_mapping_pipeline/stages/process_data.py --auth\n"
+            "Then copy to the server:\n"
+            f"  scp {GDRIVE_OAUTH_TOKEN} user@server:{GDRIVE_OAUTH_TOKEN}"
         )
 
-    creds = service_account.Credentials.from_service_account_file(
-        str(GDRIVE_CREDENTIALS),
-        scopes=["https://www.googleapis.com/auth/drive.file"],
-    )
+    with open(GDRIVE_OAUTH_TOKEN, "rb") as f:
+        creds = pickle.load(f)
+
+    if creds.expired and creds.refresh_token:
+        log.info("Refreshing expired OAuth token...")
+        creds.refresh(Request())
+        with open(GDRIVE_OAUTH_TOKEN, "wb") as f:
+            pickle.dump(creds, f)
+
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -373,6 +376,32 @@ def main(
         _schedule_shutdown(delay_min=8)
 
 
+def generate_oauth_token():
+    """Run OAuth flow in browser to generate gdrive_token.pickle (run locally once)."""
+    import pickle
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from crop_mapping_pipeline.config import GDRIVE_OAUTH_SECRET, GDRIVE_OAUTH_TOKEN
+
+    if not GDRIVE_OAUTH_SECRET.exists():
+        raise FileNotFoundError(
+            f"OAuth client secret not found: {GDRIVE_OAUTH_SECRET}\n"
+            "Download it from Google Cloud Console → APIs & Services → Credentials."
+        )
+
+    flow  = InstalledAppFlow.from_client_secrets_file(
+        str(GDRIVE_OAUTH_SECRET),
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    creds = flow.run_local_server(port=0)
+
+    with open(GDRIVE_OAUTH_TOKEN, "wb") as f:
+        pickle.dump(creds, f)
+
+    print(f"Token saved to: {GDRIVE_OAUTH_TOKEN}")
+    print(f"\nCopy to server:")
+    print(f"  scp {GDRIVE_OAUTH_TOKEN} user@server:/workspace/crop_mapping_pipeline/ssh/gdrive_token.pickle")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Process raw S2 + CDL files, upload to GDrive, delete raw."
@@ -408,7 +437,15 @@ if __name__ == "__main__":
         "--shutdown", action="store_true",
         help="Shut down the VPS 8 minutes after all processing completes (Linux only).",
     )
+    parser.add_argument(
+        "--auth", action="store_true",
+        help="Generate OAuth token via browser (run locally once, then copy token to server).",
+    )
     args = parser.parse_args()
+
+    if args.auth:
+        generate_oauth_token()
+        sys.exit(0)
 
     logging.basicConfig(
         level=logging.INFO,
