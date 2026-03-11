@@ -44,13 +44,13 @@ VALID_STAGES = ["fetch", "feature", "train", "all"]
 
 # ── Stage runners ─────────────────────────────────────────────────────────────
 
-def run_fetch(force=False, data_dir=None):
+def run_fetch(force=False, data_dir=None, years=None):
     """Stage 0 — download S2 + CDL from Google Drive."""
     log.info("=" * 60)
     log.info("STAGE 0 — Fetch data from Google Drive")
     log.info("=" * 60)
     from crop_mapping_pipeline.stages.fetch_data import main as fetch_main
-    fetch_main(overwrite=force)
+    fetch_main(overwrite=force, years=years)
 
 
 def run_feature(force=False, data_dir=None):
@@ -59,7 +59,7 @@ def run_feature(force=False, data_dir=None):
     log.info("STAGE 1+2 — Feature analysis")
     log.info("=" * 60)
     from crop_mapping_pipeline.stages.feature_analysis import main as feature_main
-    feature_main(force=force, data_dir=data_dir)
+    feature_main(force=force, data_dir=data_dir, stage="all")
 
 
 def run_train(force=False, data_dir=None):

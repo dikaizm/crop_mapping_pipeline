@@ -38,25 +38,42 @@ STAGE3_EXP_C_BANDS = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 #   "cdl_2022": {"type": "file", "id": "1DEF...", "output_path": str(CDL_BY_YEAR["2022"])}
 
 GDRIVE_FILES = {
-    "s2": {
+    # S2 processed TIFs — one GDrive folder per year (set each ID separately)
+    "s2_2022": {
         "type":       "folder",
-        "id":         "",          # <-- GDrive folder ID for all years' S2 processed TIFs
+        "id":         "",          # <-- GDrive folder ID for 2022 processed S2 TIFs
         "output_dir": str(S2_PROCESSED_DIR),
+        "year":       "2022",
+    },
+    "s2_2023": {
+        "type":       "folder",
+        "id":         "",          # <-- GDrive folder ID for 2023 processed S2 TIFs
+        "output_dir": str(S2_PROCESSED_DIR),
+        "year":       "2023",
+    },
+    "s2_2024": {
+        "type":       "folder",
+        "id":         "",          # <-- GDrive folder ID for 2024 processed S2 TIFs
+        "output_dir": str(S2_PROCESSED_DIR),
+        "year":       "2024",
     },
     "cdl_2022": {
         "type":        "file",
         "id":          "",         # <-- GDrive file ID for cdl_2022_study_area_filtered.tif
         "output_path": str(CDL_BY_YEAR["2022"]),
+        "year":        "2022",
     },
     "cdl_2023": {
         "type":        "file",
         "id":          "",
         "output_path": str(CDL_BY_YEAR["2023"]),
+        "year":        "2023",
     },
     "cdl_2024": {
         "type":        "file",
         "id":          "",
         "output_path": str(CDL_BY_YEAR["2024"]),
+        "year":        "2024",
     },
 }
 
@@ -84,6 +101,20 @@ REMAP_LUT = np.zeros(256, dtype=np.int64)
 for _cdl_id, _model_id in CLASS_REMAP.items():
     if _cdl_id < 256:
         REMAP_LUT[_cdl_id] = _model_id
+
+# ── Google Drive upload (processed files → GDrive) ────────────────────────────
+# Used by process_data.py after local processing.
+# GDRIVE_CREDENTIALS: path to a Google service-account JSON key file.
+#   Create one at: console.cloud.google.com → IAM → Service Accounts → Keys
+#   Share the target GDrive folders with the service-account email.
+GDRIVE_CREDENTIALS = PROJECT_ROOT / "ssh" / "gdrive_service_account.json"
+# One GDrive folder per year — must match the folder IDs in GDRIVE_FILES above
+GDRIVE_PROCESSED_S2_FOLDER_IDS = {
+    "2022": "",   # <-- GDrive folder ID to upload 2022 processed S2 TIFs
+    "2023": "",   # <-- GDrive folder ID to upload 2023 processed S2 TIFs
+    "2024": "",   # <-- GDrive folder ID to upload 2024 processed S2 TIFs
+}
+GDRIVE_PROCESSED_CDL_FOLDER_ID = ""   # <-- GDrive folder ID to upload processed CDL TIFs
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
 MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"

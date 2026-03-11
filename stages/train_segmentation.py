@@ -160,8 +160,10 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx):
     Maps MMDD to local reference-year date, then to flat local index.
     """
     if not STAGE3_EXP_C_BANDS.exists():
-        log.warning(f"Exp C file not found: {STAGE3_EXP_C_BANDS}  — Exp C will be skipped")
-        return None, None
+        raise FileNotFoundError(
+            f"Stage 2 output not found: {STAGE3_EXP_C_BANDS}\n"
+            "Run Stage 2 first:  python feature_analysis.py --stage 2"
+        )
 
     with open(STAGE3_EXP_C_BANDS) as f:
         lines = [l.strip() for l in f if l.strip()]
@@ -188,8 +190,10 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx):
             skipped += 1
 
     if not exp_C_idx:
-        log.warning("Exp C: no bands matched current processed files — skipping")
-        return None, None
+        raise ValueError(
+            f"Exp C: no bands from {STAGE3_EXP_C_BANDS.name} matched current processed S2 files.\n"
+            "Check that S2 files for the same dates as Stage 2 are present."
+        )
 
     if skipped:
         log.warning(f"Exp C: {skipped} band(s) from {STAGE3_EXP_C_BANDS.name} could not be matched")
@@ -811,8 +815,9 @@ def main(
             continue
 
         if idx is None:
-            log.warning(f"Exp {exp_key}: no band indices — skipping all architectures")
-            continue
+            raise RuntimeError(
+                f"Exp {exp_key}: band indices are None — Stage 2 must be run before training."
+            )
 
         for arch in run_archs:
             plan.append((exp_key, arch, idx, names, desc_fn(arch)))

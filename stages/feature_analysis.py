@@ -5,18 +5,22 @@ Stage 1: Per-crop SIglobal ranking (Yin et al. 2020, RS 12(1):162)
 Stage 2: Per-crop binary CNN forward selection (crop_i vs. rest, metric = IoU class 1)
 
 Outputs:
+    data/processed/stage1v2_candidates.json       — Stage 1 per-crop candidate lists (handoff file)
     data/processed/stage2v2_per_crop_results.csv  — per-crop results table
     data/processed/stage3_exp_c_bands.txt         — union of selections (Stage 3 Exp C input)
 
 Usage:
-    python scripts/feature_analysis.py
-    python scripts/feature_analysis.py --force        # re-run even if outputs exist
-    python scripts/feature_analysis.py --data-dir /data/processed
+    python feature_analysis.py                          # run both stages
+    python feature_analysis.py --stage 1                # Stage 1 only (run locally, CPU)
+    python feature_analysis.py --stage 2                # Stage 2 only (run on GPU server)
+    python feature_analysis.py --force                  # re-run even if outputs exist
+    python feature_analysis.py --data-dir /data/processed
 """
 
 import os
 import re
 import sys
+import json
 import time
 import logging
 import argparse
@@ -49,6 +53,9 @@ from crop_mapping_pipeline.config import (
     S2_EPOCHS, S2_PATIENCE, S2_DELTA, S2_NO_IMPROVE, S2_MAX_BANDS, S2_BATCH_SIZE,
     STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS,
 )
+
+# Handoff file written by Stage 1, read by Stage 2 when run separately
+STAGE1_CANDIDATES_JSON = PROCESSED_DIR / "stage1v2_candidates.json"
 
 log = logging.getLogger(__name__)
 
@@ -271,6 +278,17 @@ def run_stage1(df: pd.DataFrame, all_bandnames: list, n_channels: int, s2_files:
 
     mlflow.end_run(status="FINISHED")
     log.info(f"Stage 1 MLflow run_id: {stage1_run.info.run_id}")
+
+    # Save candidates as handoff file so Stage 2 can run independently
+    os.makedirs(os.path.dirname(STAGE1_CANDIDATES_JSON), exist_ok=True)
+    payload = {
+        "run_ts":              run_ts,
+        "candidates_per_crop": {str(k): v for k, v in candidates_per_crop.items()},
+    }
+    with open(STAGE1_CANDIDATES_JSON, "w") as f:
+        json.dump(payload, f, indent=2)
+    log.info(f"Stage 1 candidates saved: {STAGE1_CANDIDATES_JSON}")
+
     return candidates_per_crop, run_ts
 
 
@@ -545,41 +563,75 @@ def _mlflow_setup() -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(force: bool = False, data_dir: str = None) -> None:
+def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
     # Override data paths if requested
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
         global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, \
-               STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS
-        processed          = pathlib.Path(data_dir)
-        PROCESSED_DIR      = processed
-        S2_PROCESSED_DIR   = processed / "s2"
-        CDL_BY_YEAR        = {
+               STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS, STAGE1_CANDIDATES_JSON
+        processed               = pathlib.Path(data_dir)
+        PROCESSED_DIR           = processed
+        S2_PROCESSED_DIR        = processed / "s2"
+        CDL_BY_YEAR             = {
             yr: processed / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
             for yr in ["2022", "2023", "2024"]
         }
-        STAGE2_RESULTS_CSV = processed / "stage2v2_per_crop_results.csv"
-        STAGE3_EXP_C_BANDS = processed / "stage3_exp_c_bands.txt"
+        STAGE2_RESULTS_CSV      = processed / "stage2v2_per_crop_results.csv"
+        STAGE3_EXP_C_BANDS      = processed / "stage3_exp_c_bands.txt"
+        STAGE1_CANDIDATES_JSON  = processed / "stage1v2_candidates.json"
         log.info(f"Data dir overridden to {processed}")
 
-    # Skip if outputs already exist
-    if not force and os.path.exists(STAGE3_EXP_C_BANDS):
-        log.info(f"Output already exists: {STAGE3_EXP_C_BANDS}")
-        log.info("Use --force to re-run feature analysis.")
-        return
-
-    log.info(f"Device: {DEVICE}")
     os.makedirs(FIGURES_DIR, exist_ok=True)
 
-    df, all_bandnames, n_channels, s2_files, cdl_path = load_data(s2_year="2022")
-    candidates_per_crop, run_ts = run_stage1(df, all_bandnames, n_channels, s2_files)
-    run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
+    # ── Stage 1 ───────────────────────────────────────────────────────────────
+    if stage in ("1", "all"):
+        if not force and os.path.exists(STAGE1_CANDIDATES_JSON):
+            log.info(f"Stage 1 output already exists: {STAGE1_CANDIDATES_JSON}")
+            log.info("Use --force to re-run.")
+        else:
+            log.info(f"Device: {DEVICE}")
+            df, all_bandnames, n_channels, s2_files, cdl_path = load_data(s2_year="2022")
+            run_stage1(df, all_bandnames, n_channels, s2_files)
+            log.info("Stage 1 complete.")
+
+        if stage == "1":
+            return
+
+    # ── Stage 2 ───────────────────────────────────────────────────────────────
+    if stage in ("2", "all"):
+        if not force and os.path.exists(STAGE3_EXP_C_BANDS):
+            log.info(f"Stage 2 output already exists: {STAGE3_EXP_C_BANDS}")
+            log.info("Use --force to re-run.")
+            return
+
+        # Load Stage 1 candidates from handoff file
+        if not os.path.exists(STAGE1_CANDIDATES_JSON):
+            raise FileNotFoundError(
+                f"Stage 1 candidates not found: {STAGE1_CANDIDATES_JSON}\n"
+                "Run Stage 1 first:  python feature_analysis.py --stage 1"
+            )
+        with open(STAGE1_CANDIDATES_JSON) as f:
+            payload = json.load(f)
+        candidates_per_crop = {int(k): v for k, v in payload["candidates_per_crop"].items()}
+        run_ts              = payload["run_ts"]
+        log.info(f"Loaded Stage 1 candidates from {STAGE1_CANDIDATES_JSON}  (run_ts={run_ts})")
+
+        log.info(f"Device: {DEVICE}")
+        df, all_bandnames, n_channels, s2_files, cdl_path = load_data(s2_year="2022")
+        run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
+        log.info("Stage 2 complete.")
 
     log.info("Feature analysis complete.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Feature analysis v2: Stage 1 + Stage 2")
+    parser.add_argument(
+        "--stage",
+        choices=["1", "2", "all"],
+        default="all",
+        help="Which stage to run: 1 (CPU, run locally), 2 (GPU, run on server), all (default)",
+    )
     parser.add_argument("--force",    action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str, default=None,
                         help="Override processed data directory")
@@ -590,4 +642,4 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
-    main(force=args.force, data_dir=args.data_dir)
+    main(force=args.force, data_dir=args.data_dir, stage=args.stage)
