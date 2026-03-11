@@ -39,6 +39,7 @@ sys.path.insert(0, str(_ROOT.parent))
 from crop_mapping_pipeline.config import (
     GDRIVE_FILES, GDRIVE_RAW_S2_FOLDER_IDS,
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
+    GDRIVE_OAUTH_TOKEN,
 )
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,68 @@ def download_folder(folder_id: str, output_dir: str, overwrite: bool = False) ->
         quiet=False,
         resume=not overwrite,
     )
+
+
+# ── GDrive file-by-name download ───────────────────────────────────────────────
+
+def _build_drive_service():
+    """Build authenticated GDrive API v3 service (reuses OAuth token from process_data)."""
+    import pickle
+    from googleapiclient.discovery import build
+    from google.auth.transport.requests import Request
+
+    if not GDRIVE_OAUTH_TOKEN.exists():
+        raise FileNotFoundError(
+            f"OAuth token not found: {GDRIVE_OAUTH_TOKEN}\n"
+            "Run: python stages/process_data.py --auth"
+        )
+    with open(GDRIVE_OAUTH_TOKEN, "rb") as f:
+        creds = pickle.load(f)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open(GDRIVE_OAUTH_TOKEN, "wb") as f:
+            pickle.dump(creds, f)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def download_files_by_name(filenames: list, year: str, output_dir: str,
+                           overwrite: bool = False) -> None:
+    """
+    Download specific files by filename from the GDrive S2 processed folder for a given year.
+
+    Looks up each filename in the folder via GDrive API, then downloads by file ID.
+    """
+    folder_entry = GDRIVE_FILES.get(f"s2_{year}")
+    if not folder_entry or not folder_entry.get("id"):
+        raise ValueError(f"No GDrive folder configured for year {year} (s2_{year})")
+
+    folder_id = folder_entry["id"]
+    service   = _build_drive_service()
+    os.makedirs(output_dir, exist_ok=True)
+
+    for fname in filenames:
+        out_path = os.path.join(output_dir, fname)
+        if not overwrite and os.path.exists(out_path):
+            log.info(f"Already exists — skip: {fname}")
+            continue
+
+        # Query GDrive for the file by name within the folder
+        query  = f"name = '{fname}' and '{folder_id}' in parents and trashed = false"
+        result = service.files().list(q=query, fields="files(id, name)").execute()
+        items  = result.get("files", [])
+
+        if not items:
+            log.error(f"File not found in GDrive folder (year={year}): {fname}")
+            continue
+        if len(items) > 1:
+            log.warning(f"Multiple matches for '{fname}' — using first result")
+
+        file_id = items[0]["id"]
+        log.info(f"Downloading {fname}  (id={file_id})")
+        url = f"https://drive.google.com/uc?id={file_id}"
+        result = gdown.download(url=url, output=out_path, quiet=False, resume=not overwrite)
+        if result is None:
+            log.error(f"Download failed: {fname}")
 
 
 # ── Delete helpers ─────────────────────────────────────────────────────────────
@@ -143,6 +206,7 @@ def verify_data(years=None) -> bool:
 
 def main(
     years       : list = None,
+    files       : list = None,
     overwrite   : bool = False,
     verify_only : bool = False,
     delete      : bool = False,
@@ -154,6 +218,14 @@ def main(
     if verify_only:
         ok = verify_data(years)
         sys.exit(0 if ok else 1)
+
+    # ── Download specific files by filename ───────────────────────────────────
+    if files:
+        for yr in years:
+            out_dir = str(S2_PROCESSED_DIR / yr)
+            log.info(f"Downloading {len(files)} file(s) for year {yr} → {out_dir}")
+            download_files_by_name(files, yr, out_dir, overwrite=overwrite)
+        return
 
     if raw:
         # ── Download raw S2 files ─────────────────────────────────────────────
@@ -215,6 +287,12 @@ if __name__ == "__main__":
         help=f"Years to download (default: all — {ALL_YEARS})",
     )
     parser.add_argument(
+        "--files", nargs="+", default=None,
+        metavar="FILENAME",
+        help="Specific filenames to download from the GDrive S2 folder "
+             "(e.g. S2H_2023_20230715_processed.tif). Requires --years to identify the folder.",
+    )
+    parser.add_argument(
         "--overwrite", action="store_true",
         help="Re-download even if files already exist",
     )
@@ -244,6 +322,7 @@ if __name__ == "__main__":
 
     main(
         years       = args.years,
+        files       = args.files,
         overwrite   = args.overwrite,
         verify_only = args.verify_only,
         delete      = args.delete,
