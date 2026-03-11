@@ -4,3 +4,4 @@ ssh/
 venv/
 .venv/
 .env
+data/

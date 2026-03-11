@@ -59,7 +59,13 @@ def run_process(force=False, data_dir=None, years=None, raw_s2_dir=None, raw_cdl
 
     # Download processed CDL from GDrive (already processed locally, no need to reprocess)
     log.info("Fetching processed CDL from GDrive...")
-    fetch_main(years=years)   # downloads CDL folder (all years, small files)
+    from crop_mapping_pipeline.stages.fetch_data import download_folder
+    from crop_mapping_pipeline.config import GDRIVE_FILES, CDL_DIR
+    cdl_entry = GDRIVE_FILES.get("cdl", {})
+    if cdl_entry.get("id"):
+        download_folder(cdl_entry["id"], str(CDL_DIR), overwrite=force)
+    else:
+        log.warning("CDL GDrive ID not configured — skipping CDL download")
 
     # Process S2 year by year to keep disk usage low
     for yr in (years or ["2022", "2023", "2024"]):
