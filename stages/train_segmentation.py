@@ -79,6 +79,31 @@ def _s2_for_year(s2_processed, yr):
     return sorted([p for p in s2_processed if Path(p).name.split("_")[1] == yr])
 
 
+def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_PER_DATE):
+    """Return (filtered_paths, remapped_indices) keeping only TIF files that
+    contribute at least one channel in band_indices, with indices remapped to
+    their positions in the reduced stack.
+
+    Example: 25 files × 11 bands = 275 channels.  Exp A selects bands [157..165]
+    (file 14 only) → returns [s2_paths[14]], remapped to [0..8].
+    """
+    if band_indices is None:
+        return s2_paths, None
+    # Which file indices (0-based) are needed?
+    needed_file_idxs = sorted({gi // n_bands_per_file for gi in band_indices
+                                if gi // n_bands_per_file < len(s2_paths)})
+    filtered_paths = [s2_paths[i] for i in needed_file_idxs]
+    # Build global-index → new-stacked-index map for every band in kept files
+    new_idx_map = {}
+    stacked = 0
+    for fi in needed_file_idxs:
+        for local in range(n_bands_per_file):
+            new_idx_map[fi * n_bands_per_file + local] = stacked
+            stacked += 1
+    remapped = [new_idx_map[gi] for gi in band_indices]
+    return filtered_paths, remapped
+
+
 def parse_date(path):
     m = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", Path(path).name)
     return f"{m.group(1)}{m.group(2)}{m.group(3)}" if m else None
@@ -588,14 +613,15 @@ def run_experiment(
             log.warning(f"Skipping train year {yr}: {'no S2' if not yr_s2 else 'CDL missing'}")
             continue
         yr_idx, _ = _yr_idx(yr)
+        yr_s2_filtered, yr_idx_local = _filter_s2_by_band_indices(yr_s2, yr_idx)
         ds = RasterPatchDataset(
-            s2_paths=yr_s2, cdl_path=str(yr_cdl),
+            s2_paths=yr_s2_filtered, cdl_path=str(yr_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
             keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-            min_valid_frac=MIN_VALID_FRAC, band_indices=yr_idx,
+            min_valid_frac=MIN_VALID_FRAC, band_indices=yr_idx_local,
         )
         train_year_datasets.append(ds)
-        log.info(f"  [{yr}] {len(ds):,} patches  ({len(yr_idx)} channels)")
+        log.info(f"  [{yr}] {len(ds):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)
@@ -610,14 +636,15 @@ def run_experiment(
     test_cdl = CDL_BY_YEAR[TEST_YEAR]
     assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
     test_idx, _ = _yr_idx(TEST_YEAR)
+    test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
     test_ds = RasterPatchDataset(
-        s2_paths=test_s2, cdl_path=str(test_cdl),
+        s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
         patch_size=PATCH_SIZE, stride=STRIDE,
         keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-        min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx,
+        min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
     )
 
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True)
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True, drop_last=True)
     val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {len(test_ds):,} test ({TEST_YEAR})")
