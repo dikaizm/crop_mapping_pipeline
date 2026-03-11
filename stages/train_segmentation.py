@@ -39,16 +39,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, ConcatDataset
 import rasterio
 
-# Suppress GDAL tile-decode warnings (LZW/ZIP errors on legacy processed files).
-# These are handled gracefully in RasterPatchDataset.__getitem__ and would
-# otherwise flood the console, obscuring epoch progress logs.
-class _SuppressGDALFilter(logging.Filter):
-    def filter(self, record):
-        msg = record.getMessage()
-        return "GDAL signalled an error" not in msg and "IReadBlock failed" not in msg
-
-logging.getLogger().addFilter(_SuppressGDALFilter())
-
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow
 
@@ -1159,6 +1149,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    # Suppress GDAL tile-decode noise (LZW/ZIP errors on legacy files).
+    # Filters on a Logger only apply at that logger — not on propagation —
+    # so we must filter on each Handler after basicConfig creates them.
+    class _SuppressGDALFilter(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            return "GDAL signalled an error" not in msg and "IReadBlock failed" not in msg
+
+    _gdal_filter = _SuppressGDALFilter()
+    # Also silence rasterio._err directly (covers worker processes via fork)
+    logging.getLogger("rasterio._err").setLevel(logging.ERROR)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -1169,6 +1171,9 @@ if __name__ == "__main__":
             ),
         ],
     )
+    for _h in logging.root.handlers:
+        _h.addFilter(_gdal_filter)
+
     log.info(f"Device: {_device_label()}  PyTorch: {torch.__version__}")
 
     main(
