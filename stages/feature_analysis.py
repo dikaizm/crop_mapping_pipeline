@@ -155,11 +155,16 @@ class RasterPatchDataset(Dataset):
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-def load_data(s2_year: str = "2022"):
+def load_data(s2_year: str = "2022", stage: int = 1):
     """
-    Stack S2 files for a given year, load CDL, sample pixels for Stage 1.
+    Load S2 file paths and band names for a given year.
+
+    stage=1: stacks all rasters into RAM for GSI pixel sampling (~29 GB peak).
+    stage=2: skips stacking — only derives band names from filenames (~2 GB).
+             Stage 2 uses RasterPatchDataset which reads patches on-the-fly.
 
     Returns (df, all_bandnames, n_channels, s2_files, cdl_path).
+    df and n_channels are None when stage=2.
     """
     s2_files = sorted([
         p for p in glob(f"{S2_PROCESSED_DIR}/*_processed.tif")
@@ -170,21 +175,32 @@ def load_data(s2_year: str = "2022"):
     cdl_path = str(CDL_BY_YEAR[s2_year])
     assert os.path.exists(cdl_path), f"CDL not found: {cdl_path}"
 
-    log.info(f"Loading {len(s2_files)} S2 files ({s2_year})...")
-    all_arrays, all_bandnames = [], []
-
+    # Derive band names from filenames — no I/O needed
+    all_bandnames = []
     for s2_path in s2_files:
         fname    = os.path.basename(s2_path)
         m        = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", fname)
         date_str = f"{m.group(1)}{m.group(2)}{m.group(3)}" if m else fname[:8]
+        all_bandnames.extend([f"{b}_{date_str}" for b in S2_BAND_NAMES])
+
+    n_channels = len(all_bandnames)
+    log.info(f"S2 files: {len(s2_files)} ({s2_year})  |  {n_channels} channels")
+
+    if stage == 2:
+        log.info("Stage 2 mode: skipping raster stacking (patches read on-the-fly)")
+        return None, all_bandnames, n_channels, s2_files, cdl_path
+
+    # Stage 1: stack all rasters into RAM for pixel sampling
+    log.info(f"Loading {len(s2_files)} S2 files ({s2_year})...")
+    all_arrays = []
+    for s2_path in s2_files:
         with rasterio.open(s2_path) as src:
             arr = src.read().astype(np.float32)
         arr[arr == S2_NODATA] = np.nan
         all_arrays.append(arr)
-        all_bandnames.extend([f"{b}_{date_str}" for b in S2_BAND_NAMES])
 
-    stacked              = np.concatenate(all_arrays, axis=0)
-    n_channels, H, W    = stacked.shape
+    stacked           = np.concatenate(all_arrays, axis=0)
+    _, H, W           = stacked.shape
     log.info(f"Stacked S2: {n_channels} channels × {H} × {W} px")
 
     with rasterio.open(cdl_path) as src:
@@ -194,10 +210,8 @@ def load_data(s2_year: str = "2022"):
     img_2d = stacked.reshape(n_channels, -1).T
     lbl_1d = cdl.flatten()
 
-    # NaN-aware: only filter by CDL class (not all-finite).
-    # GSI uses pandas mean/std (skipna=True) → NaN bands handled correctly.
     valid_mask = np.isin(lbl_1d, KEEP_CLASSES)
-    img_valid  = img_2d[valid_mask]   # fancy indexing → copy
+    img_valid  = img_2d[valid_mask]
     lbl_valid  = lbl_1d[valid_mask]
 
     log.info(f"Labeled crop pixels: {len(lbl_valid):,} "
@@ -207,7 +221,7 @@ def load_data(s2_year: str = "2022"):
     n   = min(len(lbl_valid), max(1000, int(len(lbl_valid) * SAMPLE_FRACTION)))
     idx = rng.choice(len(lbl_valid), n, replace=False)
 
-    df        = pd.DataFrame(img_valid[idx], columns=all_bandnames)
+    df = pd.DataFrame(img_valid[idx], columns=all_bandnames)
     df.insert(0, "class_label", lbl_valid[idx].astype(int))
 
     log.info(f"Sampled {len(df):,} pixels (SAMPLE_FRACTION={SAMPLE_FRACTION})")
@@ -617,7 +631,7 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         log.info(f"Loaded Stage 1 candidates from {STAGE1_CANDIDATES_JSON}  (run_ts={run_ts})")
 
         log.info(f"Device: {DEVICE}")
-        df, all_bandnames, n_channels, s2_files, cdl_path = load_data(s2_year="2022")
+        _, all_bandnames, _, s2_files, cdl_path = load_data(s2_year="2022", stage=2)
         run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
         log.info("Stage 2 complete.")
 
