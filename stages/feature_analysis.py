@@ -566,11 +566,19 @@ def run_stage2(candidates_per_crop: dict, all_bandnames: list,
                     tag = "✅" if accepted else "❌"
                     log.info(f"  {tag} +{band:<22} IoU={iou:.4f} gain={gain:+.4f} ({elapsed:.0f}s)")
 
-                # Summary metrics + tags for this crop
+                # ── Option B: top-1 fallback if nothing was selected ─────────
+                if not selected and candidates:
+                    fallback = candidates[0]
+                    selected = [fallback]
+                    log.warning(
+                        f"  K*=0 for {crop_name} — fallback to top-1 GSI band: {fallback}"
+                    )
+                    mlflow.set_tag("fallback_band", fallback)
+
                 mlflow.log_metrics({"final_iou": prev_iou, "k_star": len(selected)})
                 mlflow.set_tag("selected_bands", str(selected))
                 mlflow.set_tag("stop_reason",
-                    "max_bands" if len(selected) >= S2_MAX_BANDS
+                    "max_bands"  if len(selected) >= S2_MAX_BANDS
                     else "no_improve" if no_improve_cnt >= S2_NO_IMPROVE
                     else "exhausted"
                 )
@@ -672,7 +680,8 @@ def _mlflow_setup() -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
+def main(force: bool = False, data_dir: str = None, stage: str = "all",
+         delta: float = None) -> None:
     # Override data paths if requested
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
@@ -689,6 +698,11 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         STAGE3_EXP_C_BANDS      = processed / "stage3_exp_c_bands.txt"
         STAGE1_CANDIDATES_JSON  = processed / "s2" / "2022" / "stage1v2_candidates.json"
         log.info(f"Data dir overridden to {processed}")
+
+    if delta is not None:
+        global S2_DELTA
+        S2_DELTA = delta
+        log.info(f"S2_DELTA overridden to {S2_DELTA}")
 
     os.makedirs(FIGURES_DIR, exist_ok=True)
 
@@ -742,8 +756,10 @@ if __name__ == "__main__":
         help="Which stage to run: 1 (CPU, run locally), 2 (GPU, run on server), all (default)",
     )
     parser.add_argument("--force",    action="store_true", help="Re-run even if outputs exist")
-    parser.add_argument("--data-dir", type=str, default=None,
+    parser.add_argument("--data-dir", type=str,   default=None,
                         help="Override processed data directory")
+    parser.add_argument("--delta",    type=float, default=None,
+                        help="Override S2_DELTA (min IoU gain to accept a band, default: 0.005)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -751,4 +767,4 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
-    main(force=args.force, data_dir=args.data_dir, stage=args.stage)
+    main(force=args.force, data_dir=args.data_dir, stage=args.stage, delta=args.delta)
