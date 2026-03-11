@@ -42,8 +42,8 @@ import rasterio
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow
 
-_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_ROOT))
+_ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
+sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR, LOGS_DIR,

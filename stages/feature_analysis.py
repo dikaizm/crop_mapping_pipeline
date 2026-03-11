@@ -37,8 +37,8 @@ import torch.nn as nn
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader, Dataset, random_split
 
-_ROOT = pathlib.Path(__file__).parent.parent
-sys.path.insert(0, str(_ROOT))
+_ROOT = pathlib.Path(__file__).parent.parent   # crop_mapping_pipeline/
+sys.path.insert(0, str(_ROOT.parent))
 
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow

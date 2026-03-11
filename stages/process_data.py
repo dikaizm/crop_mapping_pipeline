@@ -40,9 +40,11 @@ from glob import glob
 import numpy as np
 import rasterio
 from rasterio.warp import reproject, Resampling
+from dotenv import load_dotenv
 
-_ROOT = pathlib.Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_ROOT))
+_ROOT = pathlib.Path(__file__).parent.parent   # crop_mapping_pipeline/
+load_dotenv(_ROOT / ".env")
+sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
@@ -249,15 +251,44 @@ def delete_raw_s2(s2_raw_paths: list) -> None:
 # ── Shutdown ───────────────────────────────────────────────────────────────────
 
 def _schedule_shutdown(delay_min: int = 8) -> None:
-    """Schedule a VPS shutdown after `delay_min` minutes (Linux only)."""
-    log.warning("=" * 60)
-    log.warning(f"VPS SHUTDOWN in {delay_min} minutes.")
-    log.warning("Cancel with:  sudo shutdown -c")
-    log.warning("=" * 60)
-    try:
-        subprocess.run(["sudo", "shutdown", "-h", f"+{delay_min}"], check=True)
-    except Exception as e:
-        log.error(f"Failed to schedule shutdown: {e}")
+    """
+    Stop the pod/server after `delay_min` minutes.
+    - RunPod: uses RunPod API (requires RUNPOD_API_KEY env var)
+    - Other Linux VPS: falls back to `sudo shutdown -h`
+    """
+    import time, urllib.request, urllib.error, json
+
+    pod_id  = os.environ.get("RUNPOD_POD_ID")
+    api_key = os.environ.get("RUNPOD_API_KEY")
+
+    if pod_id and api_key:
+        log.warning("=" * 60)
+        log.warning(f"RunPod pod {pod_id} will stop in {delay_min} minutes.")
+        log.warning("=" * 60)
+        time.sleep(delay_min * 60)
+
+        query   = f'{{"query": "mutation {{ podStop(input: {{podId: \\"{pod_id}\\"}}) {{ id desiredStatus }} }}"}}'
+        req     = urllib.request.Request(
+            "https://api.runpod.io/graphql",
+            data    = query.encode(),
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                result = json.loads(resp.read())
+                log.info(f"Pod stop response: {result}")
+        except urllib.error.URLError as e:
+            log.error(f"Failed to stop pod via RunPod API: {e}")
+    else:
+        # Fallback for standard Linux VPS with systemd
+        log.warning("=" * 60)
+        log.warning(f"VPS SHUTDOWN in {delay_min} minutes.")
+        log.warning("Cancel with:  sudo shutdown -c")
+        log.warning("=" * 60)
+        try:
+            subprocess.run(["sudo", "shutdown", "-h", f"+{delay_min}"], check=True)
+        except Exception as e:
+            log.error(f"Failed to schedule shutdown: {e}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

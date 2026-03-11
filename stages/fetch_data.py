@@ -32,8 +32,8 @@ from pathlib import Path
 
 import gdown
 
-_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_ROOT))
+_ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
+sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
     GDRIVE_FILES, S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
