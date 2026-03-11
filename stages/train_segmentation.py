@@ -39,6 +39,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, ConcatDataset
 import rasterio
 
+# Suppress GDAL tile-decode warnings (LZW/ZIP errors on legacy processed files).
+# These are handled gracefully in RasterPatchDataset.__getitem__ and would
+# otherwise flood the console, obscuring epoch progress logs.
+class _SuppressGDALFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return "GDAL signalled an error" not in msg and "IReadBlock failed" not in msg
+
+logging.getLogger().addFilter(_SuppressGDALFilter())
+
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow
 
