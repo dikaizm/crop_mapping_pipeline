@@ -47,10 +47,11 @@ sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
+    PROCESSED_DIR,
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA,
-    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_TRAIN,
+    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_TRAIN, MLFLOW_EXPERIMENT_FEATURE,
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP,
     VAL_FRAC, SEED, ARCH_CFG,
@@ -161,19 +162,66 @@ def build_exp_B_indices(local_date_to_idx, local_band_to_idx):
     return dedup_idx, dedup_names, phenol_map
 
 
-def build_exp_C_indices(mmdd_to_date, local_band_to_idx):
+def _fetch_exp_c_bands_from_mlflow(run_id=None):
+    """
+    Download stage3_exp_c_bands.txt from a Stage 2 MLflow artifact.
+
+    If run_id is None, searches cropmap_feature_analysis_s2 for the latest
+    finished Stage 2 parent run (name matches 'stage2v2_binary_fwd_*').
+    Saves the file to PROCESSED_DIR and returns its Path.
+    """
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = mlflow.tracking.MlflowClient()
+
+    if run_id is None:
+        exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_FEATURE)
+        if exp is None:
+            raise RuntimeError(
+                f"MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}' not found. "
+                "Run Stage 2 first."
+            )
+        runs = client.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string="attributes.run_name LIKE 'stage2v2_binary_fwd_%'",
+            order_by=["attributes.start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            raise RuntimeError(
+                f"No Stage 2 runs found in MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}'. "
+                "Run Stage 2 first or pass --stage2-run-id explicitly."
+            )
+        run_id = runs[0].info.run_id
+        log.info(f"Auto-selected Stage 2 run: {runs[0].info.run_name} (run_id={run_id})")
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = mlflow.artifacts.download_artifacts(
+        run_id=run_id,
+        artifact_path="stage3_exp_c_bands.txt",
+        dst_path=str(PROCESSED_DIR),
+    )
+    log.info(f"Downloaded stage3_exp_c_bands.txt → {local_path}")
+    return Path(local_path)
+
+
+def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
     """
     Load stage3_exp_c_bands.txt (written by feature_analysis.py / v2 notebook).
     Each line: '<BAND>_<YYYYMMDD>' or '<BAND>_<MMDD>'.
     Maps MMDD to local reference-year date, then to flat local index.
-    """
-    if not STAGE3_EXP_C_BANDS.exists():
-        raise FileNotFoundError(
-            f"Stage 2 output not found: {STAGE3_EXP_C_BANDS}\n"
-            "Run Stage 2 first:  python feature_analysis.py --stage 2"
-        )
 
-    with open(STAGE3_EXP_C_BANDS) as f:
+    If the file is not found locally, it is downloaded from the MLflow artifact
+    of the latest Stage 2 run (or the run specified by stage2_run_id).
+    """
+    bands_path = STAGE3_EXP_C_BANDS
+    if not bands_path.exists():
+        log.info(
+            "stage3_exp_c_bands.txt not found locally — fetching from MLflow "
+            f"({'run_id=' + stage2_run_id if stage2_run_id else 'latest Stage 2 run'})"
+        )
+        bands_path = _fetch_exp_c_bands_from_mlflow(run_id=stage2_run_id)
+
+    with open(bands_path) as f:
         lines = [l.strip() for l in f if l.strip()]
 
     exp_C_idx, exp_C_names = [], []
@@ -199,14 +247,14 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx):
 
     if not exp_C_idx:
         raise ValueError(
-            f"Exp C: no bands from {STAGE3_EXP_C_BANDS.name} matched current processed S2 files.\n"
+            f"Exp C: no bands from {bands_path.name} matched current processed S2 files.\n"
             "Check that S2 files for the same dates as Stage 2 are present."
         )
 
     if skipped:
-        log.warning(f"Exp C: {skipped} band(s) from {STAGE3_EXP_C_BANDS.name} could not be matched")
+        log.warning(f"Exp C: {skipped} band(s) from {bands_path.name} could not be matched")
 
-    log.info(f"Exp C: {len(exp_C_idx)} channels from {STAGE3_EXP_C_BANDS.name}")
+    log.info(f"Exp C: {len(exp_C_idx)} channels from {bands_path.name}")
     return exp_C_idx, exp_C_names
 
 
@@ -761,6 +809,7 @@ def main(
     force=False,
     data_dir=None,
     skip_viz=False,
+    stage2_run_id=None,
 ):
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
@@ -795,7 +844,7 @@ def main(
         local_date_to_idx, local_band_to_idx
     )
     exp_C_idx, exp_C_names             = build_exp_C_indices(
-        mmdd_to_date, local_band_to_idx
+        mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
     )
 
     # ── Class weights ──────────────────────────────────────────────────────
@@ -880,6 +929,14 @@ if __name__ == "__main__":
     parser.add_argument("--force",    action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz", action="store_true", help="Skip full-image visualization")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
+    parser.add_argument(
+        "--stage2-run-id", default=None,
+        help=(
+            "MLflow run ID of the Stage 2 parent run to fetch stage3_exp_c_bands.txt from. "
+            "If omitted and the file is absent locally, the latest finished Stage 2 run is "
+            "used automatically."
+        ),
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -901,4 +958,5 @@ if __name__ == "__main__":
         force=args.force,
         data_dir=args.data_dir,
         skip_viz=args.skip_viz,
+        stage2_run_id=args.stage2_run_id,
     )
