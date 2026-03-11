@@ -970,6 +970,24 @@ def main(
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 
+    # ── Validate TIF files — fail fast on corrupt/truncated downloads ──────
+    corrupt = []
+    for path in s2_processed:
+        try:
+            with rasterio.open(path) as src:
+                src.read(1, window=rasterio.windows.Window(0, 0, min(256, src.width), min(256, src.height)))
+        except Exception as e:
+            corrupt.append((path, str(e)))
+    if corrupt:
+        log.error(f"Found {len(corrupt)} corrupt S2 file(s) — re-process before training:")
+        for p, err in corrupt:
+            log.error(f"  {p}  ({err})")
+        raise RuntimeError(
+            f"{len(corrupt)} corrupt S2 file(s) detected (likely truncated during processing). "
+            "Delete the bad files and re-run:  python stages/process_data.py --years <year>"
+        )
+    log.info(f"All {len(s2_processed)} S2 files validated OK")
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
