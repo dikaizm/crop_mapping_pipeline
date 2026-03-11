@@ -101,15 +101,22 @@ def _build_drive_service():
 
 
 def download_files_by_name(filenames: list, year: str, output_dir: str,
-                           overwrite: bool = False) -> None:
+                           overwrite: bool = False, raw: bool = False) -> None:
     """
-    Download specific files by filename from the GDrive S2 processed folder for a given year.
+    Download specific files by filename from a GDrive folder for a given year.
 
-    Looks up each filename in the folder via GDrive API, then downloads by file ID.
+    raw=False → looks up in GDRIVE_FILES s2_{year} (processed folder)
+    raw=True  → looks up in GDRIVE_RAW_S2_FOLDER_IDS (raw folder)
     """
-    folder_entry = GDRIVE_FILES.get(f"s2_{year}")
-    if not folder_entry or not folder_entry.get("id"):
-        raise ValueError(f"No GDrive folder configured for year {year} (s2_{year})")
+    if raw:
+        folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(year)
+        if not folder_id:
+            raise ValueError(f"No raw GDrive folder configured for year {year}")
+    else:
+        folder_entry = GDRIVE_FILES.get(f"s2_{year}")
+        if not folder_entry or not folder_entry.get("id"):
+            raise ValueError(f"No GDrive folder configured for year {year} (s2_{year})")
+        folder_id = folder_entry["id"]
 
     folder_id = folder_entry["id"]
     service   = _build_drive_service()
@@ -222,9 +229,13 @@ def main(
     # ── Download specific files by filename ───────────────────────────────────
     if files:
         for yr in years:
-            out_dir = str(S2_PROCESSED_DIR / yr)
+            if raw:
+                base_raw_dir = raw_s2_dir or str(PROCESSED_DIR.parent / "raw" / "s2")
+                out_dir = str(pathlib.Path(base_raw_dir) / yr)
+            else:
+                out_dir = str(S2_PROCESSED_DIR / yr)
             log.info(f"Downloading {len(files)} file(s) for year {yr} → {out_dir}")
-            download_files_by_name(files, yr, out_dir, overwrite=overwrite)
+            download_files_by_name(files, yr, out_dir, overwrite=overwrite, raw=raw)
         return
 
     if raw:
