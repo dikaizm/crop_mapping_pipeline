@@ -55,7 +55,7 @@ from crop_mapping_pipeline.config import (
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP,
     VAL_FRAC, SEED, ARCH_CFG,
-    STAGE3_EXP_C_BANDS,
+    STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from geoai.geoai.utils.device import get_device
@@ -258,6 +258,110 @@ def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
     return exp_C_idx, exp_C_names
 
 
+def _fetch_projected_from_mlflow(run_id=None):
+    """
+    Download stage3_exp_c_bands_projected.json from a project run MLflow artifact.
+
+    If run_id is None, searches cropmap_feature_analysis_s2 for the latest
+    run named 'stage2v2_project_*'. Saves to PROCESSED_DIR and returns its Path.
+    """
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = mlflow.tracking.MlflowClient()
+
+    if run_id is None:
+        exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_FEATURE)
+        if exp is None:
+            raise RuntimeError(
+                f"MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}' not found."
+            )
+        runs = client.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string="attributes.run_name LIKE 'stage2v2_project_%'",
+            order_by=["attributes.start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            raise RuntimeError(
+                f"No project runs found in '{MLFLOW_EXPERIMENT_FEATURE}'. "
+                "Run:  python feature_analysis.py --stage project"
+            )
+        run_id = runs[0].info.run_id
+        log.info(f"Auto-selected project run: {runs[0].info.run_name} (run_id={run_id})")
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = mlflow.artifacts.download_artifacts(
+        run_id=run_id,
+        artifact_path="stage3_exp_c_bands_projected.json",
+        dst_path=str(PROCESSED_DIR),
+    )
+    log.info(f"Downloaded stage3_exp_c_bands_projected.json → {local_path}")
+    return Path(local_path)
+
+
+def build_exp_C_indices_projected(s2_processed, project_run_id=None):
+    """
+    Load stage3_exp_c_bands_projected.json and compute per-year band indices.
+
+    Returns dict:  {yr: (idx_list, names_list)}
+    If the projected file is missing, falls back to downloading it from MLflow
+    or raises an error with instructions.
+    """
+    import json as _json
+
+    p = STAGE3_EXP_C_BANDS_PROJECTED
+
+    if not p.exists():
+        log.info(
+            "stage3_exp_c_bands_projected.json not found locally — fetching from MLflow "
+            f"({'run_id=' + project_run_id if project_run_id else 'latest project run'})"
+        )
+        try:
+            p = _fetch_projected_from_mlflow(run_id=project_run_id)
+        except RuntimeError as e:
+            log.warning(f"Could not fetch projected bands: {e}")
+            return None   # caller falls back to single-ref-year behaviour
+
+    with open(p) as f:
+        projected = _json.load(f)   # {"2022": ["B4_20220730", ...], "2023": [...], ...}
+
+    # Build per-year file lists and their flat channel maps
+    by_year = {}
+    for path in s2_processed:
+        yr = Path(path).name.split("_")[1]
+        by_year.setdefault(yr, []).append(path)
+
+    result = {}
+    for yr, band_names in projected.items():
+        yr_files = sorted(by_year.get(yr, []))
+        if not yr_files:
+            log.warning(f"Exp C projected: no S2 files for year {yr} — skipping")
+            continue
+
+        # Build flat channel map for this year: "B4_20230801" → int index
+        yr_band_to_idx = {}
+        for file_idx, path in enumerate(yr_files):
+            d = parse_date(path)
+            if d:
+                for band_pos, b in enumerate(S2_BAND_NAMES):
+                    yr_band_to_idx[f"{b}_{d}"] = file_idx * N_BANDS_PER_DATE + band_pos
+
+        idx, names, skipped = [], [], 0
+        for band_name in band_names:
+            i = yr_band_to_idx.get(band_name)
+            if i is not None:
+                idx.append(i)
+                names.append(band_name)
+            else:
+                skipped += 1
+
+        if skipped:
+            log.warning(f"Exp C projected {yr}: {skipped} band(s) could not be matched")
+        log.info(f"Exp C projected {yr}: {len(idx)} channels")
+        result[yr] = (idx, names)
+
+    return result if result else None
+
+
 # ── Class weights ─────────────────────────────────────────────────────────────
 
 def compute_class_weights(cdl_path=None):
@@ -420,14 +524,20 @@ def _plot_confusion_matrix(preds, labels, save_path):
 def run_experiment(
     exp_name,
     arch,
-    band_indices,
-    band_names_list,
+    band_indices,           # list[int]  OR  dict{yr: (list[int], list[str])}
+    band_names_list,        # list[str]  (reference year; used for logging/metadata)
     description,
     s2_processed,
     class_weights_tensor,
     force=False,
     skip_viz=False,
 ):
+    """
+    band_indices can be:
+      - list[int]           → same indices applied to every year (Exp A / B, or
+                              Exp C without projected file)
+      - dict{yr: (idx, names)} → per-year indices from build_exp_C_indices_projected()
+    """
     cfg        = ARCH_CFG[arch]
     exp_dir    = MODELS_DIR / exp_name
     best_ckpt  = exp_dir / "best_model.pth"
@@ -438,10 +548,26 @@ def run_experiment(
         log.info(f"Checkpoint exists — skipping {exp_name}  (use --force to re-run)")
         return None
 
-    in_channels = len(band_indices)
+    per_year = isinstance(band_indices, dict)
+
+    def _yr_idx(yr):
+        """Return (idx_list, names_list) for a given year."""
+        if per_year:
+            if yr in band_indices:
+                return band_indices[yr]
+            # fallback: use the first available year's indices
+            fallback_yr = next(iter(band_indices))
+            log.warning(
+                f"Exp C projected: year {yr} not in projected map — "
+                f"falling back to {fallback_yr} indices"
+            )
+            return band_indices[fallback_yr]
+        return band_indices, band_names_list
+
+    in_channels = len(_yr_idx(TRAIN_YEARS[0])[0])
     log.info(f"\n{'='*65}")
     log.info(f" {exp_name}")
-    log.info(f"  arch={arch}  in_channels={in_channels}")
+    log.info(f"  arch={arch}  in_channels={in_channels}  per_year_indices={per_year}")
     log.info(f"  {description}")
     log.info(f"{'='*65}\n")
 
@@ -453,14 +579,15 @@ def run_experiment(
         if not yr_s2 or not yr_cdl.exists():
             log.warning(f"Skipping train year {yr}: {'no S2' if not yr_s2 else 'CDL missing'}")
             continue
+        yr_idx, _ = _yr_idx(yr)
         ds = RasterPatchDataset(
             s2_paths=yr_s2, cdl_path=str(yr_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
             keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-            min_valid_frac=MIN_VALID_FRAC, band_indices=band_indices,
+            min_valid_frac=MIN_VALID_FRAC, band_indices=yr_idx,
         )
         train_year_datasets.append(ds)
-        log.info(f"  [{yr}] {len(ds):,} patches")
+        log.info(f"  [{yr}] {len(ds):,} patches  ({len(yr_idx)} channels)")
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)
@@ -474,11 +601,12 @@ def run_experiment(
     test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
     test_cdl = CDL_BY_YEAR[TEST_YEAR]
     assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
+    test_idx, _ = _yr_idx(TEST_YEAR)
     test_ds = RasterPatchDataset(
         s2_paths=test_s2, cdl_path=str(test_cdl),
         patch_size=PATCH_SIZE, stride=STRIDE,
         keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-        min_valid_frac=MIN_VALID_FRAC, band_indices=band_indices,
+        min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx,
     )
 
     train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True)
@@ -669,7 +797,7 @@ def run_experiment(
             log.info(f"  Running full-image inference for {exp_name}...")
             gt_map, _    = load_gt_remap(str(test_cdl))
             pred_map, _  = run_full_inference(
-                model, test_s2, band_indices, patch_size=PATCH_SIZE, stride=PATCH_SIZE
+                model, test_s2, test_idx, patch_size=PATCH_SIZE, stride=PATCH_SIZE
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             save_segmentation_map(
@@ -810,6 +938,7 @@ def main(
     data_dir=None,
     skip_viz=False,
     stage2_run_id=None,
+    project_run_id=None,
 ):
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
@@ -843,9 +972,17 @@ def main(
     exp_B_idx, exp_B_names, phenol_map = build_exp_B_indices(
         local_date_to_idx, local_band_to_idx
     )
-    exp_C_idx, exp_C_names             = build_exp_C_indices(
-        mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
-    )
+    # Exp C: prefer per-year projected indices; fall back to single-ref-year
+    exp_C_projected = build_exp_C_indices_projected(s2_processed, project_run_id=project_run_id)
+    if exp_C_projected:
+        exp_C_idx   = exp_C_projected          # dict {yr: (idx, names)}
+        exp_C_names = exp_C_projected[TRAIN_YEARS[0]][1]   # ref names for logging
+        log.info("Exp C: using per-year projected band indices")
+    else:
+        exp_C_idx, exp_C_names = build_exp_C_indices(
+            mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
+        )
+        log.info("Exp C: using single reference-year band indices (no projected file)")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
@@ -933,8 +1070,15 @@ if __name__ == "__main__":
         "--stage2-run-id", default=None,
         help=(
             "MLflow run ID of the Stage 2 parent run to fetch stage3_exp_c_bands.txt from. "
-            "If omitted and the file is absent locally, the latest finished Stage 2 run is "
-            "used automatically."
+            "If omitted and the file is absent locally, the latest Stage 2 run is used."
+        ),
+    )
+    parser.add_argument(
+        "--project-run-id", default=None,
+        help=(
+            "MLflow run ID of the stage2v2_project run to fetch "
+            "stage3_exp_c_bands_projected.json from. "
+            "If omitted and the file is absent locally, the latest project run is used."
         ),
     )
     args = parser.parse_args()
@@ -959,4 +1103,5 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         skip_viz=args.skip_viz,
         stage2_run_id=args.stage2_run_id,
+        project_run_id=args.project_run_id,
     )

@@ -51,7 +51,8 @@ from crop_mapping_pipeline.config import (
     SAMPLE_FRACTION, TOP_K_PER_CROP,
     S2_ENCODER, S2_PATCH_SIZE, S2_STRIDE, S2_MIN_VALID,
     S2_EPOCHS, S2_PATIENCE, S2_DELTA, S2_NO_IMPROVE, S2_MAX_BANDS, S2_BATCH_SIZE,
-    STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS,
+    STAGE2_RESULTS_CSV, STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
+    TRAIN_YEARS, TEST_YEAR,
 )
 
 # Handoff file written by Stage 1, read by Stage 2 when run separately
@@ -668,6 +669,118 @@ def _save_results(selected_per_crop: dict, history_per_crop: dict,
     log.info(f"\nStage 3 Exp C — union: {len(union)} bands: {union}")
 
 
+# ── Stage project ──────────────────────────────────────────────────────────────
+
+def run_project() -> None:
+    """
+    Project Stage 2 band selections (2022 dates) to nearest equivalent dates
+    in every training and test year.
+
+    Reads stage3_exp_c_bands.txt  — lines like 'B4_20220730'
+    Writes stage3_exp_c_bands_projected.json:
+        {
+          "2022": ["B4_20220730", "B8_20220730", ...],
+          "2023": ["B4_20230801", "B8_20230801", ...],
+          "2024": ["B4_20240730", "B8_20240730", ...]
+        }
+
+    This file is consumed by train_segmentation.py to compute per-year band
+    indices so that each year's RasterPatchDataset selects the seasonally
+    correct channels, even when acquisition dates differ across years.
+    """
+    from datetime import date as _date
+
+    if not STAGE3_EXP_C_BANDS.exists():
+        raise FileNotFoundError(
+            f"Stage 2 output not found: {STAGE3_EXP_C_BANDS}\n"
+            "Run Stage 2 first:  python feature_analysis.py --stage 2"
+        )
+
+    with open(STAGE3_EXP_C_BANDS) as f:
+        selected_bands = [l.strip() for l in f if l.strip()]
+
+    if not selected_bands:
+        raise ValueError(f"{STAGE3_EXP_C_BANDS} is empty — re-run Stage 2.")
+
+    # Parse band name + MMDD from each entry  e.g. "B4_20220730" → ("B4", "0730")
+    band_mmdd = []
+    for entry in selected_bands:
+        m = re.match(r"(.+)_(\d{4})(\d{2})(\d{2})$", entry)
+        if m:
+            band_mmdd.append((m.group(1), m.group(3) + m.group(4)))
+        else:
+            log.warning(f"run_project: cannot parse band entry '{entry}' — skipped")
+
+    log.info(f"Loaded {len(band_mmdd)} selected bands from {STAGE3_EXP_C_BANDS.name}")
+
+    all_years = list(dict.fromkeys(list(TRAIN_YEARS) + [TEST_YEAR]))
+    projected = {}
+
+    for yr in all_years:
+        yr_files = sorted(glob(str(S2_PROCESSED_DIR / yr / "*_processed.tif")))
+        if not yr_files:
+            log.warning(f"  {yr}: no S2 files found — skipping")
+            continue
+
+        # Build list of available YYYYMMDD dates for this year
+        yr_dates = []
+        for p in yr_files:
+            m = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", pathlib.Path(p).name)
+            if m:
+                yr_dates.append(f"{m.group(1)}{m.group(2)}{m.group(3)}")
+        yr_dates = sorted(set(yr_dates))
+
+        # For each selected band's MMDD, find nearest acquisition date in this year
+        yr_bands = []
+        far_matches = []
+        for band, mmdd in band_mmdd:
+            month, day = int(mmdd[:2]), int(mmdd[2:])
+            try:
+                target = _date(int(yr), month, day)
+            except ValueError:
+                # e.g. Feb 29 in non-leap year — shift to Feb 28
+                target = _date(int(yr), month, min(day, 28))
+            target_doy = target.timetuple().tm_yday
+
+            best_date, best_dist = None, 999
+            for yyyymmdd in yr_dates:
+                d = _date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]))
+                dist = abs(d.timetuple().tm_yday - target_doy)
+                if dist < best_dist:
+                    best_dist, best_date = dist, yyyymmdd
+
+            yr_bands.append(f"{band}_{best_date}")
+            if best_dist > 15:
+                far_matches.append((band, mmdd, best_date, best_dist))
+
+        projected[yr] = yr_bands
+
+        if far_matches:
+            log.warning(f"  {yr}: {len(far_matches)} band(s) matched with gap > 15 days:")
+            for band, mmdd, matched, dist in far_matches:
+                log.warning(f"    {band}_{mmdd} → {matched} (gap={dist}d)")
+        log.info(f"  {yr}: {len(yr_bands)} bands projected  ({len(yr_dates)} available dates)")
+
+    if not projected:
+        raise RuntimeError("No years projected — check S2_PROCESSED_DIR paths.")
+
+    os.makedirs(os.path.dirname(STAGE3_EXP_C_BANDS_PROJECTED), exist_ok=True)
+    with open(STAGE3_EXP_C_BANDS_PROJECTED, "w") as f:
+        json.dump(projected, f, indent=2)
+    log.info(f"Saved: {STAGE3_EXP_C_BANDS_PROJECTED}")
+
+    # Log as MLflow artifact
+    _mlflow_setup()
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    with mlflow.start_run(run_name=f"stage2v2_project_{ts}"):
+        mlflow.set_tag("stage", "project")
+        for yr, bands in projected.items():
+            mlflow.log_param(f"n_bands_{yr}", len(bands))
+        mlflow.log_artifact(str(STAGE3_EXP_C_BANDS_PROJECTED))
+        mlflow.log_artifact(str(STAGE3_EXP_C_BANDS))
+    log.info("MLflow artifact logged.")
+
+
 # ── MLflow helpers ─────────────────────────────────────────────────────────────
 
 def _mlflow_setup() -> None:
@@ -725,24 +838,38 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all",
         if not force and os.path.exists(STAGE3_EXP_C_BANDS):
             log.info(f"Stage 2 output already exists: {STAGE3_EXP_C_BANDS}")
             log.info("Use --force to re-run.")
+            if stage == "2":
+                return
+        else:
+            # Load Stage 1 candidates from handoff file
+            if not os.path.exists(STAGE1_CANDIDATES_JSON):
+                raise FileNotFoundError(
+                    f"Stage 1 candidates not found: {STAGE1_CANDIDATES_JSON}\n"
+                    "Run Stage 1 first:  python feature_analysis.py --stage 1"
+                )
+            with open(STAGE1_CANDIDATES_JSON) as f:
+                payload = json.load(f)
+            candidates_per_crop = {int(k): v for k, v in payload["candidates_per_crop"].items()}
+            run_ts              = payload["run_ts"]
+            log.info(f"Loaded Stage 1 candidates from {STAGE1_CANDIDATES_JSON}  (run_ts={run_ts})")
+
+            log.info(f"Device: {_device_label()}")
+            _, all_bandnames, _, s2_files, cdl_path = load_data(s2_year="2022", stage=2)
+            run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
+            log.info("Stage 2 complete.")
+
+        if stage == "2":
             return
 
-        # Load Stage 1 candidates from handoff file
-        if not os.path.exists(STAGE1_CANDIDATES_JSON):
-            raise FileNotFoundError(
-                f"Stage 1 candidates not found: {STAGE1_CANDIDATES_JSON}\n"
-                "Run Stage 1 first:  python feature_analysis.py --stage 1"
-            )
-        with open(STAGE1_CANDIDATES_JSON) as f:
-            payload = json.load(f)
-        candidates_per_crop = {int(k): v for k, v in payload["candidates_per_crop"].items()}
-        run_ts              = payload["run_ts"]
-        log.info(f"Loaded Stage 1 candidates from {STAGE1_CANDIDATES_JSON}  (run_ts={run_ts})")
-
-        log.info(f"Device: {_device_label()}")
-        _, all_bandnames, _, s2_files, cdl_path = load_data(s2_year="2022", stage=2)
-        run_stage2(candidates_per_crop, all_bandnames, s2_files, cdl_path, run_ts)
-        log.info("Stage 2 complete.")
+    # ── Stage project ──────────────────────────────────────────────────────────
+    if stage == "project":
+        if not force and STAGE3_EXP_C_BANDS_PROJECTED.exists():
+            log.info(f"Projected bands already exist: {STAGE3_EXP_C_BANDS_PROJECTED}")
+            log.info("Use --force to re-run.")
+            return
+        run_project()
+        log.info("Band projection complete.")
+        return
 
     log.info("Feature analysis complete.")
 
@@ -751,9 +878,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Feature analysis v2: Stage 1 + Stage 2")
     parser.add_argument(
         "--stage",
-        choices=["1", "2", "all"],
+        choices=["1", "2", "all", "project"],
         default="all",
-        help="Which stage to run: 1 (CPU, run locally), 2 (GPU, run on server), all (default)",
+        help=(
+            "Which stage to run: "
+            "1 (CPU, run locally), "
+            "2 (GPU, run on server), "
+            "all (1+2), "
+            "project (map 2022 selections to 2023/2024 nearest dates)"
+        ),
     )
     parser.add_argument("--force",    action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str,   default=None,

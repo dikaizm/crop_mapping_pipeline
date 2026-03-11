@@ -24,8 +24,9 @@ CDL_BY_YEAR = {
 }
 
 # Stage 2 + Stage 3 handoff files
-STAGE2_RESULTS_CSV = PROCESSED_DIR / "stage2v2_per_crop_results.csv"
-STAGE3_EXP_C_BANDS = PROCESSED_DIR / "stage3_exp_c_bands.txt"
+STAGE2_RESULTS_CSV          = PROCESSED_DIR / "stage2v2_per_crop_results.csv"
+STAGE3_EXP_C_BANDS          = PROCESSED_DIR / "stage3_exp_c_bands.txt"
+STAGE3_EXP_C_BANDS_PROJECTED = PROCESSED_DIR / "stage3_exp_c_bands_projected.json"
 
 # ── Google Drive file IDs ──────────────────────────────────────────────────────
 # Fill in before running fetch_data.py.
