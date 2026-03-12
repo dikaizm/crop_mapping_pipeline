@@ -110,592 +110,18 @@ def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_
     return filtered_paths, remapped
 
 
-def parse_date(path):
-    m = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", Path(path).name)
-    return f"{m.group(1)}{m.group(2)}{m.group(3)}" if m else None
-
-
-def build_local_band_map(s2_processed):
-    """
-    Return (local_band_names, local_band_to_idx, local_date_to_idx, mmdd_to_date)
-    based on the year with the most processed files (used as reference).
-    """
-    by_year = {}
-    for p in s2_processed:
-        yr = Path(p).name.split("_")[1]
-        by_year.setdefault(yr, []).append(p)
-
-    ref_yr    = max(by_year, key=lambda y: len(by_year[y]))
-    ref_files = sorted(by_year[ref_yr])
-
-    local_band_names  = []
-    local_date_to_idx = {}
-    for i, p in enumerate(ref_files):
-        d = parse_date(p)
-        local_date_to_idx[d] = i
-        local_band_names.extend([f"{b}_{d}" for b in S2_BAND_NAMES])
-
-    local_band_to_idx = {n: i for i, n in enumerate(local_band_names)}
-    available_dates   = sorted(local_date_to_idx.keys())
-    mmdd_to_date      = {d[4:]: d for d in available_dates}
-
-    log.info(
-        f"Reference year={ref_yr}, {len(ref_files)} dates, "
-        f"{len(local_band_names)} local channels"
-    )
-    return local_band_names, local_band_to_idx, local_date_to_idx, mmdd_to_date
-
-
-def build_exp_A_indices(local_date_to_idx, local_band_to_idx):
-    """Single date (Jul 30) × 9 vegetation bands."""
-    available_dates = sorted(local_date_to_idx.keys())
-    july30_key = next(
-        (k for k in available_dates if k[4:6] == "07" and k[6:8] in ("29", "30")),
-        available_dates[-1],
-    )
-    off  = local_date_to_idx[july30_key] * N_BANDS_PER_DATE
-    idx  = [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
-    names = [f"{b}_{july30_key}" for b in VEGE_BANDS]
-    log.info(f"Exp A: date={july30_key}, {len(idx)} channels")
-    return idx, names, july30_key
-
-
-def build_exp_B_indices(local_date_to_idx, local_band_to_idx):
-    """4 phenological dates × 9 vegetation bands = up to 36 channels.
-
-    Dates are chosen as the acquisition nearest to the mid-point of each
-    phenological season (Jan-15, Mar-15, Jul-15, Nov-15).
-    """
-    available_dates = sorted(local_date_to_idx.keys())
-
-    # Target: mid-point of each season as day-of-year
-    phenol_targets = {"Jan": "0115", "Mar": "0315", "Jul": "0715", "Nov": "1115"}
-    phenol_map     = {}
-    for label, target_mmdd in phenol_targets.items():
-        target_doy = int(target_mmdd)   # treat MMDD as comparable integer
-        match = min(
-            available_dates,
-            key=lambda d: abs(int(d[4:]) - target_doy),
-        )
-        phenol_map[label] = match
-
-    exp_B_idx, exp_B_names = [], []
-    for _label, d in phenol_map.items():
-        off          = local_date_to_idx[d] * N_BANDS_PER_DATE
-        exp_B_idx   += [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
-        exp_B_names += [f"{b}_{d}" for b in VEGE_BANDS]
-
-    # deduplicate
-    seen, dedup_idx, dedup_names = set(), [], []
-    for idx, name in zip(exp_B_idx, exp_B_names):
-        if idx not in seen:
-            seen.add(idx)
-            dedup_idx.append(idx)
-            dedup_names.append(name)
-
-    log.info(f"Exp B: dates={list(phenol_map.values())}, {len(dedup_idx)} channels")
-    return dedup_idx, dedup_names, phenol_map
-
-
-def _fetch_exp_c_bands_from_mlflow(run_id=None):
-    """
-    Download stage3_exp_c_bands.txt from a Stage 2 MLflow artifact.
-
-    If run_id is None, searches cropmap_feature_analysis_s2 for the latest
-    finished Stage 2 parent run (name matches 'stage2v2_binary_fwd_*').
-    Saves the file to PROCESSED_DIR and returns its Path.
-    """
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    client = mlflow.tracking.MlflowClient()
-
-    if run_id is None:
-        exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_FEATURE)
-        if exp is None:
-            raise RuntimeError(
-                f"MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}' not found. "
-                "Run Stage 2 first."
-            )
-        runs = client.search_runs(
-            experiment_ids=[exp.experiment_id],
-            filter_string="attributes.run_name LIKE 'stage2v2_binary_fwd_%'",
-            order_by=["attributes.start_time DESC"],
-            max_results=1,
-        )
-        if not runs:
-            raise RuntimeError(
-                f"No Stage 2 runs found in MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}'. "
-                "Run Stage 2 first or pass --stage2-run-id explicitly."
-            )
-        run_id = runs[0].info.run_id
-        log.info(f"Auto-selected Stage 2 run: {runs[0].info.run_name} (run_id={run_id})")
-
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    local_path = mlflow.artifacts.download_artifacts(
-        run_id=run_id,
-        artifact_path="stage3_exp_c_bands.txt",
-        dst_path=str(PROCESSED_DIR),
-    )
-    log.info(f"Downloaded stage3_exp_c_bands.txt → {local_path}")
-    return Path(local_path), run_id
-
-
-def build_exp_C_indices(mmdd_to_date, local_band_to_idx, stage2_run_id=None):
-    """
-    Load stage3_exp_c_bands.txt (written by feature_analysis.py / v2 notebook).
-    Each line: '<BAND>_<YYYYMMDD>' or '<BAND>_<MMDD>'.
-    Maps MMDD to local reference-year date, then to flat local index.
-
-    If the file is not found locally, it is downloaded from the MLflow artifact
-    of the latest Stage 2 run (or the run specified by stage2_run_id).
-    """
-    bands_path = STAGE3_EXP_C_BANDS
-    resolved_stage2_run_id = stage2_run_id
-    if not bands_path.exists():
-        log.info(
-            "stage3_exp_c_bands.txt not found locally — fetching from MLflow "
-            f"({'run_id=' + stage2_run_id if stage2_run_id else 'latest Stage 2 run'})"
-        )
-        bands_path, resolved_stage2_run_id = _fetch_exp_c_bands_from_mlflow(run_id=stage2_run_id)
-
-    with open(bands_path) as f:
-        lines = [l.strip() for l in f if l.strip()]
-
-    exp_C_idx, exp_C_names = [], []
-    skipped = 0
-    for band_name in lines:
-        try:
-            b, ds = band_name.rsplit("_", 1)
-        except ValueError:
-            skipped += 1
-            continue
-        mmdd       = ds[4:] if len(ds) == 8 else ds    # YYYYMMDD or MMDD
-        local_date = mmdd_to_date.get(mmdd)
-        if local_date and b in S2_BAND_NAMES:
-            local_name = f"{b}_{local_date}"
-            idx        = local_band_to_idx.get(local_name)
-            if idx is not None:
-                exp_C_idx.append(idx)
-                exp_C_names.append(local_name)
-            else:
-                skipped += 1
-        else:
-            skipped += 1
-
-    if not exp_C_idx:
-        raise ValueError(
-            f"Exp C: no bands from {bands_path.name} matched current processed S2 files.\n"
-            "Check that S2 files for the same dates as Stage 2 are present."
-        )
-
-    if skipped:
-        log.warning(f"Exp C: {skipped} band(s) from {bands_path.name} could not be matched")
-
-    log.info(f"Exp C: {len(exp_C_idx)} channels from {bands_path.name}")
-    if resolved_stage2_run_id:
-        log.info(f"Exp C source Stage 2 run_id: {resolved_stage2_run_id}")
-    return exp_C_idx, exp_C_names, resolved_stage2_run_id
-
-
-def _fetch_projected_from_mlflow(run_id=None):
-    """
-    Download stage3_exp_c_bands_projected.json from a project run MLflow artifact.
-
-    If run_id is None, searches cropmap_feature_analysis_s2 for the latest
-    run named 'stage2v2_project_*'. Saves to PROCESSED_DIR and returns its Path.
-    """
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    client = mlflow.tracking.MlflowClient()
-
-    if run_id is None:
-        exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_FEATURE)
-        if exp is None:
-            raise RuntimeError(
-                f"MLflow experiment '{MLFLOW_EXPERIMENT_FEATURE}' not found."
-            )
-        runs = client.search_runs(
-            experiment_ids=[exp.experiment_id],
-            filter_string="attributes.run_name LIKE 'stage2v2_project_%'",
-            order_by=["attributes.start_time DESC"],
-            max_results=1,
-        )
-        if not runs:
-            raise RuntimeError(
-                f"No project runs found in '{MLFLOW_EXPERIMENT_FEATURE}'. "
-                "Run:  python feature_analysis.py --stage project"
-            )
-        run_id = runs[0].info.run_id
-        log.info(f"Auto-selected project run: {runs[0].info.run_name} (run_id={run_id})")
-
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    local_path = mlflow.artifacts.download_artifacts(
-        run_id=run_id,
-        artifact_path="stage3_exp_c_bands_projected.json",
-        dst_path=str(PROCESSED_DIR),
-    )
-    log.info(f"Downloaded stage3_exp_c_bands_projected.json → {local_path}")
-    return Path(local_path), run_id
-
-
-def build_exp_C_indices_projected(s2_processed, project_run_id=None):
-    """
-    Load stage3_exp_c_bands_projected.json and compute per-year band indices.
-
-    Returns dict:  {yr: (idx_list, names_list)}
-    If the projected file is missing, falls back to downloading it from MLflow
-    or raises an error with instructions.
-    """
-    import json as _json
-
-    p = STAGE3_EXP_C_BANDS_PROJECTED
-    resolved_project_run_id = project_run_id
-
-    if not p.exists():
-        log.info(
-            "stage3_exp_c_bands_projected.json not found locally — fetching from MLflow "
-            f"({'run_id=' + project_run_id if project_run_id else 'latest project run'})"
-        )
-        try:
-            p, resolved_project_run_id = _fetch_projected_from_mlflow(run_id=project_run_id)
-        except RuntimeError as e:
-            log.warning(f"Could not fetch projected bands: {e}")
-            return None, None   # caller falls back to single-ref-year behaviour
-
-    with open(p) as f:
-        projected = _json.load(f)   # {"2022": ["B4_20220730", ...], "2023": [...], ...}
-
-    # Build per-year file lists and their flat channel maps
-    by_year = {}
-    for path in s2_processed:
-        yr = Path(path).name.split("_")[1]
-        by_year.setdefault(yr, []).append(path)
-
-    result = {}
-    for yr, band_names in projected.items():
-        yr_files = sorted(by_year.get(yr, []))
-        if not yr_files:
-            log.warning(f"Exp C projected: no S2 files for year {yr} — skipping")
-            continue
-
-        # Build flat channel map for this year: "B4_20230801" → int index
-        yr_band_to_idx = {}
-        for file_idx, path in enumerate(yr_files):
-            d = parse_date(path)
-            if d:
-                for band_pos, b in enumerate(S2_BAND_NAMES):
-                    yr_band_to_idx[f"{b}_{d}"] = file_idx * N_BANDS_PER_DATE + band_pos
-
-        idx, names, skipped = [], [], 0
-        for band_name in band_names:
-            i = yr_band_to_idx.get(band_name)
-            if i is not None:
-                idx.append(i)
-                names.append(band_name)
-            else:
-                skipped += 1
-
-        if skipped:
-            log.warning(f"Exp C projected {yr}: {skipped} band(s) could not be matched")
-        log.info(f"Exp C projected {yr}: {len(idx)} channels")
-        result[yr] = (idx, names)
-
-    if resolved_project_run_id:
-        log.info(f"Exp C source project run_id: {resolved_project_run_id}")
-    return (result if result else None), resolved_project_run_id
-
-
-def build_exp_C_v2_indices(mmdd_to_date, local_band_to_idx, stage2v3_run_id=None):
-    """
-    Load STAGE3_EXP_C_V2_JSON (written by feature_analysis_v2.py).
-
-    Reads union_dates and union_bands, then for each (date, band) pair:
-      - Maps MMDD of the reference date to the local reference-year date via mmdd_to_date
-      - Looks up the flat channel index in local_band_to_idx
-
-    If STAGE3_EXP_C_V2_JSON is not found locally and stage2v3_run_id is provided,
-    attempts to download it from that MLflow run's artifacts.
-
-    Returns (idx_list, names_list, resolved_run_id).
-    """
-    import json as _json
-
-    v2_json_path          = STAGE3_EXP_C_V2_JSON
-    resolved_stage2v3_run_id = stage2v3_run_id
-
-    if not v2_json_path.exists():
-        if stage2v3_run_id:
-            log.info(
-                f"STAGE3_EXP_C_V2_JSON not found locally — fetching from MLflow "
-                f"run_id={stage2v3_run_id}"
-            )
-            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-            PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-            try:
-                local_path = mlflow.artifacts.download_artifacts(
-                    run_id=stage2v3_run_id,
-                    artifact_path="stage3_exp_c_v2.json",
-                    dst_path=str(PROCESSED_DIR),
-                )
-                v2_json_path = Path(local_path)
-                log.info(f"Downloaded stage3_exp_c_v2.json → {local_path}")
-            except Exception as e:
-                raise RuntimeError(
-                    f"Could not download stage3_exp_c_v2.json from MLflow run "
-                    f"{stage2v3_run_id}: {e}"
-                )
-        else:
-            raise FileNotFoundError(
-                f"STAGE3_EXP_C_V2_JSON not found: {v2_json_path}\n"
-                "Run Stage 2v2 first:  python feature_analysis_v2.py --stage 2\n"
-                "Or pass --stage2v3-run-id to fetch from MLflow."
-            )
-
-    with open(v2_json_path) as f:
-        payload = _json.load(f)
-
-    union_dates = payload.get("union_dates", [])
-    union_bands = payload.get("union_bands", [])
-
-    if not union_dates or not union_bands:
-        raise ValueError(
-            f"STAGE3_EXP_C_V2_JSON is missing union_dates or union_bands: {v2_json_path}"
-        )
-
-    exp_C_v2_idx, exp_C_v2_names = [], []
-    skipped = 0
-
-    for date_yyyymmdd in union_dates:
-        # Map reference date MMDD to local reference-year date
-        mmdd       = date_yyyymmdd[4:]   # "20220730" → "0730"
-        local_date = mmdd_to_date.get(mmdd)
-        if local_date is None:
-            log.warning(f"Exp C v2: date MMDD={mmdd} (from {date_yyyymmdd}) not in mmdd_to_date — skipped")
-            skipped += 1
-            continue
-        for band in union_bands:
-            if band not in S2_BAND_NAMES:
-                log.warning(f"Exp C v2: band '{band}' not in S2_BAND_NAMES — skipped")
-                skipped += 1
-                continue
-            local_name = f"{band}_{local_date}"
-            idx        = local_band_to_idx.get(local_name)
-            if idx is not None:
-                exp_C_v2_idx.append(idx)
-                exp_C_v2_names.append(local_name)
-            else:
-                skipped += 1
-
-    if not exp_C_v2_idx:
-        raise ValueError(
-            f"Exp C v2: no bands from {v2_json_path.name} matched current processed S2 files.\n"
-            "Check that S2 files for the same dates as Stage 2v2 are present."
-        )
-
-    if skipped:
-        log.warning(f"Exp C v2: {skipped} (date, band) pair(s) could not be matched")
-
-    log.info(
-        f"Exp C v2: {len(exp_C_v2_idx)} channels "
-        f"({len(union_dates)} union dates × {len(union_bands)} union bands) "
-        f"from {v2_json_path.name}"
-    )
-    if resolved_stage2v3_run_id:
-        log.info(f"Exp C v2 source Stage 2v2 run_id: {resolved_stage2v3_run_id}")
-    return exp_C_v2_idx, exp_C_v2_names, resolved_stage2v3_run_id
-
-
-def build_exp_C_v2_rf_indices(mmdd_to_date, local_band_to_idx):
-    """
-    Load STAGE3_EXP_C_V2_RF_JSON (written by feature_analysis_v2.py --selector rf).
-    Same logic as build_exp_C_v2_indices but reads the RF-selector output.
-    Returns (idx_list, names_list).
-    """
-    import json as _json
-
-    rf_json_path = STAGE3_EXP_C_V2_RF_JSON
-    if not rf_json_path.exists():
-        raise FileNotFoundError(
-            f"Exp C_v2_rf input not found: {rf_json_path}\n"
-            "Run Stage 2v2-RF first:  python stages/feature_analysis_v2.py --stage 2 --selector rf"
-        )
-
-    with open(rf_json_path) as f:
-        payload = _json.load(f)
-
-    union_dates = payload.get("union_dates", [])
-    union_bands = payload.get("union_bands", [])
-    if not union_dates or not union_bands:
-        raise ValueError(f"STAGE3_EXP_C_V2_RF_JSON is missing union_dates or union_bands")
-
-    idx, names, skipped = [], [], 0
-    for date_yyyymmdd in union_dates:
-        mmdd       = date_yyyymmdd[4:]
-        local_date = mmdd_to_date.get(mmdd)
-        if local_date is None:
-            skipped += 1
-            continue
-        for band in union_bands:
-            local_name = f"{band}_{local_date}"
-            i          = local_band_to_idx.get(local_name)
-            if i is not None:
-                idx.append(i)
-                names.append(local_name)
-            else:
-                skipped += 1
-
-    if not idx:
-        raise ValueError(
-            f"Exp C_v2_rf: no bands matched current S2 files from {rf_json_path.name}"
-        )
-    if skipped:
-        log.warning(f"Exp C_v2_rf: {skipped} (date, band) pair(s) could not be matched")
-
-    log.info(
-        f"Exp C_v2_rf: {len(idx)} channels "
-        f"({len(union_dates)} union dates × {len(union_bands)} union bands) "
-        f"from {rf_json_path.name}"
-    )
-    return idx, names
-
-
-def build_exp_C_v2_indices_projected(s2_processed, project_run_id=None):
-    """
-    Load stage3_exp_c_v2_bands_projected.json and compute per-year band indices.
-
-    Returns dict:  {yr: (idx_list, names_list)}  or (None, None) if unavailable.
-    If the projected file is missing, falls back to downloading it from MLflow
-    or returns (None, None) with a warning so the caller can fall back to
-    single-reference-year behaviour.
-    """
-    import json as _json
-
-    p = PROCESSED_DIR / "stage3_exp_c_v2_bands_projected.json"
-    resolved_project_run_id = project_run_id
-
-    if not p.exists():
-        log.info(
-            "stage3_exp_c_v2_bands_projected.json not found locally — "
-            + (f"fetching from MLflow run_id={project_run_id}"
-               if project_run_id else "no project_run_id provided, skipping MLflow fetch")
-        )
-        if project_run_id:
-            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-            PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-            try:
-                local_path = mlflow.artifacts.download_artifacts(
-                    run_id=project_run_id,
-                    artifact_path="stage3_exp_c_v2_bands_projected.json",
-                    dst_path=str(PROCESSED_DIR),
-                )
-                p = Path(local_path)
-                log.info(f"Downloaded stage3_exp_c_v2_bands_projected.json → {local_path}")
-            except Exception as e:
-                log.warning(f"Could not fetch projected v2 bands: {e}")
-                return None, None
-        else:
-            return None, None
-
-    with open(p) as f:
-        projected = _json.load(f)   # {"2022": ["B4_20220730", ...], "2023": [...], ...}
-
-    # Build per-year file lists and their flat channel maps
-    by_year = {}
-    for path in s2_processed:
-        yr = Path(path).name.split("_")[1]
-        by_year.setdefault(yr, []).append(path)
-
-    result = {}
-    for yr, band_names in projected.items():
-        yr_files = sorted(by_year.get(yr, []))
-        if not yr_files:
-            log.warning(f"Exp C v2 projected: no S2 files for year {yr} — skipping")
-            continue
-
-        # Build flat channel map for this year: "B4_20230801" → int index
-        yr_band_to_idx = {}
-        for file_idx, path in enumerate(yr_files):
-            d = parse_date(path)
-            if d:
-                for band_pos, b in enumerate(S2_BAND_NAMES):
-                    yr_band_to_idx[f"{b}_{d}"] = file_idx * N_BANDS_PER_DATE + band_pos
-
-        idx, names, skipped = [], [], 0
-        for band_name in band_names:
-            i = yr_band_to_idx.get(band_name)
-            if i is not None:
-                idx.append(i)
-                names.append(band_name)
-            else:
-                skipped += 1
-
-        if skipped:
-            log.warning(f"Exp C v2 projected {yr}: {skipped} band(s) could not be matched")
-        log.info(f"Exp C v2 projected {yr}: {len(idx)} channels")
-        result[yr] = (idx, names)
-
-    if resolved_project_run_id:
-        log.info(f"Exp C v2 source project run_id: {resolved_project_run_id}")
-    return (result if result else None), resolved_project_run_id
-
-
-def build_exp_D_indices(mmdd_to_date, local_band_to_idx):
-    """
-    Load STAGE3_EXP_D_JSON (written by feature_analysis_v2.py Stage 1v3).
-
-    Exp D uses Stage 1 SI_global top-K dates × top-K bands directly, without
-    any Stage 2 CNN forward selection.  This serves as an ablation vs Exp C.
-
-    Returns (idx_list, names_list).
-    """
-    import json as _json
-
-    d_json_path = STAGE3_EXP_D_JSON
-    if not d_json_path.exists():
-        raise FileNotFoundError(
-            f"Exp D input not found: {d_json_path}\n"
-            "Run Stage 1v3 first:  python stages/feature_analysis_v2.py --stage 1"
-        )
-
-    with open(d_json_path) as f:
-        payload = _json.load(f)
-
-    union_dates = payload.get("union_dates", [])
-    union_bands = payload.get("union_bands", [])
-    if not union_dates or not union_bands:
-        raise ValueError(f"STAGE3_EXP_D_JSON is missing union_dates or union_bands: {d_json_path}")
-
-    exp_D_idx, exp_D_names = [], []
-    skipped = 0
-
-    for date_yyyymmdd in union_dates:
-        # Map 2022 date to the actual date in the current processed files via MMDD
-        mmdd = date_yyyymmdd[4:]   # "20220730" → "0730"
-        local_date = mmdd_to_date.get(mmdd)
-        if local_date is None:
-            skipped += 1
-            continue
-        for band in union_bands:
-            local_name = f"{band}_{local_date}"
-            idx        = local_band_to_idx.get(local_name)
-            if idx is not None:
-                exp_D_idx.append(idx)
-                exp_D_names.append(local_name)
-            else:
-                skipped += 1
-
-    if not exp_D_idx:
-        raise ValueError(
-            f"Exp D: no bands from {d_json_path.name} matched current processed S2 files.\n"
-            "Check that S2 files for the same dates as Stage 1v3 are present."
-        )
-    if skipped:
-        log.warning(f"Exp D: {skipped} (date, band) pair(s) could not be matched")
-
-    log.info(
-        f"Exp D: {len(exp_D_idx)} channels "
-        f"({len(union_dates)} union dates × {len(union_bands)} union bands) "
-        f"from {d_json_path.name}"
-    )
-    return exp_D_idx, exp_D_names
+from crop_mapping_pipeline.stages.experiments import (
+    parse_date,
+    build_local_band_map,
+    build_exp_A_indices,
+    build_exp_B_indices,
+    build_exp_C_indices,
+    build_exp_C_indices_projected,
+    build_exp_C_v2_indices,
+    build_exp_C_v2_indices_projected,
+    build_exp_C_v2_rf_indices,
+    build_exp_D_indices,
+)
 
 
 # ── Class weights ─────────────────────────────────────────────────────────────
@@ -746,6 +172,43 @@ def compute_per_class_iou(logits, labels, num_classes):
     return ious
 
 
+class PhenologyAwareLoss(nn.Module):
+    """
+    Computes CrossEntropyLoss with dynamic per-pixel weights.
+    For pixels labeled as 'Crop' (1-10), if NDVI < threshold (0.3),
+    the loss weight is reduced to 0.1 to avoid penalizing the model
+    for identifying 'Background' during the off-season.
+    """
+    def __init__(self, base_weight, red_idx, nir_idx, threshold=0.3, penalty_reduction=0.1):
+        super().__init__()
+        self.base_criterion = nn.CrossEntropyLoss(weight=base_weight, reduction='none')
+        self.red_idx = red_idx
+        self.nir_idx = nir_idx
+        self.threshold = threshold
+        self.reduction_factor = penalty_reduction
+
+    def forward(self, logits, labels, images):
+        # images shape: (B, C, H, W)
+        # Calculate NDVI: (NIR - Red) / (NIR + Red + eps)
+        red = images[:, self.red_idx, :, :]
+        nir = images[:, self.nir_idx, :, :]
+        ndvi = (nir - red) / (nir + red + 1e-7)
+
+        # Standard loss per pixel
+        loss = self.base_criterion(logits, labels) # (B, H, W)
+
+        # Identify 'Crop' pixels (1 to NUM_CLASSES-1)
+        is_crop = (labels > 0)
+        
+        # Identify pixels that should be 'Active' but are 'Dormant' (low NDVI)
+        is_dormant_crop = is_crop & (ndvi < self.threshold)
+
+        # Apply reduction factor to dormant crop pixels
+        weights = torch.ones_like(loss)
+        weights[is_dormant_crop] = self.reduction_factor
+        
+        return (loss * weights).mean()
+
 @torch.no_grad()
 def validate_one_epoch(model, loader, criterion, device, num_classes):
     model.eval()
@@ -755,7 +218,14 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
         imgs, masks = imgs.to(device), masks.to(device)
         imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
         logits      = model(imgs)
-        total_loss += criterion(logits, masks).item()
+        
+        # Check if criterion is phenology-aware
+        if isinstance(criterion, PhenologyAwareLoss):
+            loss = criterion(logits, masks, imgs)
+        else:
+            loss = criterion(logits, masks)
+            
+        total_loss += loss.item()
         all_logits.append(logits.cpu())
         all_labels.append(masks.cpu())
     all_logits = torch.cat(all_logits)
@@ -970,7 +440,24 @@ def run_experiment(
     scheduler = torch.optim.lr_scheduler.PolynomialLR(
         optimizer, total_iters=MAX_EPOCHS, power=0.9
     )
-    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE))
+
+    # Phenology-Aware Loss Setup
+    # Attempt to find B4 and B8 in the band_names_list to calculate NDVI
+    try:
+        # We look for the first occurrence of B4 and B8 (usually the target date or first date)
+        red_idx = next(i for i, name in enumerate(band_names_list) if name.startswith("B4"))
+        nir_idx = next(i for i, name in enumerate(band_names_list) if name.startswith("B8"))
+        criterion = PhenologyAwareLoss(
+            base_weight=class_weights_tensor.to(DEVICE),
+            red_idx=red_idx,
+            nir_idx=nir_idx,
+            threshold=0.3,
+            penalty_reduction=0.1
+        )
+        log.info(f"  PhenologyAwareLoss active (Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})")
+    except StopIteration:
+        log.warning("  Could not find B4/B8 for PhenologyAwareLoss — falling back to standard CrossEntropy")
+        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE))
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")   # used for GDrive folder
@@ -990,7 +477,7 @@ def run_experiment(
             "weight_decay":   cfg["weight_decay"],
             "optimizer":      "AdamW",
             "lr_scheduler":   "PolynomialLR(power=0.9)",
-            "loss":           "WeightedCrossEntropy",
+            "loss":           "PhenologyAwareLoss",
             "train_years":    str(TRAIN_YEARS),
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
@@ -1007,18 +494,34 @@ def run_experiment(
             mlflow.set_tag("source_project_run_id", source_project_run_id)
 
         # ── Training loop ─────────────────────────────────────────────────────
-        best_miou  = 0.0
-        no_improve = 0
-        history    = []
+        best_miou              = 0.0
+        best_val_per_class_iou = {}
+        no_improve             = 0
+        history                = []
         t_start    = time.time()
 
         for epoch in range(MAX_EPOCHS):
             t_ep = time.time()
 
-            train_loss = train_semantic_one_epoch(
-                model, optimizer, train_dl, DEVICE, epoch, criterion,
-                print_freq=len(train_dl), verbose=False,
-            )
+            model.train()
+            train_loss_acc, n_batches = 0.0, 0
+            for imgs, masks in train_dl:
+                imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
+                imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
+                optimizer.zero_grad()
+                logits = model(imgs)
+                
+                if isinstance(criterion, PhenologyAwareLoss):
+                    loss = criterion(logits, masks, imgs)
+                else:
+                    loss = criterion(logits, masks)
+                
+                loss.backward()
+                optimizer.step()
+                train_loss_acc += loss.item()
+                n_batches += 1
+
+            train_loss = train_loss_acc / n_batches
             val_m = validate_one_epoch(model, val_dl, criterion, DEVICE, NUM_CLASSES)
             scheduler.step()
 
@@ -1041,7 +544,8 @@ def run_experiment(
             })
 
             if val_m["miou"] > best_miou + EARLY_STOP_DELTA:
-                best_miou  = val_m["miou"]
+                best_miou              = val_m["miou"]
+                best_val_per_class_iou = val_m["per_class_iou"]
                 no_improve = 0
                 torch.save({
                     "epoch":            epoch,
@@ -1100,6 +604,14 @@ def run_experiment(
             "test_oa":       test_r["oa"],
             "total_epochs":  len(history),
         })
+        for cls_id, iou in best_val_per_class_iou.items():
+            if not np.isnan(iou):
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                mlflow.log_metric(
+                    f"best_val_iou_{name.lower().replace('/', '_').replace(' ', '_')}",
+                    iou,
+                )
         for cls_id, iou in test_r["per_class_iou"].items():
             if not np.isnan(iou):
                 cdl_id = KEEP_CLASSES[cls_id - 1]
