@@ -1369,20 +1369,22 @@ def main(
         )
         log.info("Exp C: using single reference-year band indices (no projected file)")
 
-    # Exp C v2: prefer per-year projected indices; fall back to single-ref-year
-    exp_C_v2_projected, resolved_project_run_id_v2 = build_exp_C_v2_indices_projected(
-        s2_processed
-    )
-    resolved_stage2v3_run_id = None
-    if exp_C_v2_projected:
-        exp_C_v2_idx   = exp_C_v2_projected
-        exp_C_v2_names = exp_C_v2_projected[TRAIN_YEARS[0]][1]
-        log.info("Exp C v2: using per-year projected band indices")
-    else:
-        exp_C_v2_idx, exp_C_v2_names, resolved_stage2v3_run_id = build_exp_C_v2_indices(
-            mmdd_to_date, local_band_to_idx
+    # Exp C v2: only loaded when explicitly requested via --exp C_v2
+    exp_C_v2_idx = exp_C_v2_names = resolved_project_run_id_v2 = resolved_stage2v3_run_id = None
+    if exps and "C_v2" in exps:
+        exp_C_v2_projected, resolved_project_run_id_v2 = build_exp_C_v2_indices_projected(
+            s2_processed
         )
-        log.info("Exp C v2: using single reference-year band indices (no projected file)")
+        resolved_stage2v3_run_id = None
+        if exp_C_v2_projected:
+            exp_C_v2_idx   = exp_C_v2_projected
+            exp_C_v2_names = exp_C_v2_projected[TRAIN_YEARS[0]][1]
+            log.info("Exp C v2: using per-year projected band indices")
+        else:
+            exp_C_v2_idx, exp_C_v2_names, resolved_stage2v3_run_id = build_exp_C_v2_indices(
+                mmdd_to_date, local_band_to_idx
+            )
+            log.info("Exp C v2: using single reference-year band indices (no projected file)")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
