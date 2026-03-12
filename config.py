@@ -147,7 +147,7 @@ STRIDE         = 256
 MIN_VALID_FRAC = 0.3
 BATCH_SIZE     = 8
 MAX_EPOCHS     = 100
-EARLY_STOP     = 10
+EARLY_STOP     = 15
 VAL_FRAC       = 0.15
 SEED           = 42
 
