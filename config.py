@@ -116,6 +116,7 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2024": "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
 }
 GDRIVE_PROCESSED_CDL_FOLDER_ID = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
+GDRIVE_MODELS_FOLDER_ID        = "1Xj8i32ndkc_9wa7LCwBO8LhrpxsZ3jot"
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
 MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
