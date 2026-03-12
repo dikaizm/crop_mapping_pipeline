@@ -457,7 +457,8 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
     preds      = all_logits.argmax(dim=1)
     oa         = (preds == all_labels).float().mean().item()
     miou       = compute_miou(all_logits, all_labels, num_classes)
-    return {"loss": total_loss / len(loader), "miou": miou, "oa": oa}
+    per_class  = compute_per_class_iou(all_logits, all_labels, num_classes)
+    return {"loss": total_loss / len(loader), "miou": miou, "oa": oa, "per_class_iou": per_class}
 
 
 @torch.no_grad()
@@ -753,6 +754,13 @@ def run_experiment(
                 f"patience={no_improve}/{EARLY_STOP} "
                 f"{ep_t:.0f}s  {total_min:.1f}min"
             )
+            _cls_parts = []
+            for cls_id, iou in val_m["per_class_iou"].items():
+                cdl_id    = KEEP_CLASSES[cls_id - 1]
+                short     = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}").replace(" ", "")
+                iou_str   = f"{iou:.3f}" if not np.isnan(iou) else "  nan"
+                _cls_parts.append(f"{short}={iou_str}")
+            log.info("         " + "  ".join(_cls_parts))
 
             # Save last checkpoint every epoch (overwrites previous)
             torch.save({
