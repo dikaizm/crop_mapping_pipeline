@@ -859,15 +859,12 @@ def run_experiment(
             )
             del pred_map, gt_map
 
-        try:
-            mlflow.log_artifact(str(best_ckpt))
-            mlflow.log_artifact(str(last_ckpt))
-        except Exception as e:
-            log.warning(f"  MLflow model upload failed ({e}) — falling back to GDrive")
-            upload_models_to_gdrive(
-                run_name=f"{exp_name}_{timestamp}",
-                model_files=[best_ckpt, last_ckpt],
-            )
+        gdrive_links = upload_models_to_gdrive(
+            run_name=f"{exp_name}_{timestamp}",
+            model_files=[best_ckpt, last_ckpt],
+        )
+        for fname, link in gdrive_links.items():
+            mlflow.set_tag(f"gdrive_{fname}", link)
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
         mlflow.log_artifact(str(iou_csv))
@@ -981,16 +978,21 @@ def upload_models_to_gdrive(run_name, model_files):
       <GDRIVE_MODELS_FOLDER_ID>/runs/<run_name>/
 
     Creates the `runs/` and `<run_name>/` folders if they don't exist.
+    Returns dict {filename: gdrive_view_link} for MLflow tag logging.
     """
     try:
         service   = _build_drive_service()
         runs_id   = _get_or_create_folder(service, "runs", GDRIVE_MODELS_FOLDER_ID)
         run_id    = _get_or_create_folder(service, run_name, runs_id)
+        links = {}
         for path in model_files:
-            _upload_file_gdrive(service, str(path), run_id)
+            file_id = _upload_file_gdrive(service, str(path), run_id)
+            links[os.path.basename(path)] = f"https://drive.google.com/file/d/{file_id}/view"
         log.info(f"  GDrive upload complete for {run_name}")
+        return links
     except Exception as e:
         log.warning(f"  GDrive upload failed ({e}) — models kept locally only")
+        return {}
 
 
 def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256):
