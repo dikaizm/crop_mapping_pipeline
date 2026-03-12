@@ -1,13 +1,14 @@
 """
-Stage 3 — Full Model Validation (Exp A / B / C).
+Stage 3 — Full Model Validation (Exp A / B / C / D).
 
-Three experiment configurations × 2 architectures = 6 training runs.
+Four experiment configurations × 2 architectures = up to 8 training runs.
 
-| Config | Input                     | Channels | Purpose                   |
-|--------|---------------------------|----------|---------------------------|
-| Exp A  | Single-date (Jul 30)      | 9        | Conventional baseline     |
-| Exp B  | 4 phenological dates      | 36       | Multi-temporal naive      |
-| Exp C  | Stage 2 forward-selection | K*       | Proposed method           |
+| Config | Input                           | Channels | Purpose                        |
+|--------|---------------------------------|----------|--------------------------------|
+| Exp A  | Single-date (Jul 30)            | 9        | Conventional baseline          |
+| Exp B  | 4 phenological dates            | 36       | Multi-temporal naive           |
+| Exp C  | Stage 2 CNN forward-selection   | K*       | Proposed method                |
+| Exp D  | Stage 1 GSI top-K (no Stage 2)  | K*       | Ablation: no CNN validation    |
 
 Usage:
     python scripts/train_segmentation.py                 # run all 6 experiments
@@ -57,6 +58,7 @@ from crop_mapping_pipeline.config import (
     VAL_FRAC, SEED, ARCH_CFG,
     STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
     STAGE3_EXP_C_V2_JSON,
+    STAGE3_EXP_D_JSON,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
@@ -577,6 +579,67 @@ def build_exp_C_v2_indices_projected(s2_processed, project_run_id=None):
     if resolved_project_run_id:
         log.info(f"Exp C v2 source project run_id: {resolved_project_run_id}")
     return (result if result else None), resolved_project_run_id
+
+
+def build_exp_D_indices(mmdd_to_date, local_band_to_idx):
+    """
+    Load STAGE3_EXP_D_JSON (written by feature_analysis_v2.py Stage 1v3).
+
+    Exp D uses Stage 1 SI_global top-K dates × top-K bands directly, without
+    any Stage 2 CNN forward selection.  This serves as an ablation vs Exp C.
+
+    Returns (idx_list, names_list).
+    """
+    import json as _json
+
+    d_json_path = STAGE3_EXP_D_JSON
+    if not d_json_path.exists():
+        raise FileNotFoundError(
+            f"Exp D input not found: {d_json_path}\n"
+            "Run Stage 1v3 first:  python stages/feature_analysis_v2.py --stage 1"
+        )
+
+    with open(d_json_path) as f:
+        payload = _json.load(f)
+
+    union_dates = payload.get("union_dates", [])
+    union_bands = payload.get("union_bands", [])
+    if not union_dates or not union_bands:
+        raise ValueError(f"STAGE3_EXP_D_JSON is missing union_dates or union_bands: {d_json_path}")
+
+    exp_D_idx, exp_D_names = [], []
+    skipped = 0
+
+    for date_yyyymmdd in union_dates:
+        # Map 2022 date to the actual date in the current processed files via MMDD
+        mmdd = date_yyyymmdd[4:]   # "20220730" → "0730"
+        local_date = mmdd_to_date.get(mmdd)
+        if local_date is None:
+            skipped += 1
+            continue
+        for band in union_bands:
+            local_name = f"{band}_{local_date}"
+            idx        = local_band_to_idx.get(local_name)
+            if idx is not None:
+                exp_D_idx.append(idx)
+                exp_D_names.append(local_name)
+            else:
+                skipped += 1
+
+    if not exp_D_idx:
+        raise ValueError(
+            f"Exp D: no bands from {d_json_path.name} matched current processed S2 files.\n"
+            "Check that S2 files for the same dates as Stage 1v3 are present."
+        )
+    if skipped:
+        log.warning(f"Exp D: {skipped} (date, band) pair(s) could not be matched")
+
+    log.info(
+        f"Exp D: {len(exp_D_idx)} channels "
+        f"({len(union_dates)} union dates × {len(union_bands)} union bands) "
+        f"from {d_json_path.name}"
+    )
+    return exp_D_idx, exp_D_names
 
 
 # ── Class weights ─────────────────────────────────────────────────────────────
@@ -1386,6 +1449,12 @@ def main(
             )
             log.info("Exp C v2: using single reference-year band indices (no projected file)")
 
+    # Exp D: only loaded when explicitly requested via --exp D
+    exp_D_idx = exp_D_names = None
+    if exps and "D" in exps:
+        exp_D_idx, exp_D_names = build_exp_D_indices(mmdd_to_date, local_band_to_idx)
+        log.info(f"Exp D: Stage 1 top-K features, {len(exp_D_idx)} channels")
+
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
     log.info("Class weights computed")
@@ -1409,6 +1478,9 @@ def main(
         elif exp_key == "C_v2":
             idx, names = exp_C_v2_idx, exp_C_v2_names
             desc_fn = lambda a, _i=exp_C_v2_idx: f"Stage2v2 K*_dates×K*_bands={len(_i) if isinstance(_i, list) else 0}ch, {a}"
+        elif exp_key == "D":
+            idx, names = exp_D_idx, exp_D_names
+            desc_fn = lambda a, _i=exp_D_idx: f"Stage1 GSI top-K={len(_i) if _i else 0}ch, {a}"
         else:
             log.warning(f"Unknown experiment key: {exp_key} — skipping")
             continue
@@ -1489,7 +1561,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
-        "--exp", nargs="+", choices=["A", "B", "C", "C_v2"],
+        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "D"],
         default=["A", "B", "C"],
         help="Which experiments to run (default: A B C)",
     )

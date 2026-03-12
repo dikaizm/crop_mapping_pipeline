@@ -159,8 +159,15 @@ ARCH_CFG = {
 }
 
 # ── Stage 1v3 / 2v2 hyperparameters (Feature Analysis v2) ──────────────────
-TOP_DATES_PER_CROP   = 10     # date candidates per crop from Stage 1v3
-TOP_BANDS_PER_CROP   = 9      # band candidates (max = len(VEGE_BANDS))
+# Threshold-based selection: keep dates/bands whose mean SI_global >= threshold.
+# MAX_DATES_PER_CROP / MAX_BANDS_PER_CROP are hard upper caps applied after thresholding.
+SI_DATE_THRESHOLD    = 0.05   # min mean SI_global to keep a date candidate
+SI_BAND_THRESHOLD    = 0.05   # min mean SI_global to keep a band candidate
+MAX_DATES_PER_CROP   = 15     # hard cap after thresholding (safety ceiling)
+MAX_BANDS_PER_CROP   = 9      # hard cap after thresholding (= len(VEGE_BANDS))
+# Legacy aliases kept for reference (no longer used as fixed cutoffs)
+TOP_DATES_PER_CROP   = MAX_DATES_PER_CROP
+TOP_BANDS_PER_CROP   = MAX_BANDS_PER_CROP
 S2_DATE_DELTA        = 0.010  # min IoU gain to accept a new date
 S2_DATE_NO_IMPROVE   = 4      # consecutive rejections before stopping date selection
 S2_MAX_DATES         = 8      # max dates selected per crop
@@ -172,3 +179,5 @@ STAGE1V3_CANDIDATES_JSON = PROCESSED_DIR / "s2" / "2022" / "stage1v3_candidates.
 STAGE2V3_PER_CROP_JSON   = PROCESSED_DIR / "stage2v3_per_crop_results.json"
 STAGE3_EXP_C_V2_JSON     = PROCESSED_DIR / "stage3_exp_c_v2.json"
 STAGE3_EXP_C_V2_BANDS    = PROCESSED_DIR / "stage3_exp_c_v2_bands.txt"
+STAGE3_EXP_D_JSON        = PROCESSED_DIR / "stage3_exp_d.json"
+STAGE3_EXP_D_BANDS       = PROCESSED_DIR / "stage3_exp_d_bands.txt"

@@ -46,6 +46,10 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import rasterio
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
@@ -66,11 +70,13 @@ from crop_mapping_pipeline.config import (
     S2_ENCODER, S2_PATCH_SIZE, S2_STRIDE, S2_MIN_VALID,
     S2_EPOCHS, S2_PATIENCE, S2_BATCH_SIZE,
     TRAIN_YEARS, TEST_YEAR,
+    SI_DATE_THRESHOLD, SI_BAND_THRESHOLD, MAX_DATES_PER_CROP, MAX_BANDS_PER_CROP,
     TOP_DATES_PER_CROP, TOP_BANDS_PER_CROP,
     S2_DATE_DELTA, S2_DATE_NO_IMPROVE, S2_MAX_DATES,
     S2_BAND_DELTA, S2_BAND_NO_IMPROVE, S2_MAX_BANDS_V2,
     STAGE1V3_CANDIDATES_JSON, STAGE2V3_PER_CROP_JSON,
     STAGE3_EXP_C_V2_JSON, STAGE3_EXP_C_V2_BANDS,
+    STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS,
 )
 
 log = logging.getLogger(__name__)
@@ -421,6 +427,144 @@ def _dates_bands_to_indices(selected_dates, selected_bands, band_name_to_idx):
 
 # ── Stage 1v3: Per-crop date + band ranking ────────────────────────────────────
 
+def _fmt_date(d: str) -> str:
+    """'20220715' → 'Jul 15'"""
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    try:
+        m = int(d[4:6]) - 1
+        day = int(d[6:8])
+        return f"{months[m]} {day}"
+    except Exception:
+        return d
+
+
+def _plot_gsi_heatmaps(gsi_df: pd.DataFrame, all_dates: list, save_dir: pathlib.Path) -> list:
+    """
+    Generate per-crop SI_global heatmaps (date × band) and a combined grid figure.
+
+    gsi_df: DataFrame with index = "B4_20220730" channel names, columns = CDL class IDs.
+    Returns list of saved file paths.
+    """
+    save_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+
+    n_crops  = len(KEEP_CLASSES)
+    n_cols   = 4
+    n_rows   = (n_crops + n_cols - 1) // n_cols
+    fig_grid, axes = plt.subplots(n_rows, n_cols,
+                                  figsize=(n_cols * 5, n_rows * 4.5),
+                                  constrained_layout=True)
+    axes_flat = axes.flatten() if n_crops > 1 else [axes]
+
+    for ax_idx, crop_id in enumerate(KEEP_CLASSES):
+        crop_name = CDL_CLASS_NAMES.get(crop_id, f"cls{crop_id}")
+        ax = axes_flat[ax_idx]
+
+        # Build (dates × bands) matrix of SI scores for this crop
+        si_col = gsi_df[crop_id] if crop_id in gsi_df.columns else gsi_df.iloc[:, ax_idx]
+        matrix = np.zeros((len(all_dates), len(S2_BAND_NAMES)), dtype=np.float32)
+        for di, date in enumerate(all_dates):
+            for bi, band in enumerate(S2_BAND_NAMES):
+                key = f"{band}_{date}"
+                if key in si_col.index:
+                    matrix[di, bi] = si_col[key]
+
+        im = ax.imshow(matrix, aspect="auto", cmap="Greens",
+                       vmin=0, vmax=matrix.max() or 1)
+        ax.set_xticks(range(len(S2_BAND_NAMES)))
+        ax.set_xticklabels(S2_BAND_NAMES, fontsize=8)
+        ax.set_yticks(range(len(all_dates)))
+        ax.set_yticklabels([_fmt_date(d) for d in all_dates], fontsize=7)
+        ax.set_title(crop_name, fontsize=10, fontweight="bold")
+        plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+
+        # Save individual crop heatmap
+        fig_single, ax_s = plt.subplots(figsize=(6, 5))
+        im_s = ax_s.imshow(matrix, aspect="auto", cmap="Greens",
+                           vmin=0, vmax=matrix.max() or 1)
+        ax_s.set_xticks(range(len(S2_BAND_NAMES)))
+        ax_s.set_xticklabels(S2_BAND_NAMES, fontsize=9)
+        ax_s.set_yticks(range(len(all_dates)))
+        ax_s.set_yticklabels([_fmt_date(d) for d in all_dates], fontsize=8)
+        ax_s.set_title(f"SI_global — {crop_name}", fontsize=11)
+        ax_s.set_xlabel("Spectral Band")
+        ax_s.set_ylabel("Acquisition Date")
+        plt.colorbar(im_s, ax=ax_s, label="SI_global")
+        plt.tight_layout()
+        out = save_dir / f"stage1v3_gsi_{crop_name.lower().replace(' ', '_')}.png"
+        fig_single.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig_single)
+        saved.append(out)
+
+    # Hide unused grid axes
+    for ax in axes_flat[n_crops:]:
+        ax.set_visible(False)
+
+    fig_grid.suptitle("SI_global Heatmaps — Date × Band per Crop", fontsize=13)
+    grid_path = save_dir / "stage1v3_gsi_heatmaps_all.png"
+    fig_grid.savefig(grid_path, dpi=150, bbox_inches="tight")
+    plt.close(fig_grid)
+    saved.append(grid_path)
+
+    log.info(f"  Saved {len(saved)} GSI heatmap(s) to {save_dir}")
+    return saved
+
+
+def _plot_selection_table(results_per_crop: dict, save_path: pathlib.Path) -> None:
+    """
+    Save a per-crop selection summary table (PNG + CSV):
+      Crop | Key Period (dates) | Selected Bands | IoU (bands)
+    """
+    rows = []
+    for crop_id in KEEP_CLASSES:
+        r = results_per_crop.get(crop_id, {})
+        dates_fmt = ", ".join(_fmt_date(d) for d in r.get("dates", []))
+        bands_str = ", ".join(r.get("bands", []))
+        rows.append({
+            "Crop":           CDL_CLASS_NAMES.get(crop_id, f"cls{crop_id}"),
+            "Key Period":     dates_fmt or "—",
+            "Selected Bands": bands_str or "—",
+            "IoU (bands)":    f"{r.get('best_iou_after_bands', 0.0):.4f}",
+        })
+    df = pd.DataFrame(rows)
+
+    # Save CSV
+    csv_path = save_path.with_suffix(".csv")
+    df.to_csv(csv_path, index=False)
+    log.info(f"  Saved selection table CSV: {csv_path}")
+
+    # Save PNG table
+    fig_h = 0.45 * (len(rows) + 1.5)
+    fig, ax = plt.subplots(figsize=(13, max(fig_h, 3)))
+    ax.axis("off")
+    col_widths = [0.12, 0.38, 0.32, 0.12]
+    tbl = ax.table(
+        cellText=df.values,
+        colLabels=df.columns,
+        cellLoc="center",
+        loc="center",
+        colWidths=col_widths,
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1, 1.6)
+    # Header styling
+    for j in range(len(df.columns)):
+        tbl[(0, j)].set_facecolor("#2d6a2d")
+        tbl[(0, j)].set_text_props(color="white", fontweight="bold")
+    # Alternating row colours
+    for i in range(1, len(rows) + 1):
+        fc = "#f0f7f0" if i % 2 == 0 else "white"
+        for j in range(len(df.columns)):
+            tbl[(i, j)].set_facecolor(fc)
+    ax.set_title("Stage 2v2 Per-Crop Feature Selection", fontsize=12,
+                 fontweight="bold", pad=10)
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info(f"  Saved selection table PNG: {save_path}")
+
+
 def run_stage1v3(s2_paths, cdl_path, data_dir=None):
     """
     Compute per-crop SI_global and split into date candidates + band candidates.
@@ -437,6 +581,11 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
       - band candidates: list of band names like "B4"
     """
     log.info("Stage 1v3: computing per-crop GSI and deriving date + band candidates...")
+
+    # ── MLflow run starts here so file loading time is tracked ────────────────
+    _mlflow_setup()
+    ts         = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stage1_run = mlflow.start_run(run_name=f"stage1v3_{ts}")
 
     # ── Build band_name_to_idx ────────────────────────────────────────────────
     all_bandnames = []
@@ -513,31 +662,36 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
             )
             si_crop = gsi_mean_global
 
-        # Date ranking: for each date, compute mean SI across all S2_BAND_NAMES at that date
+        # Step 1 — Date ranking: mean SI across all S2_BAND_NAMES at each date
+        # Identifies the key phenological window where the crop is most separable.
         date_si: dict[str, float] = {}
         for date in all_dates:
             band_keys = [f"{b}_{date}" for b in S2_BAND_NAMES if f"{b}_{date}" in si_crop.index]
-            if band_keys:
-                date_si[date] = float(si_crop[band_keys].mean())
-            else:
-                date_si[date] = 0.0
+            date_si[date] = float(si_crop[band_keys].mean()) if band_keys else 0.0
         sorted_dates = sorted(date_si.items(), key=lambda x: x[1], reverse=True)
-        date_candidates_per_crop[crop_key] = [d for d, _ in sorted_dates[:TOP_DATES_PER_CROP]]
+        selected_dates = [d for d, s in sorted_dates if s >= SI_DATE_THRESHOLD][:MAX_DATES_PER_CROP]
+        date_candidates_per_crop[crop_key] = selected_dates
 
-        # Band ranking: for each band in S2_BAND_NAMES, compute mean SI across all dates
+        # Step 2 — Band ranking: mean SI across SELECTED DATES ONLY
+        # Finds which spectral bands are most informative within the key phenological window.
+        # Falls back to all dates if no dates passed the threshold.
+        window_dates = selected_dates if selected_dates else all_dates
         band_si: dict[str, float] = {}
         for band in S2_BAND_NAMES:
-            band_keys = [f"{band}_{d}" for d in all_dates if f"{band}_{d}" in si_crop.index]
-            if band_keys:
-                band_si[band] = float(si_crop[band_keys].mean())
-            else:
-                band_si[band] = 0.0
+            band_keys = [f"{band}_{d}" for d in window_dates if f"{band}_{d}" in si_crop.index]
+            band_si[band] = float(si_crop[band_keys].mean()) if band_keys else 0.0
         sorted_bands = sorted(band_si.items(), key=lambda x: x[1], reverse=True)
-        band_candidates_per_crop[crop_key] = [b for b, _ in sorted_bands[:TOP_BANDS_PER_CROP]]
+        band_candidates_per_crop[crop_key] = [
+            b for b, s in sorted_bands if s >= SI_BAND_THRESHOLD
+        ][:MAX_BANDS_PER_CROP]
 
-        log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: "
-                 f"top dates={date_candidates_per_crop[crop_key][:3]}... "
-                 f"top bands={band_candidates_per_crop[crop_key][:3]}...")
+        log.info(
+            f"  {CDL_CLASS_NAMES[crop_id]:20s}: "
+            f"{len(selected_dates)} dates (top={selected_dates[:3]}...)  "
+            f"{len(band_candidates_per_crop[crop_key])} bands "
+            f"(top={band_candidates_per_crop[crop_key][:3]}..., "
+            f"scored within {len(window_dates)}-date window)"
+        )
 
     # ── Save handoff file ─────────────────────────────────────────────────────
     _stage1v3_path = STAGE1V3_CANDIDATES_JSON
@@ -556,11 +710,11 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         json.dump(payload, f, indent=2)
     log.info(f"Stage 1v3 candidates saved: {_stage1v3_path}")
 
-    # ── MLflow ────────────────────────────────────────────────────────────────
-    _mlflow_setup()
-    ts         = datetime.now().strftime("%Y%m%d-%H%M%S")
-    stage1_run = mlflow.start_run(run_name=f"stage1v3_{ts}")
+    # ── Write Exp D output (Stage 1 top-K without Stage 2 CNN) ────────────────
+    _save_exp_d_bands(date_candidates_per_crop, band_candidates_per_crop,
+                      band_name_to_idx, data_dir=data_dir)
 
+    # ── MLflow params + artifacts ─────────────────────────────────────────────
     mlflow.log_params({
         "stage":              "1v3_date_band_ranking",
         "version":            "v3",
@@ -569,8 +723,10 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         "total_channels":     n_channels,
         "sample_fraction":    SAMPLE_FRACTION,
         "n_sampled":          len(df),
-        "top_dates_per_crop": TOP_DATES_PER_CROP,
-        "top_bands_per_crop": TOP_BANDS_PER_CROP,
+        "si_date_threshold":  SI_DATE_THRESHOLD,
+        "si_band_threshold":  SI_BAND_THRESHOLD,
+        "max_dates_per_crop": MAX_DATES_PER_CROP,
+        "max_bands_per_crop": MAX_BANDS_PER_CROP,
         "keep_classes":       str(KEEP_CLASSES),
     })
 
@@ -593,6 +749,16 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         p.write_text(pd.DataFrame(rows).to_csv(index=False))
         mlflow.log_artifact(str(p))
     mlflow.log_artifact(str(_stage1v3_path))
+    if STAGE3_EXP_D_JSON.exists():
+        mlflow.log_artifact(str(STAGE3_EXP_D_JSON))
+    if STAGE3_EXP_D_BANDS.exists():
+        mlflow.log_artifact(str(STAGE3_EXP_D_BANDS))
+
+    # ── GSI heatmaps ─────────────────────────────────────────────────────────
+    heatmap_dir = FIGURES_DIR / "stage1v3_gsi"
+    heatmap_files = _plot_gsi_heatmaps(gsi_df, all_dates, heatmap_dir)
+    for hf in heatmap_files:
+        mlflow.log_artifact(str(hf))
 
     mlflow.end_run(status="FINISHED")
     log.info(f"Stage 1v3 MLflow run_id: {stage1_run.info.run_id}")
@@ -638,8 +804,10 @@ def run_stage2v2(s2_paths, cdl_path, date_candidates_per_crop, band_candidates_p
         "band_delta":          S2_BAND_DELTA,
         "band_no_improve":     S2_BAND_NO_IMPROVE,
         "max_bands":           S2_MAX_BANDS_V2,
-        "top_dates_per_crop":  TOP_DATES_PER_CROP,
-        "top_bands_per_crop":  TOP_BANDS_PER_CROP,
+        "si_date_threshold":   SI_DATE_THRESHOLD,
+        "si_band_threshold":   SI_BAND_THRESHOLD,
+        "max_dates_per_crop":  MAX_DATES_PER_CROP,
+        "max_bands_per_crop":  MAX_BANDS_PER_CROP,
         "device":              DEVICE,
         "n_crops":             len(KEEP_CLASSES),
     })
@@ -1064,6 +1232,11 @@ def _save_results_v2(results_per_crop: dict, band_name_to_idx: dict) -> None:
     log.info(f"union_dates: {union_dates}")
     log.info(f"union_bands: {union_bands}")
 
+    # ── Selection summary table (PNG + CSV) ──────────────────────────────────
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    table_path = FIGURES_DIR / "stage2v2_selection_table.png"
+    _plot_selection_table(results_per_crop, table_path)
+
     # Log to active MLflow run (called from within parent run context)
     try:
         mlflow.log_metrics({
@@ -1071,8 +1244,84 @@ def _save_results_v2(results_per_crop: dict, band_name_to_idx: dict) -> None:
             "n_union_bands":   len(union_bands),
             "total_channels":  total_channels,
         })
+        mlflow.log_artifact(str(table_path))
+        mlflow.log_artifact(str(table_path.with_suffix(".csv")))
     except Exception:
         pass
+
+
+# ── Exp D: Stage 1 top-K output (no Stage 2 CNN) ─────────────────────────────
+
+def _save_exp_d_bands(date_candidates_per_crop: dict, band_candidates_per_crop: dict,
+                      band_name_to_idx: dict, data_dir=None) -> None:
+    """
+    Write union of Stage 1 top-K dates × top-K bands as input for Exp D.
+
+    Exp D uses SI_global-ranked features directly from Stage 1, without any
+    CNN forward selection (Stage 2).  This is an ablation vs Exp C (Stage 2).
+
+    Writes:
+      STAGE3_EXP_D_JSON    — {union_dates, union_bands, total_channels, per_crop}
+      STAGE3_EXP_D_BANDS   — flat txt, one "B4_20220730" per (union_date, union_band) pair
+    """
+    _d_json  = STAGE3_EXP_D_JSON
+    _d_bands = STAGE3_EXP_D_BANDS
+    if data_dir:
+        _d_json  = pathlib.Path(data_dir) / "stage3_exp_d.json"
+        _d_bands = pathlib.Path(data_dir) / "stage3_exp_d_bands.txt"
+
+    # Build union_dates (maintain first-appearance order across KEEP_CLASSES order)
+    seen_dates, union_dates = set(), []
+    for crop_id in KEEP_CLASSES:
+        for date in date_candidates_per_crop.get(str(crop_id), []):
+            if date not in seen_dates:
+                seen_dates.add(date)
+                union_dates.append(date)
+
+    # Build union_bands (maintain first-appearance order across KEEP_CLASSES order)
+    seen_bands, union_bands = set(), []
+    for crop_id in KEEP_CLASSES:
+        for band in band_candidates_per_crop.get(str(crop_id), []):
+            if band not in seen_bands:
+                seen_bands.add(band)
+                union_bands.append(band)
+
+    total_channels = len(union_dates) * len(union_bands)
+
+    per_crop = {}
+    for crop_id in KEEP_CLASSES:
+        crop_key = str(crop_id)
+        per_crop[crop_key] = {
+            "crop_name":  CDL_CLASS_NAMES[crop_id],
+            "top_dates":  date_candidates_per_crop.get(crop_key, []),
+            "top_bands":  band_candidates_per_crop.get(crop_key, []),
+        }
+
+    payload = {
+        "union_dates":    union_dates,
+        "union_bands":    union_bands,
+        "total_channels": total_channels,
+        "per_crop":       per_crop,
+    }
+    os.makedirs(os.path.dirname(_d_json) if os.path.dirname(str(_d_json)) else ".", exist_ok=True)
+    with open(_d_json, "w") as f:
+        json.dump(payload, f, indent=2)
+    log.info(f"Exp D JSON saved: {_d_json}")
+
+    # Flat band list: one "B4_20220730" entry per (date, band) pair present in band_name_to_idx
+    band_lines = []
+    for date in union_dates:
+        for band in union_bands:
+            key = f"{band}_{date}"
+            if key in band_name_to_idx:
+                band_lines.append(key)
+    with open(_d_bands, "w") as f:
+        f.write("\n".join(band_lines))
+    log.info(
+        f"Exp D bands saved: {_d_bands}  "
+        f"({len(union_dates)} dates × {len(union_bands)} bands = "
+        f"{total_channels} theoretical, {len(band_lines)} available channels)"
+    )
 
 
 # ── Stage project v2 ──────────────────────────────────────────────────────────
@@ -1232,7 +1481,8 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
     if data_dir:
         global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, \
                STAGE1V3_CANDIDATES_JSON, STAGE2V3_PER_CROP_JSON, \
-               STAGE3_EXP_C_V2_JSON, STAGE3_EXP_C_V2_BANDS, STAGE3_EXP_C_V2_BANDS_PROJECTED
+               STAGE3_EXP_C_V2_JSON, STAGE3_EXP_C_V2_BANDS, STAGE3_EXP_C_V2_BANDS_PROJECTED, \
+               STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS
         processed                        = pathlib.Path(data_dir)
         PROCESSED_DIR                    = processed
         S2_PROCESSED_DIR                 = processed / "s2"
@@ -1245,6 +1495,8 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         STAGE3_EXP_C_V2_JSON             = processed / "stage3_exp_c_v2.json"
         STAGE3_EXP_C_V2_BANDS            = processed / "stage3_exp_c_v2_bands.txt"
         STAGE3_EXP_C_V2_BANDS_PROJECTED  = processed / "stage3_exp_c_v2_bands_projected.json"
+        STAGE3_EXP_D_JSON                = processed / "stage3_exp_d.json"
+        STAGE3_EXP_D_BANDS               = processed / "stage3_exp_d_bands.txt"
         log.info(f"Data dir overridden to {processed}")
 
     os.makedirs(FIGURES_DIR, exist_ok=True)
