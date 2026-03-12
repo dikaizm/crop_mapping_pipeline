@@ -634,6 +634,7 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
     all_logits, all_labels = [], []
     for imgs, masks in loader:
         imgs, masks = imgs.to(device), masks.to(device)
+        imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
         logits      = model(imgs)
         total_loss += criterion(logits, masks).item()
         all_logits.append(logits.cpu())
