@@ -1251,6 +1251,7 @@ if __name__ == "__main__":
     parser.add_argument("--force",    action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz", action="store_true", help="Skip full-image visualization")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
+    parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
     parser.add_argument(
         "--stage2-run-id", default=None,
         help=(
@@ -1305,3 +1306,29 @@ if __name__ == "__main__":
         stage2_run_id=args.stage2_run_id,
         project_run_id=args.project_run_id,
     )
+
+    if args.shutdown:
+        import urllib.request, urllib.error, json as _json, time as _time
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent / ".env")
+        pod_id  = os.environ.get("RUNPOD_POD_ID")
+        api_key = os.environ.get("RUNPOD_API_KEY")
+        delay   = 5   # minutes
+        if pod_id and api_key:
+            log.warning(f"RunPod pod {pod_id} will stop in {delay} minutes.")
+            _time.sleep(delay * 60)
+            query = f'{{"query": "mutation {{ podStop(input: {{podId: \\"{pod_id}\\"}}) {{ id desiredStatus }} }}"}}'
+            req   = urllib.request.Request(
+                "https://api.runpod.io/graphql",
+                data    = query.encode(),
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            )
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    log.info(f"Pod stop response: {_json.loads(resp.read())}")
+            except urllib.error.URLError as e:
+                log.error(f"Failed to stop pod: {e}")
+        else:
+            log.warning(f"RUNPOD_POD_ID/RUNPOD_API_KEY not set — falling back to sudo shutdown in {delay} min")
+            import subprocess
+            subprocess.run(["sudo", "shutdown", "-h", f"+{delay}"], check=False)
