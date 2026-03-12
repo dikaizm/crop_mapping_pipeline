@@ -157,3 +157,18 @@ ARCH_CFG = {
     "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "resnet50"},
     "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b2"},
 }
+
+# ── Stage 1v3 / 2v2 hyperparameters (Feature Analysis v2) ──────────────────
+TOP_DATES_PER_CROP   = 10     # date candidates per crop from Stage 1v3
+TOP_BANDS_PER_CROP   = 9      # band candidates (max = len(VEGE_BANDS))
+S2_DATE_DELTA        = 0.010  # min IoU gain to accept a new date
+S2_DATE_NO_IMPROVE   = 4      # consecutive rejections before stopping date selection
+S2_MAX_DATES         = 8      # max dates selected per crop
+S2_BAND_DELTA        = 0.005  # min IoU gain to accept a new spectral band
+S2_BAND_NO_IMPROVE   = 4      # consecutive rejections before stopping band selection
+S2_MAX_BANDS_V2      = 9      # max bands selected per crop
+
+STAGE1V3_CANDIDATES_JSON = PROCESSED_DIR / "s2" / "2022" / "stage1v3_candidates.json"
+STAGE2V3_PER_CROP_JSON   = PROCESSED_DIR / "stage2v3_per_crop_results.json"
+STAGE3_EXP_C_V2_JSON     = PROCESSED_DIR / "stage3_exp_c_v2.json"
+STAGE3_EXP_C_V2_BANDS    = PROCESSED_DIR / "stage3_exp_c_v2_bands.txt"
