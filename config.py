@@ -159,15 +159,13 @@ ARCH_CFG = {
 }
 
 # ── Stage 1v3 / 2v2 hyperparameters (Feature Analysis v2) ──────────────────
-# Threshold-based selection: keep dates/bands whose mean SI_global >= threshold.
-# MAX_DATES_PER_CROP / MAX_BANDS_PER_CROP are hard upper caps applied after thresholding.
-SI_DATE_THRESHOLD    = 0.05   # min mean SI_global to keep a date candidate
-SI_BAND_THRESHOLD    = 0.05   # min mean SI_global to keep a band candidate
-MAX_DATES_PER_CROP   = 15     # hard cap after thresholding (safety ceiling)
-MAX_BANDS_PER_CROP   = 9      # hard cap after thresholding (= len(VEGE_BANDS))
-# Legacy aliases kept for reference (no longer used as fixed cutoffs)
-TOP_DATES_PER_CROP   = MAX_DATES_PER_CROP
-TOP_BANDS_PER_CROP   = MAX_BANDS_PER_CROP
+# Top-K selection: always keep the top K dates/bands per crop by mean SI_global.
+# No threshold — avoids empty results and removes the need for manual tuning.
+TOP_DATES_PER_CROP   = 10    # top dates per crop (Stage 1 → Stage 2 candidates)
+TOP_BANDS_PER_CROP   = 9     # top bands per crop (= len(VEGE_BANDS), all bands as candidates)
+# Aliases used in code
+MAX_DATES_PER_CROP   = TOP_DATES_PER_CROP
+MAX_BANDS_PER_CROP   = TOP_BANDS_PER_CROP
 S2_DATE_DELTA        = 0.010  # min IoU gain to accept a new date
 S2_DATE_NO_IMPROVE   = 4      # consecutive rejections before stopping date selection
 S2_MAX_DATES         = 8      # max dates selected per crop
@@ -181,3 +179,11 @@ STAGE3_EXP_C_V2_JSON     = PROCESSED_DIR / "stage3_exp_c_v2.json"
 STAGE3_EXP_C_V2_BANDS    = PROCESSED_DIR / "stage3_exp_c_v2_bands.txt"
 STAGE3_EXP_D_JSON        = PROCESSED_DIR / "stage3_exp_d.json"
 STAGE3_EXP_D_BANDS       = PROCESSED_DIR / "stage3_exp_d_bands.txt"
+STAGE2V3_RF_PER_CROP_JSON  = PROCESSED_DIR / "stage2v3_rf_per_crop_results.json"
+STAGE3_EXP_C_V2_RF_JSON  = PROCESSED_DIR / "stage3_exp_c_v2_rf.json"
+STAGE3_EXP_C_V2_RF_BANDS = PROCESSED_DIR / "stage3_exp_c_v2_rf_bands.txt"
+
+# ── RF selector hyperparameters (Stage 2v2-RF) ─────────────────────────────
+RF_N_ESTIMATORS       = 200    # trees in the binary RF oracle
+RF_MAX_PIXELS         = 50_000 # pixel sample cap (crop + rest) to keep RF fast
+RF_IMPORTANCE_THRESH  = 0.10   # keep dates/bands with importance >= 10% of max

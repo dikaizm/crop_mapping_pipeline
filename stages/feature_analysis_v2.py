@@ -46,6 +46,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import rasterio
+from sklearn.ensemble import RandomForestClassifier
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -70,13 +71,15 @@ from crop_mapping_pipeline.config import (
     S2_ENCODER, S2_PATCH_SIZE, S2_STRIDE, S2_MIN_VALID,
     S2_EPOCHS, S2_PATIENCE, S2_BATCH_SIZE,
     TRAIN_YEARS, TEST_YEAR,
-    SI_DATE_THRESHOLD, SI_BAND_THRESHOLD, MAX_DATES_PER_CROP, MAX_BANDS_PER_CROP,
     TOP_DATES_PER_CROP, TOP_BANDS_PER_CROP,
+    MAX_DATES_PER_CROP, MAX_BANDS_PER_CROP,
     S2_DATE_DELTA, S2_DATE_NO_IMPROVE, S2_MAX_DATES,
     S2_BAND_DELTA, S2_BAND_NO_IMPROVE, S2_MAX_BANDS_V2,
     STAGE1V3_CANDIDATES_JSON, STAGE2V3_PER_CROP_JSON,
     STAGE3_EXP_C_V2_JSON, STAGE3_EXP_C_V2_BANDS,
     STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS,
+    STAGE2V3_RF_PER_CROP_JSON, STAGE3_EXP_C_V2_RF_JSON, STAGE3_EXP_C_V2_RF_BANDS,
+    RF_N_ESTIMATORS, RF_MAX_PIXELS, RF_IMPORTANCE_THRESH,
 )
 
 log = logging.getLogger(__name__)
@@ -448,6 +451,23 @@ def _plot_gsi_heatmaps(gsi_df: pd.DataFrame, all_dates: list, save_dir: pathlib.
     save_dir.mkdir(parents=True, exist_ok=True)
     saved = []
 
+    # Compute global vmax from 95th percentile across all crops — consistent scale
+    all_vals = []
+    matrices = {}
+    for crop_id in KEEP_CLASSES:
+        si_col = gsi_df[crop_id] if crop_id in gsi_df.columns else pd.Series(dtype=float)
+        mat = np.zeros((len(all_dates), len(S2_BAND_NAMES)), dtype=np.float32)
+        for di, date in enumerate(all_dates):
+            for bi, band in enumerate(S2_BAND_NAMES):
+                key = f"{band}_{date}"
+                if key in si_col.index:
+                    mat[di, bi] = si_col[key]
+        matrices[crop_id] = mat
+        all_vals.extend(mat.flatten().tolist())
+    global_vmax = float(np.nanpercentile(all_vals, 95)) if all_vals else 1.0
+    global_vmax = max(global_vmax, 1e-3)
+    log.info(f"  GSI heatmap global_vmax (95th pct): {global_vmax:.4f}")
+
     n_crops  = len(KEEP_CLASSES)
     n_cols   = 4
     n_rows   = (n_crops + n_cols - 1) // n_cols
@@ -458,19 +478,11 @@ def _plot_gsi_heatmaps(gsi_df: pd.DataFrame, all_dates: list, save_dir: pathlib.
 
     for ax_idx, crop_id in enumerate(KEEP_CLASSES):
         crop_name = CDL_CLASS_NAMES.get(crop_id, f"cls{crop_id}")
-        ax = axes_flat[ax_idx]
+        ax        = axes_flat[ax_idx]
+        matrix    = matrices[crop_id]
 
-        # Build (dates × bands) matrix of SI scores for this crop
-        si_col = gsi_df[crop_id] if crop_id in gsi_df.columns else gsi_df.iloc[:, ax_idx]
-        matrix = np.zeros((len(all_dates), len(S2_BAND_NAMES)), dtype=np.float32)
-        for di, date in enumerate(all_dates):
-            for bi, band in enumerate(S2_BAND_NAMES):
-                key = f"{band}_{date}"
-                if key in si_col.index:
-                    matrix[di, bi] = si_col[key]
-
-        im = ax.imshow(matrix, aspect="auto", cmap="Greens",
-                       vmin=0, vmax=matrix.max() or 1)
+        im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd",
+                       vmin=0, vmax=global_vmax)
         ax.set_xticks(range(len(S2_BAND_NAMES)))
         ax.set_xticklabels(S2_BAND_NAMES, fontsize=8)
         ax.set_yticks(range(len(all_dates)))
@@ -480,8 +492,8 @@ def _plot_gsi_heatmaps(gsi_df: pd.DataFrame, all_dates: list, save_dir: pathlib.
 
         # Save individual crop heatmap
         fig_single, ax_s = plt.subplots(figsize=(6, 5))
-        im_s = ax_s.imshow(matrix, aspect="auto", cmap="Greens",
-                           vmin=0, vmax=matrix.max() or 1)
+        im_s = ax_s.imshow(matrix, aspect="auto", cmap="YlOrRd",
+                           vmin=0, vmax=global_vmax)
         ax_s.set_xticks(range(len(S2_BAND_NAMES)))
         ax_s.set_xticklabels(S2_BAND_NAMES, fontsize=9)
         ax_s.set_yticks(range(len(all_dates)))
@@ -639,13 +651,54 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
 
     log.info(f"Sampled {len(df):,} pixels (SAMPLE_FRACTION={SAMPLE_FRACTION})")
     log.info(f"Classes in sample: {sorted(df['class_label'].unique())}")
+    _X_sample = df[all_bandnames].values
+    _nan_px   = np.isnan(_X_sample).any(axis=1).sum()
+    _nan_ch   = np.isnan(_X_sample).any(axis=0).sum()
+    log.info(f"NaN in sample: {_nan_px:,} pixels ({100*_nan_px/len(df):.1f}%) "
+             f"have ≥1 NaN channel;  {_nan_ch}/{n_channels} channels have ≥1 NaN pixel")
     del stacked, img_2d
 
-    # ── Compute SI_global ─────────────────────────────────────────────────────
-    log.info("Computing GSI (SI_global) per band × class...")
-    gsi_df          = bs.calculate_gsi(df, "class_label")
+    # ── Compute per-crop binary SI (one-vs-all) ───────────────────────────────
+    # For each crop: SI[channel] = |mean_crop - mean_rest| / (std_crop + std_rest)
+    # "rest" = all other labeled crop pixels pooled together.
+    # One-vs-all avoids pairwise averaging that dilutes the signal when a crop is
+    # similar to just one or two other crops.  No 1.96 factor — values stay in
+    # natural z-score units (0 = total overlap, 1 = means separated by 1 std).
+    log.info("Computing per-crop binary SI_global (one-vs-all)...")
+    X_all = df[all_bandnames].values.astype(np.float32)
+    y_all = df["class_label"].values
+
+    gsi_dict = {}
+    for crop_id in KEEP_CLASSES:
+        crop_mask = (y_all == crop_id)
+        rest_mask = np.isin(y_all, KEEP_CLASSES) & ~crop_mask
+        if crop_mask.sum() < 10:
+            log.warning(f"Crop {crop_id} ({CDL_CLASS_NAMES[crop_id]}) has only "
+                        f"{crop_mask.sum()} samples — using zeros")
+            gsi_dict[crop_id] = pd.Series(0.0, index=all_bandnames)
+            continue
+        X_c = X_all[crop_mask]
+        X_r = X_all[rest_mask]
+        # Use nanmean/nanstd so NaN pixels (NoData / cloud) don't corrupt the per-channel stats.
+        mean_c = np.nanmean(X_c, axis=0)
+        std_c  = np.nanstd(X_c, axis=0)
+        mean_r = np.nanmean(X_r, axis=0)
+        # Normalise by crop's own std only.
+        # Using pooled std_r inflates the denominator because "rest" contains 9 different
+        # crop types whose means span a wide range, making std_r >> std_c and suppressing SI.
+        si = np.abs(mean_c - mean_r) / (std_c + 1e-9)
+        gsi_dict[crop_id] = pd.Series(si.astype(np.float32), index=all_bandnames)
+
+    # gsi_df: index = channel names ("B4_20220730"), columns = crop_id
+    gsi_df          = pd.DataFrame(gsi_dict)
     gsi_mean_global = gsi_df.mean(axis=1).sort_values(ascending=False)
-    log.info(f"gsi_df shape: {gsi_df.shape}  (bands × classes)")
+    _v = gsi_df.values
+    log.info(f"gsi_df shape: {gsi_df.shape}  (channels × crops)")
+    log.info(f"  SI range:  min={np.nanmin(_v):.4f}  p25={np.nanpercentile(_v,25):.4f}  "
+             f"median={np.nanmedian(_v):.4f}  p75={np.nanpercentile(_v,75):.4f}  "
+             f"p95={np.nanpercentile(_v,95):.4f}  max={np.nanmax(_v):.4f}")
+    log.info(f"  Top-K selection: TOP_DATES_PER_CROP={TOP_DATES_PER_CROP}  "
+             f"TOP_BANDS_PER_CROP={TOP_BANDS_PER_CROP}  (no threshold — always selects top-K)")
 
     # ── Per-crop date and band ranking ────────────────────────────────────────
     date_candidates_per_crop: dict[str, list] = {}
@@ -662,35 +715,33 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
             )
             si_crop = gsi_mean_global
 
-        # Step 1 — Date ranking: mean SI across all S2_BAND_NAMES at each date
+        # Step 1 — Date ranking: mean SI across all S2_BAND_NAMES at each date.
         # Identifies the key phenological window where the crop is most separable.
+        # Always keeps top-K — no threshold, so results are never empty.
         date_si: dict[str, float] = {}
         for date in all_dates:
             band_keys = [f"{b}_{date}" for b in S2_BAND_NAMES if f"{b}_{date}" in si_crop.index]
             date_si[date] = float(si_crop[band_keys].mean()) if band_keys else 0.0
-        sorted_dates = sorted(date_si.items(), key=lambda x: x[1], reverse=True)
-        selected_dates = [d for d, s in sorted_dates if s >= SI_DATE_THRESHOLD][:MAX_DATES_PER_CROP]
+        sorted_dates   = sorted(date_si.items(), key=lambda x: x[1], reverse=True)
+        selected_dates = [d for d, _ in sorted_dates[:TOP_DATES_PER_CROP]]
         date_candidates_per_crop[crop_key] = selected_dates
 
-        # Step 2 — Band ranking: mean SI across SELECTED DATES ONLY
-        # Finds which spectral bands are most informative within the key phenological window.
-        # Falls back to all dates if no dates passed the threshold.
-        window_dates = selected_dates if selected_dates else all_dates
+        # Step 2 — Band ranking: mean SI across SELECTED DATES ONLY.
+        # Finds the most informative bands within the key phenological window.
+        # Always keeps top-K — no threshold.
         band_si: dict[str, float] = {}
         for band in S2_BAND_NAMES:
-            band_keys = [f"{band}_{d}" for d in window_dates if f"{band}_{d}" in si_crop.index]
+            band_keys = [f"{band}_{d}" for d in selected_dates if f"{band}_{d}" in si_crop.index]
             band_si[band] = float(si_crop[band_keys].mean()) if band_keys else 0.0
         sorted_bands = sorted(band_si.items(), key=lambda x: x[1], reverse=True)
-        band_candidates_per_crop[crop_key] = [
-            b for b, s in sorted_bands if s >= SI_BAND_THRESHOLD
-        ][:MAX_BANDS_PER_CROP]
+        band_candidates_per_crop[crop_key] = [b for b, _ in sorted_bands[:TOP_BANDS_PER_CROP]]
 
         log.info(
             f"  {CDL_CLASS_NAMES[crop_id]:20s}: "
-            f"{len(selected_dates)} dates (top={selected_dates[:3]}...)  "
-            f"{len(band_candidates_per_crop[crop_key])} bands "
-            f"(top={band_candidates_per_crop[crop_key][:3]}..., "
-            f"scored within {len(window_dates)}-date window)"
+            f"top {len(selected_dates)} dates={selected_dates[:3]}...  "
+            f"top {len(band_candidates_per_crop[crop_key])} bands="
+            f"{band_candidates_per_crop[crop_key][:3]}... "
+            f"(scored within {len(selected_dates)}-date window)"
         )
 
     # ── Save handoff file ─────────────────────────────────────────────────────
@@ -722,10 +773,9 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         "n_dates":            len(all_dates),
         "total_channels":     n_channels,
         "sample_fraction":    SAMPLE_FRACTION,
-        "n_sampled":          len(df),
-        "si_date_threshold":  SI_DATE_THRESHOLD,
-        "si_band_threshold":  SI_BAND_THRESHOLD,
-        "max_dates_per_crop": MAX_DATES_PER_CROP,
+        "n_sampled":           len(df),
+        "top_dates_per_crop":  TOP_DATES_PER_CROP,
+        "top_bands_per_crop":  TOP_BANDS_PER_CROP,
         "max_bands_per_crop": MAX_BANDS_PER_CROP,
         "keep_classes":       str(KEEP_CLASSES),
     })
@@ -804,9 +854,8 @@ def run_stage2v2(s2_paths, cdl_path, date_candidates_per_crop, band_candidates_p
         "band_delta":          S2_BAND_DELTA,
         "band_no_improve":     S2_BAND_NO_IMPROVE,
         "max_bands":           S2_MAX_BANDS_V2,
-        "si_date_threshold":   SI_DATE_THRESHOLD,
-        "si_band_threshold":   SI_BAND_THRESHOLD,
-        "max_dates_per_crop":  MAX_DATES_PER_CROP,
+        "top_dates_per_crop":  TOP_DATES_PER_CROP,
+        "top_bands_per_crop":  TOP_BANDS_PER_CROP,
         "max_bands_per_crop":  MAX_BANDS_PER_CROP,
         "device":              DEVICE,
         "n_crops":             len(KEEP_CLASSES),
@@ -1123,7 +1172,10 @@ def run_stage2v2(s2_paths, cdl_path, date_candidates_per_crop, band_candidates_p
                 f"crop_{crop_id}_iou_bands":  best_iou_bands,
             })
 
-        _save_results_v2(results_per_crop, band_name_to_idx)
+        _save_results_v2(results_per_crop, band_name_to_idx,
+                         per_crop_json=STAGE2V3_PER_CROP_JSON,
+                         exp_json=STAGE3_EXP_C_V2_JSON,
+                         exp_bands=STAGE3_EXP_C_V2_BANDS)
         mlflow.log_artifact(str(STAGE2V3_PER_CROP_JSON))
         mlflow.log_artifact(str(STAGE3_EXP_C_V2_JSON))
         mlflow.log_artifact(str(STAGE3_EXP_C_V2_BANDS))
@@ -1145,17 +1197,296 @@ def run_stage2v2(s2_paths, cdl_path, date_candidates_per_crop, band_candidates_p
     return results_per_crop
 
 
+# ── Stage 2v2-RF: Per-crop date + band selection via Random Forest ─────────────
+
+def run_stage2v2_rf(s2_paths, cdl_path, date_candidates_per_crop, band_candidates_per_crop,
+                    band_name_to_idx, all_dates, data_dir=None):
+    """
+    Per-crop binary RF feature selection — Phase A (dates) then Phase B (bands).
+
+    Replaces the iterative CNN oracle with a single Random Forest fit per phase.
+    RF feature importance is used to rank and threshold-select dates/bands.
+
+    Phase A: train RF with features = [date × VEGE_BANDS] for all date candidates.
+             Group importance by date (mean over its VEGE_BANDS channels).
+             Keep dates with relative importance >= RF_IMPORTANCE_THRESH × max_date_importance.
+
+    Phase B: given selected_dates, train RF with features = [selected_dates × band] for
+             all band candidates.
+             Group importance by band (mean over its date channels).
+             Keep bands with relative importance >= RF_IMPORTANCE_THRESH × max_band_importance.
+
+    MLflow structure:
+        stage2v3_rf_{ts}                    — parent run
+        └── stage2v3_rf_{crop_name}_{ts}   — child per crop
+
+    Returns results_per_crop = {crop_id: {"dates": [...], "bands": [...], ...}}.
+    """
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    run_ts   = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = PROCESSED_DIR / f"stage2v2_rf_run_{run_ts}.log"
+    _fh      = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+
+    _mlflow_setup()
+    parent_run = mlflow.start_run(run_name=f"stage2v3_rf_{run_ts}")
+    mlflow.log_params({
+        "stage":               "2v2_rf_date_band_selection",
+        "selector":            "rf",
+        "rf_n_estimators":     RF_N_ESTIMATORS,
+        "rf_max_pixels":       RF_MAX_PIXELS,
+        "rf_importance_thresh": RF_IMPORTANCE_THRESH,
+        "top_dates_per_crop":  TOP_DATES_PER_CROP,
+        "top_bands_per_crop":  TOP_BANDS_PER_CROP,
+        "max_bands_per_crop":  MAX_BANDS_PER_CROP,
+        "n_crops":             len(KEEP_CLASSES),
+    })
+
+    # Pre-load all patches (all bands) into RAM — same as CNN version
+    log.info("Pre-loading all patches into RAM (all bands)...")
+    full_dataset = RasterPatchDataset(
+        s2_paths=s2_paths, cdl_path=cdl_path,
+        patch_size=S2_PATCH_SIZE, stride=S2_STRIDE,
+        min_valid_frac=S2_MIN_VALID, band_indices=None,
+        remap_lut=None, target_class_id=None,
+    )
+    preloaded_all = _preload_patches(full_dataset)
+    imgs_all, masks_all = preloaded_all.tensors   # (N, C, H, W), (N, H, W)
+    N, C, H, W = imgs_all.shape
+    log.info(f"Pre-loaded: imgs={tuple(imgs_all.shape)}  masks={tuple(masks_all.shape)}")
+
+    # Flatten patches → pixel matrix once (shared across all crops)
+    # Shape: (N*H*W, C) and (N*H*W,)
+    pixels_X = imgs_all.permute(0, 2, 3, 1).reshape(-1, C).numpy().astype(np.float32)
+    pixels_y = masks_all.reshape(-1).numpy().astype(np.int32)
+    log.info(f"Flattened pixel matrix: {pixels_X.shape}  labels: {pixels_y.shape}")
+
+    results_per_crop: dict[int, dict] = {}
+    n_crops = len(KEEP_CLASSES)
+
+    log.info(f"\nStage 2v2-RF — per-crop binary RF feature selection (date + band phases)")
+    log.info(f"  n_estimators={RF_N_ESTIMATORS}  max_pixels={RF_MAX_PIXELS}  "
+             f"importance_thresh={RF_IMPORTANCE_THRESH}")
+
+    try:
+        for crop_idx, crop_id in enumerate(KEEP_CLASSES, 1):
+            crop_name  = CDL_CLASS_NAMES[crop_id]
+            crop_key   = str(crop_id)
+            date_cands = date_candidates_per_crop[crop_key]
+            band_cands = band_candidates_per_crop[crop_key]
+
+            log.info(f"\n{'='*60}")
+            log.info(f"[{crop_idx}/{n_crops}] Crop: {crop_name} (CDL id={crop_id}) "
+                     f"— {len(date_cands)} date candidates, {len(band_cands)} band candidates")
+
+            # Build binary pixel arrays for this crop
+            crop_px_mask = (pixels_y == crop_id)
+            rest_px_mask = np.isin(pixels_y, KEEP_CLASSES) & ~crop_px_mask
+            n_crop = crop_px_mask.sum()
+            n_rest = rest_px_mask.sum()
+            log.info(f"  Crop pixels: {n_crop:,}  rest pixels: {n_rest:,}")
+
+            if n_crop < 50:
+                log.warning(f"  Too few crop pixels ({n_crop}) — skipping")
+                results_per_crop[crop_id] = {
+                    "dates": date_cands[:1] if date_cands else [],
+                    "bands": band_cands[:1] if band_cands else [],
+                    "k_dates": 1, "k_bands": 1,
+                    "best_iou_after_dates": 0.0, "best_iou_after_bands": 0.0,
+                    "fallback_dates": True, "fallback_bands": True,
+                }
+                continue
+
+            # Sample pixels to stay within RF_MAX_PIXELS budget
+            rng = np.random.default_rng(42)
+            n_sample_each = min(RF_MAX_PIXELS // 2, n_crop, n_rest)
+            crop_idx_arr  = rng.choice(np.where(crop_px_mask)[0], n_sample_each, replace=False)
+            rest_idx_arr  = rng.choice(np.where(rest_px_mask)[0], n_sample_each, replace=False)
+            sample_idx    = np.concatenate([crop_idx_arr, rest_idx_arr])
+            X_sample      = pixels_X[sample_idx]   # (2*n_sample_each, C)
+            y_binary      = np.concatenate([
+                np.ones(n_sample_each, dtype=np.int32),
+                np.zeros(n_sample_each, dtype=np.int32),
+            ])
+            log.info(f"  RF sample: {len(X_sample):,} pixels ({n_sample_each:,} crop + {n_sample_each:,} rest)")
+
+            with mlflow.start_run(
+                run_name=f"stage2v3_rf_{crop_name.replace('/', '-')}_{run_ts}",
+                nested=True,
+            ) as crop_run:
+                mlflow.log_params({
+                    "crop_id":           crop_id,
+                    "crop_name":         crop_name,
+                    "n_date_candidates": len(date_cands),
+                    "n_band_candidates": len(band_cands),
+                    "n_crop_pixels":     int(n_crop),
+                    "n_sample_pixels":   len(X_sample),
+                })
+
+                # ── Phase A: Date selection via RF importance ─────────────────
+                log.info(f"\n  === Phase A: Date selection for {crop_name} ===")
+                selected_dates = []
+                fallback_dates = False
+
+                if date_cands:
+                    # Build feature matrix: cols = [VEGE_BANDS × each date candidate]
+                    phA_cols, phA_feat_names = [], []
+                    for date in date_cands:
+                        for band in VEGE_BANDS:
+                            key = f"{band}_{date}"
+                            if key in band_name_to_idx:
+                                phA_cols.append(band_name_to_idx[key])
+                                phA_feat_names.append(key)
+
+                    if phA_cols:
+                        X_phA = X_sample[:, phA_cols]
+                        rf_A  = RandomForestClassifier(
+                            n_estimators=RF_N_ESTIMATORS, n_jobs=-1,
+                            random_state=42, class_weight="balanced",
+                        )
+                        rf_A.fit(X_phA, y_binary)
+                        imp_A = rf_A.feature_importances_   # per feature
+
+                        # Group importance by date (mean over its VEGE_BANDS features)
+                        date_importance = {}
+                        for feat_i, feat_name in enumerate(phA_feat_names):
+                            date = feat_name.split("_", 1)[1]   # "B4_20220730" → "20220730"
+                            date_importance.setdefault(date, []).append(imp_A[feat_i])
+                        date_mean_imp = {d: float(np.mean(v)) for d, v in date_importance.items()}
+
+                        max_imp = max(date_mean_imp.values()) if date_mean_imp else 1e-9
+                        thresh  = RF_IMPORTANCE_THRESH * max_imp
+                        sorted_dates_imp = sorted(date_mean_imp.items(), key=lambda x: x[1], reverse=True)
+                        selected_dates = [d for d, imp in sorted_dates_imp
+                                          if imp >= thresh][:MAX_DATES_PER_CROP]
+
+                        log.info(f"  Date importances: " +
+                                 "  ".join(f"{d}={v:.4f}" for d, v in sorted_dates_imp[:5]))
+                        mlflow.log_metrics({f"phaseA_imp_{d}": v for d, v in date_mean_imp.items()})
+                    else:
+                        log.warning(f"  Phase A: no valid features for {crop_name}")
+
+                if not selected_dates and date_cands:
+                    selected_dates = [date_cands[0]]
+                    fallback_dates = True
+                    log.warning(f"  K_dates=0 for {crop_name} — fallback to top-1: {date_cands[0]}")
+                    mlflow.set_tag("phaseA_fallback_date", date_cands[0])
+
+                log.info(f"\n  Phase A done: K_dates={len(selected_dates)}  dates={selected_dates}")
+                mlflow.log_metric("phaseA_k_dates", len(selected_dates))
+                mlflow.set_tag("phaseA_selected_dates", str(selected_dates))
+
+                # ── Phase B: Band selection via RF importance ─────────────────
+                log.info(f"\n  === Phase B: Band selection for {crop_name} "
+                         f"(fixed dates={selected_dates}) ===")
+                selected_bands = []
+                fallback_bands = False
+
+                if band_cands and selected_dates:
+                    # Build feature matrix: cols = [selected_dates × each band candidate]
+                    phB_cols, phB_feat_names = [], []
+                    for band in band_cands:
+                        for date in selected_dates:
+                            key = f"{band}_{date}"
+                            if key in band_name_to_idx:
+                                phB_cols.append(band_name_to_idx[key])
+                                phB_feat_names.append(key)
+
+                    if phB_cols:
+                        X_phB = X_sample[:, phB_cols]
+                        rf_B  = RandomForestClassifier(
+                            n_estimators=RF_N_ESTIMATORS, n_jobs=-1,
+                            random_state=42, class_weight="balanced",
+                        )
+                        rf_B.fit(X_phB, y_binary)
+                        imp_B = rf_B.feature_importances_
+
+                        # Group importance by band (mean over its date channels)
+                        band_importance = {}
+                        for feat_i, feat_name in enumerate(phB_feat_names):
+                            band = feat_name.split("_")[0]   # "B4_20220730" → "B4"
+                            band_importance.setdefault(band, []).append(imp_B[feat_i])
+                        band_mean_imp = {b: float(np.mean(v)) for b, v in band_importance.items()}
+
+                        max_imp = max(band_mean_imp.values()) if band_mean_imp else 1e-9
+                        thresh  = RF_IMPORTANCE_THRESH * max_imp
+                        sorted_bands_imp = sorted(band_mean_imp.items(), key=lambda x: x[1], reverse=True)
+                        selected_bands = [b for b, imp in sorted_bands_imp
+                                          if imp >= thresh][:MAX_BANDS_PER_CROP]
+
+                        log.info(f"  Band importances: " +
+                                 "  ".join(f"{b}={v:.4f}" for b, v in sorted_bands_imp))
+                        mlflow.log_metrics({f"phaseB_imp_{b}": v for b, v in band_mean_imp.items()})
+                    else:
+                        log.warning(f"  Phase B: no valid features for {crop_name}")
+
+                if not selected_bands and band_cands:
+                    selected_bands = [band_cands[0]]
+                    fallback_bands = True
+                    log.warning(f"  K_bands=0 for {crop_name} — fallback to top-1: {band_cands[0]}")
+                    mlflow.set_tag("phaseB_fallback_band", band_cands[0])
+
+                log.info(f"\n  Phase B done: K_bands={len(selected_bands)}  bands={selected_bands}")
+                mlflow.log_metric("phaseB_k_bands", len(selected_bands))
+                mlflow.set_tag("phaseB_selected_bands", str(selected_bands))
+
+                result = {
+                    "dates":                selected_dates,
+                    "bands":                selected_bands,
+                    "k_dates":              len(selected_dates),
+                    "k_bands":              len(selected_bands),
+                    "best_iou_after_dates": 0.0,   # RF has no IoU — placeholder
+                    "best_iou_after_bands": 0.0,
+                    "fallback_dates":       fallback_dates,
+                    "fallback_bands":       fallback_bands,
+                    "mlflow_run_id":        crop_run.info.run_id,
+                }
+                results_per_crop[crop_id] = result
+
+            log.info(f"\n  -> [{crop_idx}/{n_crops}] {crop_name}: "
+                     f"K_dates={len(selected_dates)}  K_bands={len(selected_bands)}")
+            mlflow.log_metrics({
+                f"crop_{crop_id}_k_dates": len(selected_dates),
+                f"crop_{crop_id}_k_bands": len(selected_bands),
+            })
+
+        _save_results_v2(results_per_crop, band_name_to_idx,
+                         per_crop_json=STAGE2V3_RF_PER_CROP_JSON,
+                         exp_json=STAGE3_EXP_C_V2_RF_JSON,
+                         exp_bands=STAGE3_EXP_C_V2_RF_BANDS)
+        mlflow.log_artifact(str(STAGE2V3_RF_PER_CROP_JSON))
+        mlflow.log_artifact(str(STAGE3_EXP_C_V2_RF_JSON))
+        mlflow.log_artifact(str(STAGE3_EXP_C_V2_RF_BANDS))
+        log.info(f"Stage 2v2-RF parent run_id: {parent_run.info.run_id}")
+        logging.getLogger().removeHandler(_fh)
+        _fh.flush(); _fh.close()
+        mlflow.log_artifact(str(log_path))
+        mlflow.end_run(status="FINISHED")
+
+    except Exception as e:
+        logging.getLogger().removeHandler(_fh)
+        _fh.flush(); _fh.close()
+        mlflow.log_artifact(str(log_path))
+        mlflow.end_run(status="FAILED")
+        raise e
+
+    return results_per_crop
+
+
 # ── Save results ──────────────────────────────────────────────────────────────
 
-def _save_results_v2(results_per_crop: dict, band_name_to_idx: dict) -> None:
+def _save_results_v2(results_per_crop: dict, band_name_to_idx: dict,
+                     per_crop_json=None, exp_json=None, exp_bands=None) -> None:
     """
-    Save per-crop results and union band list for Stage 3 Exp C v2.
+    Save per-crop results and union band list for Stage 3.
 
-    Writes:
-      STAGE2V3_PER_CROP_JSON   — per-crop detail (dates, bands, IoU, etc.)
-      STAGE3_EXP_C_V2_JSON     — union_dates, union_bands, total_channels, per-crop summary
-      STAGE3_EXP_C_V2_BANDS    — flat txt, one "B4_20220730" entry per (union_date, union_band) pair
+    Defaults to CNN output paths (STAGE2V3_PER_CROP_JSON etc.).
+    Pass explicit path overrides for the RF variant.
     """
+    _per_crop_json = per_crop_json or STAGE2V3_PER_CROP_JSON
+    _exp_json      = exp_json      or STAGE3_EXP_C_V2_JSON
+    _exp_bands     = exp_bands     or STAGE3_EXP_C_V2_BANDS
     os.makedirs(PROCESSED_DIR, exist_ok=True)
 
     # Build union_dates: sorted set of all selected dates across crops
@@ -1193,32 +1524,32 @@ def _save_results_v2(results_per_crop: dict, band_name_to_idx: dict) -> None:
             "mlflow_run_id":        r.get("mlflow_run_id", ""),
         }
 
-    # Save STAGE2V3_PER_CROP_JSON
-    with open(STAGE2V3_PER_CROP_JSON, "w") as f:
+    # Save per-crop JSON
+    with open(_per_crop_json, "w") as f:
         json.dump(per_crop_summary, f, indent=2)
-    log.info(f"Saved: {STAGE2V3_PER_CROP_JSON}")
+    log.info(f"Saved: {_per_crop_json}")
 
-    # Save STAGE3_EXP_C_V2_JSON
-    exp_c_v2_payload = {
+    # Save exp summary JSON
+    exp_payload = {
         "union_dates":     union_dates,
         "union_bands":     union_bands,
         "total_channels":  total_channels,
         "per_crop":        per_crop_summary,
     }
-    with open(STAGE3_EXP_C_V2_JSON, "w") as f:
-        json.dump(exp_c_v2_payload, f, indent=2)
-    log.info(f"Saved: {STAGE3_EXP_C_V2_JSON}")
+    with open(_exp_json, "w") as f:
+        json.dump(exp_payload, f, indent=2)
+    log.info(f"Saved: {_exp_json}")
 
-    # Save STAGE3_EXP_C_V2_BANDS — one entry per (date, band) in union_dates × union_bands
+    # Save flat band list — one entry per (date, band) in union_dates × union_bands
     band_lines = []
     for date in union_dates:
         for band in union_bands:
             key = f"{band}_{date}"
             if key in band_name_to_idx:
                 band_lines.append(key)
-    with open(STAGE3_EXP_C_V2_BANDS, "w") as f:
+    with open(_exp_bands, "w") as f:
         f.write("\n".join(band_lines))
-    log.info(f"Saved: {STAGE3_EXP_C_V2_BANDS}  ({len(band_lines)} channel entries)")
+    log.info(f"Saved: {_exp_bands}  ({len(band_lines)} channel entries)")
 
     # Summary
     log.info("\n=== Per-Crop Stage 2v2 Results ===")
@@ -1476,13 +1807,15 @@ def _mlflow_setup() -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
+def main(force: bool = False, data_dir: str = None, stage: str = "all",
+         selector: str = "cnn") -> None:
     # Override data paths if requested
     if data_dir:
         global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, \
                STAGE1V3_CANDIDATES_JSON, STAGE2V3_PER_CROP_JSON, \
                STAGE3_EXP_C_V2_JSON, STAGE3_EXP_C_V2_BANDS, STAGE3_EXP_C_V2_BANDS_PROJECTED, \
-               STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS
+               STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS, \
+               STAGE2V3_RF_PER_CROP_JSON, STAGE3_EXP_C_V2_RF_JSON, STAGE3_EXP_C_V2_RF_BANDS
         processed                        = pathlib.Path(data_dir)
         PROCESSED_DIR                    = processed
         S2_PROCESSED_DIR                 = processed / "s2"
@@ -1497,6 +1830,9 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
         STAGE3_EXP_C_V2_BANDS_PROJECTED  = processed / "stage3_exp_c_v2_bands_projected.json"
         STAGE3_EXP_D_JSON                = processed / "stage3_exp_d.json"
         STAGE3_EXP_D_BANDS               = processed / "stage3_exp_d_bands.txt"
+        STAGE2V3_RF_PER_CROP_JSON        = processed / "stage2v3_rf_per_crop_results.json"
+        STAGE3_EXP_C_V2_RF_JSON         = processed / "stage3_exp_c_v2_rf.json"
+        STAGE3_EXP_C_V2_RF_BANDS        = processed / "stage3_exp_c_v2_rf_bands.txt"
         log.info(f"Data dir overridden to {processed}")
 
     os.makedirs(FIGURES_DIR, exist_ok=True)
@@ -1522,8 +1858,9 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
 
     # ── Stage 2v2 ─────────────────────────────────────────────────────────────
     if stage in ("2", "all"):
-        if not force and os.path.exists(STAGE3_EXP_C_V2_BANDS):
-            log.info(f"Stage 2v2 output already exists: {STAGE3_EXP_C_V2_BANDS}")
+        _output_check = STAGE3_EXP_C_V2_RF_BANDS if selector == "rf" else STAGE3_EXP_C_V2_BANDS
+        if not force and os.path.exists(_output_check):
+            log.info(f"Stage 2v2-{selector.upper()} output already exists: {_output_check}")
             log.info("Use --force to re-run.")
             if stage == "2":
                 return
@@ -1556,8 +1893,9 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
                 all_bandnames.extend([f"{b}_{date_str}" for b in S2_BAND_NAMES])
             band_name_to_idx = {name: i for i, name in enumerate(all_bandnames)}
 
-            log.info(f"Device: {_device_label()}")
-            run_stage2v2(
+            log.info(f"Device: {_device_label()}  selector={selector}")
+            _stage2_fn = run_stage2v2_rf if selector == "rf" else run_stage2v2
+            _stage2_fn(
                 s2_paths=s2_files, cdl_path=cdl_path,
                 date_candidates_per_crop=date_candidates_per_crop,
                 band_candidates_per_crop=band_candidates_per_crop,
@@ -1565,7 +1903,7 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all") -> None:
                 all_dates=all_dates,
                 data_dir=data_dir,
             )
-            log.info("Stage 2v2 complete.")
+            log.info(f"Stage 2v2-{selector.upper()} complete.")
 
         if stage == "2":
             return
@@ -1597,6 +1935,11 @@ if __name__ == "__main__":
             "project (map 2022 selections to 2023/2024 nearest dates)"
         ),
     )
+    parser.add_argument(
+        "--selector", choices=["cnn", "rf"], default="cnn",
+        help="Stage 2 feature selector: 'cnn' (iterative CNN oracle, default) or "
+             "'rf' (Random Forest importance, faster — outputs *_rf_* files)",
+    )
     parser.add_argument("--force",    action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str, default=None,
                         help="Override processed data directory")
@@ -1614,4 +1957,4 @@ if __name__ == "__main__":
         ],
     )
 
-    main(force=args.force, data_dir=args.data_dir, stage=args.stage)
+    main(force=args.force, data_dir=args.data_dir, stage=args.stage, selector=args.selector)

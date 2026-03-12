@@ -8,7 +8,8 @@ Four experiment configurations × 2 architectures = up to 8 training runs.
 | Exp A  | Single-date (Jul 30)            | 9        | Conventional baseline          |
 | Exp B  | 4 phenological dates            | 36       | Multi-temporal naive           |
 | Exp C  | Stage 2 CNN forward-selection   | K*       | Proposed method                |
-| Exp D  | Stage 1 GSI top-K (no Stage 2)  | K*       | Ablation: no CNN validation    |
+| Exp D      | Stage 1 GSI top-K (no Stage 2)    | K*   | Ablation: no CNN validation    |
+| Exp C_v2_rf| Stage 2 RF importance selection   | K*   | Ablation: RF vs CNN oracle     |
 
 Usage:
     python scripts/train_segmentation.py                 # run all 6 experiments
@@ -58,6 +59,7 @@ from crop_mapping_pipeline.config import (
     VAL_FRAC, SEED, ARCH_CFG,
     STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
     STAGE3_EXP_C_V2_JSON,
+    STAGE3_EXP_C_V2_RF_JSON,
     STAGE3_EXP_D_JSON,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
 )
@@ -499,6 +501,60 @@ def build_exp_C_v2_indices(mmdd_to_date, local_band_to_idx, stage2v3_run_id=None
     if resolved_stage2v3_run_id:
         log.info(f"Exp C v2 source Stage 2v2 run_id: {resolved_stage2v3_run_id}")
     return exp_C_v2_idx, exp_C_v2_names, resolved_stage2v3_run_id
+
+
+def build_exp_C_v2_rf_indices(mmdd_to_date, local_band_to_idx):
+    """
+    Load STAGE3_EXP_C_V2_RF_JSON (written by feature_analysis_v2.py --selector rf).
+    Same logic as build_exp_C_v2_indices but reads the RF-selector output.
+    Returns (idx_list, names_list).
+    """
+    import json as _json
+
+    rf_json_path = STAGE3_EXP_C_V2_RF_JSON
+    if not rf_json_path.exists():
+        raise FileNotFoundError(
+            f"Exp C_v2_rf input not found: {rf_json_path}\n"
+            "Run Stage 2v2-RF first:  python stages/feature_analysis_v2.py --stage 2 --selector rf"
+        )
+
+    with open(rf_json_path) as f:
+        payload = _json.load(f)
+
+    union_dates = payload.get("union_dates", [])
+    union_bands = payload.get("union_bands", [])
+    if not union_dates or not union_bands:
+        raise ValueError(f"STAGE3_EXP_C_V2_RF_JSON is missing union_dates or union_bands")
+
+    idx, names, skipped = [], [], 0
+    for date_yyyymmdd in union_dates:
+        mmdd       = date_yyyymmdd[4:]
+        local_date = mmdd_to_date.get(mmdd)
+        if local_date is None:
+            skipped += 1
+            continue
+        for band in union_bands:
+            local_name = f"{band}_{local_date}"
+            i          = local_band_to_idx.get(local_name)
+            if i is not None:
+                idx.append(i)
+                names.append(local_name)
+            else:
+                skipped += 1
+
+    if not idx:
+        raise ValueError(
+            f"Exp C_v2_rf: no bands matched current S2 files from {rf_json_path.name}"
+        )
+    if skipped:
+        log.warning(f"Exp C_v2_rf: {skipped} (date, band) pair(s) could not be matched")
+
+    log.info(
+        f"Exp C_v2_rf: {len(idx)} channels "
+        f"({len(union_dates)} union dates × {len(union_bands)} union bands) "
+        f"from {rf_json_path.name}"
+    )
+    return idx, names
 
 
 def build_exp_C_v2_indices_projected(s2_processed, project_run_id=None):
@@ -1449,6 +1505,14 @@ def main(
             )
             log.info("Exp C v2: using single reference-year band indices (no projected file)")
 
+    # Exp C_v2_rf: only loaded when explicitly requested via --exp C_v2_rf
+    exp_C_v2_rf_idx = exp_C_v2_rf_names = None
+    if exps and "C_v2_rf" in exps:
+        exp_C_v2_rf_idx, exp_C_v2_rf_names = build_exp_C_v2_rf_indices(
+            mmdd_to_date, local_band_to_idx
+        )
+        log.info(f"Exp C_v2_rf: RF-selected features, {len(exp_C_v2_rf_idx)} channels")
+
     # Exp D: only loaded when explicitly requested via --exp D
     exp_D_idx = exp_D_names = None
     if exps and "D" in exps:
@@ -1478,6 +1542,9 @@ def main(
         elif exp_key == "C_v2":
             idx, names = exp_C_v2_idx, exp_C_v2_names
             desc_fn = lambda a, _i=exp_C_v2_idx: f"Stage2v2 K*_dates×K*_bands={len(_i) if isinstance(_i, list) else 0}ch, {a}"
+        elif exp_key == "C_v2_rf":
+            idx, names = exp_C_v2_rf_idx, exp_C_v2_rf_names
+            desc_fn = lambda a, _i=exp_C_v2_rf_idx: f"Stage2-RF K*={len(_i) if _i else 0}ch, {a}"
         elif exp_key == "D":
             idx, names = exp_D_idx, exp_D_names
             desc_fn = lambda a, _i=exp_D_idx: f"Stage1 GSI top-K={len(_i) if _i else 0}ch, {a}"
@@ -1561,7 +1628,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
-        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "D"],
+        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "D"],
         default=["A", "B", "C"],
         help="Which experiments to run (default: A B C)",
     )
