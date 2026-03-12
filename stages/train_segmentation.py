@@ -587,6 +587,12 @@ def run_experiment(
         log.info(f"Checkpoint exists — skipping {exp_name}  (use --force to re-run)")
         return None
 
+    # Per-run log file — captured from start of training; uploaded as MLflow artifact at end
+    run_log_path    = exp_dir / f"{exp_name}_train.log"
+    run_log_handler = logging.FileHandler(run_log_path, mode="w")
+    run_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(run_log_handler)
+
     per_year = isinstance(band_indices, dict)
 
     def _yr_idx(yr):
@@ -665,12 +671,10 @@ def run_experiment(
     )
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE))
 
-    # ── MLflow run ────────────────────────────────────────────────────────────
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAIN)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # ── MLflow run (child — nested under parent created in main()) ────────────
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")   # used for GDrive folder
 
-    with mlflow.start_run(run_name=f"{exp_name}_{timestamp}") as run:
+    with mlflow.start_run(run_name=exp_name, nested=True) as run:
         mlflow.log_params({
             "experiment":     exp_name,
             "architecture":   arch,
@@ -860,7 +864,7 @@ def run_experiment(
             del pred_map, gt_map
 
         gdrive_links = upload_models_to_gdrive(
-            run_name=f"{exp_name}_{timestamp}",
+            run_name=f"{exp_name}_{run_timestamp}",
             model_files=[best_ckpt, last_ckpt],
         )
         for fname, link in gdrive_links.items():
@@ -872,7 +876,14 @@ def run_experiment(
         if seg_path is not None:
             mlflow.log_artifact(str(seg_path))
 
+        # Training log
+        run_log_handler.flush()
+        mlflow.log_artifact(str(run_log_path))
+
         run_id = run.info.run_id
+
+    run_log_handler.close()
+    log.removeHandler(run_log_handler)
 
     summary = {
         "exp_name":      exp_name,
@@ -1198,28 +1209,50 @@ def main(
 
     log.info(f"Planned {len(plan)} run(s): {[(e, a) for e, a, *_ in plan]}")
 
-    # ── Run experiments ────────────────────────────────────────────────────
+    # ── MLflow setup ────────────────────────────────────────────────────────
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAIN)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # ── Run experiments (parent run per exp_key, child run per arch) ────────
+    # Group plan by exp_key so each experiment gets one parent MLflow run
     all_results = []
+    exp_groups: dict = {}
     for exp_key, arch, band_idx, band_names, description in plan:
-        exp_name = f"exp_{exp_key}_{arch}"
-        extra_kw = {}
-        if exp_key == "C":
-            extra_kw["source_stage2_run_id"]  = resolved_stage2_run_id
-            extra_kw["source_project_run_id"] = resolved_project_run_id
-        result   = run_experiment(
-            exp_name=exp_name,
-            arch=arch,
-            band_indices=band_idx,
-            band_names_list=band_names,
-            description=description,
-            s2_processed=s2_processed,
-            class_weights_tensor=cw_tensor,
-            force=force,
-            skip_viz=skip_viz,
-            **extra_kw,
-        )
-        if result is not None:
-            all_results.append(result)
+        exp_groups.setdefault(exp_key, []).append((arch, band_idx, band_names, description))
+
+    for exp_key, arch_runs in exp_groups.items():
+        n_ch            = len(arch_runs[0][1]) if arch_runs[0][1] else 0
+        parent_run_name = f"exp_{exp_key}_{timestamp}"
+        with mlflow.start_run(run_name=parent_run_name) as parent_run:
+            mlflow.log_params({
+                "experiment":    f"exp_{exp_key}",
+                "architectures": str([a for a, *_ in arch_runs]),
+                "n_channels":    n_ch,
+                "train_years":   str(TRAIN_YEARS),
+                "test_year":     TEST_YEAR,
+            })
+            log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
+            for arch, band_idx, band_names, description in arch_runs:
+                exp_name = f"exp_{exp_key}_{arch}"
+                extra_kw = {}
+                if exp_key == "C":
+                    extra_kw["source_stage2_run_id"]  = resolved_stage2_run_id
+                    extra_kw["source_project_run_id"] = resolved_project_run_id
+                result = run_experiment(
+                    exp_name=exp_name,
+                    arch=arch,
+                    band_indices=band_idx,
+                    band_names_list=band_names,
+                    description=description,
+                    s2_processed=s2_processed,
+                    class_weights_tensor=cw_tensor,
+                    force=force,
+                    skip_viz=skip_viz,
+                    **extra_kw,
+                )
+                if result is not None:
+                    all_results.append(result)
 
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
