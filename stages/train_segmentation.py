@@ -836,7 +836,7 @@ def run_experiment(
             log.info(f"  Running full-image inference for {exp_name}...")
             gt_map, _    = load_gt_remap(str(test_cdl))
             pred_map, _  = run_full_inference(
-                model, test_s2, test_idx, patch_size=PATCH_SIZE, stride=PATCH_SIZE
+                model, test_s2_filtered, test_idx_local, patch_size=PATCH_SIZE, stride=PATCH_SIZE
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             save_segmentation_map(
@@ -896,43 +896,63 @@ SEG_NORM     = BoundaryNorm(boundaries=range(NUM_CLASSES + 1), ncolors=NUM_CLASS
 
 
 def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256):
-    arrays, profile = [], None
-    for p in s2_paths:
-        with rasterio.open(p) as src:
-            arr = src.read().astype(np.float32)
-            if profile is None:
-                profile = dict(src.profile)
-        arr[arr == S2_NODATA] = 0.0
-        arrays.append(arr)
+    """Tiled inference — reads one window at a time, never loads full rasters."""
+    with rasterio.open(s2_paths[0]) as src:
+        H, W    = src.height, src.width
+        profile = dict(src.profile)
 
-    stacked  = np.concatenate(arrays, axis=0)
-    selected = stacked[band_indices]
-    K, H, W  = selected.shape
-    del stacked
-
+    srcs     = [rasterio.open(p) for p in s2_paths]
     pred_map = np.zeros((H, W), dtype=np.uint8)
     n_rows   = (H + stride - 1) // stride
     n_cols   = (W + stride - 1) // stride
     total    = n_rows * n_cols
+    K        = len(band_indices)
 
     model.eval()
     done = 0
-    with torch.no_grad():
-        for y in range(0, H, stride):
-            for x in range(0, W, stride):
-                ph    = min(patch_size, H - y)
-                pw    = min(patch_size, W - x)
-                patch = selected[:, y:y + ph, x:x + pw]
-                if ph < patch_size or pw < patch_size:
-                    padded = np.zeros((K, patch_size, patch_size), dtype=np.float32)
-                    padded[:, :ph, :pw] = patch
-                    patch = padded
-                t              = torch.from_numpy(patch).unsqueeze(0).to(DEVICE)
-                out            = model(t).argmax(dim=1).squeeze().cpu().numpy()
-                pred_map[y:y + ph, x:x + pw] = out[:ph, :pw]
-                done          += 1
-                if done % 200 == 0 or done == total:
-                    log.info(f"  {done}/{total} tiles")
+    try:
+        with torch.no_grad():
+            for y in range(0, H, stride):
+                for x in range(0, W, stride):
+                    ph  = min(patch_size, H - y)
+                    pw  = min(patch_size, W - x)
+                    win = rasterio.windows.Window(x, y, pw, ph)
+
+                    # Read only this window from each file
+                    bands = []
+                    for src in srcs:
+                        try:
+                            arr = src.read(window=win).astype(np.float32)
+                        except Exception:
+                            arr = np.zeros((src.count, ph, pw), dtype=np.float32)
+                        arr[arr == S2_NODATA] = 0.0
+                        bands.append(arr)
+
+                    patch = np.concatenate(bands, axis=0)[band_indices]  # (K, ph, pw)
+
+                    # Per-channel min-max normalisation (matches RasterPatchDataset)
+                    for ch in range(K):
+                        lo, hi = float(patch[ch].min()), float(patch[ch].max())
+                        if hi > lo:
+                            patch[ch] = (patch[ch] - lo) / (hi - lo)
+                        else:
+                            patch[ch] = 0.0
+
+                    # Pad to patch_size if at border
+                    if ph < patch_size or pw < patch_size:
+                        padded = np.zeros((K, patch_size, patch_size), dtype=np.float32)
+                        padded[:, :ph, :pw] = patch
+                        patch = padded
+
+                    t   = torch.from_numpy(patch).unsqueeze(0).to(DEVICE)
+                    out = model(t).argmax(dim=1).squeeze().cpu().numpy()
+                    pred_map[y:y + ph, x:x + pw] = out[:ph, :pw]
+                    done += 1
+                    if done % 200 == 0 or done == total:
+                        log.info(f"  {done}/{total} tiles")
+    finally:
+        for src in srcs:
+            src.close()
 
     return pred_map, profile
 
