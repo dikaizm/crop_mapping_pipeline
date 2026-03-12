@@ -53,7 +53,7 @@ from crop_mapping_pipeline.config import (
     REMAP_LUT, S2_NODATA,
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_TRAIN, MLFLOW_EXPERIMENT_FEATURE,
     TRAIN_YEARS, TEST_YEAR,
-    PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP,
+    PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, SEED, ARCH_CFG,
     STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
 )
@@ -734,7 +734,7 @@ def run_experiment(
                 "epoch_t_s":  round(ep_t,              1),
             })
 
-            if val_m["miou"] > best_miou:
+            if val_m["miou"] > best_miou + EARLY_STOP_DELTA:
                 best_miou  = val_m["miou"]
                 no_improve = 0
                 torch.save({

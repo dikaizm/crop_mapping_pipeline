@@ -147,7 +147,8 @@ STRIDE         = 256
 MIN_VALID_FRAC = 0.3
 BATCH_SIZE     = 8
 MAX_EPOCHS     = 100
-EARLY_STOP     = 15
+EARLY_STOP     = 20
+EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
 VAL_FRAC       = 0.15
 SEED           = 42
 
