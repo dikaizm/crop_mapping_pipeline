@@ -155,19 +155,23 @@ def build_exp_A_indices(local_date_to_idx, local_band_to_idx):
 
 
 def build_exp_B_indices(local_date_to_idx, local_band_to_idx):
-    """4 phenological dates × 9 vegetation bands = up to 36 channels."""
-    available_dates = sorted(local_date_to_idx.keys())
-    phenol_targets  = {"Jan": [1], "Mar": [3], "Jul": [7, 8], "Nov": [11, 10]}
-    phenol_map      = {}
-    for label, months in phenol_targets.items():
-        match = next(
-            (d for d in available_dates if int(d[4:6]) in months), None
-        )
-        if match:
-            phenol_map[label] = match
+    """4 phenological dates × 9 vegetation bands = up to 36 channels.
 
-    if len(phenol_map) < 2:
-        phenol_map = {f"D{i}": d for i, d in enumerate(available_dates)}
+    Dates are chosen as the acquisition nearest to the mid-point of each
+    phenological season (Jan-15, Mar-15, Jul-15, Nov-15).
+    """
+    available_dates = sorted(local_date_to_idx.keys())
+
+    # Target: mid-point of each season as day-of-year
+    phenol_targets = {"Jan": "0115", "Mar": "0315", "Jul": "0715", "Nov": "1115"}
+    phenol_map     = {}
+    for label, target_mmdd in phenol_targets.items():
+        target_doy = int(target_mmdd)   # treat MMDD as comparable integer
+        match = min(
+            available_dates,
+            key=lambda d: abs(int(d[4:]) - target_doy),
+        )
+        phenol_map[label] = match
 
     exp_B_idx, exp_B_names = [], []
     for _label, d in phenol_map.items():
