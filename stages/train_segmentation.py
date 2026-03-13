@@ -8,7 +8,8 @@ Four experiment configurations × 2 architectures = up to 8 training runs.
 | Exp A  | Single-date (Jul 30)            | 9        | Conventional baseline          |
 | Exp B  | 4 phenological dates            | 36       | Multi-temporal naive           |
 | Exp C  | Stage 2 CNN forward-selection   | K*       | Proposed method                |
-| Exp D      | Stage 1 GSI top-K (no Stage 2)    | K*   | Ablation: no CNN validation    |
+| Exp D      | Stage 1v3 GSI top-K (no Stage 2)  | K*   | Ablation: no CNN validation    |
+| Exp D_v2   | Stage 1v2 channel union           | K*   | Legacy Stage 1 direct baseline |
 | Exp C_v2_rf| Stage 2 RF importance selection   | K*   | Ablation: RF vs CNN oracle     |
 
 Usage:
@@ -121,6 +122,7 @@ from crop_mapping_pipeline.stages.experiments import (
     build_exp_C_v2_indices_projected,
     build_exp_C_v2_rf_indices,
     build_exp_D_indices,
+    build_exp_D_v2_indices,
 )
 
 
@@ -1031,6 +1033,12 @@ def main(
         exp_D_idx, exp_D_names = build_exp_D_indices(mmdd_to_date, local_band_to_idx)
         log.info(f"Exp D: Stage 1 top-K features, {len(exp_D_idx)} channels")
 
+    # Exp D_v2: legacy Stage 1v2 channel union, only when explicitly requested
+    exp_D_v2_idx = exp_D_v2_names = None
+    if exps and "D_v2" in exps:
+        exp_D_v2_idx, exp_D_v2_names = build_exp_D_v2_indices(mmdd_to_date, local_band_to_idx)
+        log.info(f"Exp D_v2: Stage 1 v2 channel union, {len(exp_D_v2_idx)} channels")
+
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
     log.info("Class weights computed")
@@ -1059,14 +1067,17 @@ def main(
             desc_fn = lambda a, _i=exp_C_v2_rf_idx: f"Stage2-RF K*={len(_i) if _i else 0}ch, {a}"
         elif exp_key == "D":
             idx, names = exp_D_idx, exp_D_names
-            desc_fn = lambda a, _i=exp_D_idx: f"Stage1 GSI top-K={len(_i) if _i else 0}ch, {a}"
+            desc_fn = lambda a, _i=exp_D_idx: f"Stage1v3 GSI top-K={len(_i) if _i else 0}ch, {a}"
+        elif exp_key == "D_v2":
+            idx, names = exp_D_v2_idx, exp_D_v2_names
+            desc_fn = lambda a, _i=exp_D_v2_idx: f"Stage1v2 candidate union={len(_i) if _i else 0}ch, {a}"
         else:
             log.warning(f"Unknown experiment key: {exp_key} — skipping")
             continue
 
         if idx is None:
             raise RuntimeError(
-                f"Exp {exp_key}: band indices are None — Stage 2 must be run before training."
+                f"Exp {exp_key}: band indices are None — required feature-selection output is missing."
             )
 
         for arch in run_archs:
@@ -1140,7 +1151,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
-        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "D"],
+        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "D", "D_v2"],
         default=["A", "B", "C"],
         help="Which experiments to run (default: A B C)",
     )

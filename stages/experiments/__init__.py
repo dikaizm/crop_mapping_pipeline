@@ -10,6 +10,7 @@ Import all builders from here for convenience.
         build_exp_C_v2_indices, build_exp_C_v2_indices_projected,
         build_exp_C_v2_rf_indices,
         build_exp_D_indices,
+        build_exp_D_v2_indices,
     )
 """
 
@@ -29,6 +30,7 @@ from crop_mapping_pipeline.stages.experiments.exp_c_v2 import (
 )
 from crop_mapping_pipeline.stages.experiments.exp_c_v2_rf import build_exp_C_v2_rf_indices
 from crop_mapping_pipeline.stages.experiments.exp_d import build_exp_D_indices
+from crop_mapping_pipeline.stages.experiments.exp_d_v2 import build_exp_D_v2_indices
 
 __all__ = [
     "parse_date",
@@ -41,4 +43,5 @@ __all__ = [
     "build_exp_C_v2_indices_projected",
     "build_exp_C_v2_rf_indices",
     "build_exp_D_indices",
+    "build_exp_D_v2_indices",
 ]
