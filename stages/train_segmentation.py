@@ -54,7 +54,7 @@ from crop_mapping_pipeline.config import (
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA,
-    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_TRAIN, MLFLOW_EXPERIMENT_FEATURE,
+    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, SEED, ARCH_CFG,
@@ -116,6 +116,7 @@ from crop_mapping_pipeline.stages.experiments import (
     parse_date,
     build_local_band_map,
     build_exp_A_indices,
+    build_exp_A_v2_indices,
     build_exp_B_indices,
     build_exp_C_indices,
     build_exp_C_indices_projected,
@@ -951,6 +952,9 @@ def main(
     exp_A_idx, exp_A_names, july30_key = build_exp_A_indices(
         local_date_to_idx, local_band_to_idx
     )
+    exp_A_v2_variants = build_exp_A_v2_indices(
+        local_date_to_idx, local_band_to_idx
+    )
     exp_B_idx, exp_B_names, phenol_map = build_exp_B_indices(
         local_date_to_idx, local_band_to_idx
     )
@@ -1033,6 +1037,7 @@ def main(
 
     registry = build_registry(
         exp_A_idx=exp_A_idx,   exp_A_names=exp_A_names,   july30_key=july30_key,
+        exp_A_v2_variants=exp_A_v2_variants,
         exp_B_idx=exp_B_idx,   exp_B_names=exp_B_names,   phenol_map=phenol_map,
         exp_C_idx=exp_C_idx,   exp_C_names=exp_C_names,
         resolved_stage2_run_id=resolved_stage2_run_id,
@@ -1067,7 +1072,6 @@ def main(
 
     # ── MLflow setup ────────────────────────────────────────────────────────
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAIN)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     # ── Run experiments (parent run per exp_key, child run per arch) ────────
@@ -1078,6 +1082,7 @@ def main(
         exp_groups.setdefault(exp_key, []).append((arch, band_idx, band_names, description, extra_kw))
 
     for exp_key, arch_runs in exp_groups.items():
+        mlflow.set_experiment(registry[exp_key].mlflow_experiment)
         n_ch            = len(arch_runs[0][1]) if arch_runs[0][1] else 0
         parent_run_name = f"exp_{exp_key}_{timestamp}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
@@ -1125,9 +1130,10 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
-        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
+        "--exp", nargs="+",
+        choices=["A", "A_v2", "B", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
         default=["A", "B", "C"],
-        help="Which experiments to run (default: A B C)",
+        help="Which experiments to run (default: A B C). A_v2 expands to all 4 phenological windows.",
     )
     parser.add_argument(
         "--arch", nargs="+", choices=list(ARCH_CFG.keys()),

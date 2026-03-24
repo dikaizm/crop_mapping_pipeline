@@ -22,15 +22,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from crop_mapping_pipeline.config import (
+    MLFLOW_EXPERIMENT_TRAIN,
+    MLFLOW_EXPERIMENT_TRAIN_V3,
+)
+
 
 @dataclass
 class ExperimentConfig:
-    key:          str
-    description:  str
-    band_indices: Any                        # list[int] or dict{yr: (list, list)}
-    band_names:   list                       # reference-year channel names
-    default_loss: str  = "v1"               # "v1" | "v2"
-    extra_kw:     dict = field(default_factory=dict)
+    key:              str
+    description:      str
+    band_indices:     Any                        # list[int] or dict{yr: (list, list)}
+    band_names:       list                       # reference-year channel names
+    default_loss:     str  = "v1"               # "v1" | "v2"
+    mlflow_experiment: str = MLFLOW_EXPERIMENT_TRAIN
+    extra_kw:         dict = field(default_factory=dict)
 
 
 def build_registry(
@@ -54,6 +60,8 @@ def build_registry(
     exp_D_idx  = None, exp_D_names  = None,
     # ── Exp D_v2 (Stage 1v2 channel union) ────────────────────────────────
     exp_D_v2_idx = None, exp_D_v2_names = None,
+    # ── Exp A_v2 (per-window single-date) ──────────────────────────────────
+    exp_A_v2_variants = None,              # {label: (idx, names, date)}
 ) -> dict[str, ExperimentConfig]:
     """Build and return the experiment registry.
 
@@ -72,6 +80,17 @@ def build_registry(
         band_names  = exp_A_names,
         default_loss= "v1",
     )
+
+    # ── Exp A_v2: one entry per phenological window ─────────────────────────
+    for label, (idx, names, date) in (exp_A_v2_variants or {}).items():
+        key = f"A_v2_{label}"
+        reg[key] = ExperimentConfig(
+            key         = key,
+            description = f"Single-date {date} [{label}], 9ch — phenological window baseline",
+            band_indices= idx,
+            band_names  = names,
+            default_loss= "v1",
+        )
 
     reg["B"] = ExperimentConfig(
         key         = "B",
@@ -145,11 +164,12 @@ def build_registry(
     for (phase, k), (idx, names) in sorted((exp_C_v3_variants or {}).items()):
         key = f"C_v3_{phase}_k{k:02d}"
         reg[key] = ExperimentConfig(
-            key         = key,
-            description = f"Stage2v3 {phase}_sweep k={k} {len(idx)}ch",
-            band_indices= idx,
-            band_names  = names,
-            default_loss= "v1",
+            key               = key,
+            description       = f"Stage2v3 {phase}_sweep k={k} {len(idx)}ch",
+            band_indices      = idx,
+            band_names        = names,
+            default_loss      = "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
         )
 
     return reg
@@ -166,7 +186,12 @@ def expand_exp_keys(
     """
     expanded = []
     for key in requested:
-        if key == "C_v3":
+        if key == "A_v2":
+            matched = sorted(k for k in registry if k.startswith("A_v2_"))
+            if not matched:
+                raise RuntimeError("No A_v2 variants registered.")
+            expanded.extend(matched)
+        elif key == "C_v3":
             matched = sorted(k for k in registry if k.startswith("C_v3_"))
             if not matched:
                 raise RuntimeError(
