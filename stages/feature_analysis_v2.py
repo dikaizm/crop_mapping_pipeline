@@ -72,10 +72,13 @@ from crop_mapping_pipeline.config import (
     STAGE1V3_CANDIDATES_JSON as _STAGE1V3_CANDIDATES_JSON,
     STAGE2V3_PER_CROP_JSON as _STAGE2V3_PER_CROP_JSON,
     STAGE2V3_RF_PER_CROP_JSON as _STAGE2V3_RF_PER_CROP_JSON,
+    STAGE2V3_SWEEP_PER_CROP_JSON as _STAGE2V3_SWEEP_PER_CROP_JSON,
     STAGE3_EXP_C_V2_BANDS as _STAGE3_EXP_C_V2_BANDS,
     STAGE3_EXP_C_V2_JSON as _STAGE3_EXP_C_V2_JSON,
     STAGE3_EXP_C_V2_RF_BANDS as _STAGE3_EXP_C_V2_RF_BANDS,
     STAGE3_EXP_C_V2_RF_JSON as _STAGE3_EXP_C_V2_RF_JSON,
+    STAGE3_EXP_C_V3_BANDS as _STAGE3_EXP_C_V3_BANDS,
+    STAGE3_EXP_C_V3_JSON as _STAGE3_EXP_C_V3_JSON,
     STAGE3_EXP_D_BANDS as _STAGE3_EXP_D_BANDS,
     STAGE3_EXP_D_JSON as _STAGE3_EXP_D_JSON,
     TEST_YEAR,
@@ -102,6 +105,9 @@ STAGE2V3_RF_PER_CROP_JSON = _STAGE2V3_RF_PER_CROP_JSON
 STAGE3_EXP_C_V2_RF_JSON = _STAGE3_EXP_C_V2_RF_JSON
 STAGE3_EXP_C_V2_RF_BANDS = _STAGE3_EXP_C_V2_RF_BANDS
 STAGE3_EXP_C_V2_BANDS_PROJECTED = PROCESSED_DIR / "stage3_exp_c_v2_bands_projected.json"
+STAGE2V3_SWEEP_PER_CROP_JSON = _STAGE2V3_SWEEP_PER_CROP_JSON
+STAGE3_EXP_C_V3_JSON = _STAGE3_EXP_C_V3_JSON
+STAGE3_EXP_C_V3_BANDS = _STAGE3_EXP_C_V3_BANDS
 
 
 def configure_data_dir(data_dir: str | None) -> None:
@@ -110,6 +116,7 @@ def configure_data_dir(data_dir: str | None) -> None:
     global STAGE3_EXP_C_V2_BANDS, STAGE3_EXP_C_V2_BANDS_PROJECTED
     global STAGE3_EXP_D_JSON, STAGE3_EXP_D_BANDS
     global STAGE2V3_RF_PER_CROP_JSON, STAGE3_EXP_C_V2_RF_JSON, STAGE3_EXP_C_V2_RF_BANDS
+    global STAGE2V3_SWEEP_PER_CROP_JSON, STAGE3_EXP_C_V3_JSON, STAGE3_EXP_C_V3_BANDS
 
     if not data_dir:
         return
@@ -131,6 +138,9 @@ def configure_data_dir(data_dir: str | None) -> None:
     STAGE2V3_RF_PER_CROP_JSON = processed / "stage2v3_rf_per_crop_results.json"
     STAGE3_EXP_C_V2_RF_JSON = processed / "stage3_exp_c_v2_rf.json"
     STAGE3_EXP_C_V2_RF_BANDS = processed / "stage3_exp_c_v2_rf_bands.txt"
+    STAGE2V3_SWEEP_PER_CROP_JSON = processed / "stage2v3_sweep_per_crop_results.json"
+    STAGE3_EXP_C_V3_JSON = processed / "stage3_exp_c_v3.json"
+    STAGE3_EXP_C_V3_BANDS = processed / "stage3_exp_c_v3_bands.txt"
     log.info(f"Data dir overridden to {processed}")
 
 
@@ -670,6 +680,7 @@ def run_project_v2() -> None:
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage1.v3 import run_stage1v3
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2 import run_stage2v2
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2_rf import run_stage2v2_rf
+from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v3 import run_stage2v3
 
 
 def main(force: bool = False, data_dir: str = None, stage: str = "all", selector: str = "cnn") -> None:
@@ -714,6 +725,27 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
         if stage == "2":
             return
 
+    if stage in ("2v3", "all"):
+        if not force and STAGE2V3_SWEEP_PER_CROP_JSON.exists():
+            log.info(f"Stage 2v3 sweep output already exists: {STAGE2V3_SWEEP_PER_CROP_JSON}")
+            log.info("Use --force to re-run.")
+            if stage == "2v3":
+                return
+        else:
+            date_candidates_per_crop, band_candidates_per_crop, all_dates = load_stage1_candidates()
+            _s2_year, s2_files, cdl_path = get_train_year_inputs()
+            _all_bandnames, band_name_to_idx = build_band_name_to_idx(s2_files)
+            log.info("Running Stage 2v3 incremental top-K enumeration (no training)")
+            run_stage2v3(
+                date_candidates_per_crop=date_candidates_per_crop,
+                band_candidates_per_crop=band_candidates_per_crop,
+                band_name_to_idx=band_name_to_idx,
+                data_dir=data_dir,
+            )
+            log.info("Stage 2v3 sweep complete.")
+        if stage == "2v3":
+            return
+
     if stage == "project":
         if not force and STAGE3_EXP_C_V2_BANDS_PROJECTED.exists():
             log.info(f"Projected bands already exist: {STAGE3_EXP_C_V2_BANDS_PROJECTED}")
@@ -727,9 +759,10 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Feature analysis v2: Stage 1v3 + Stage 2v2")
-    parser.add_argument("--stage", choices=["1", "2", "all", "project"], default="all")
-    parser.add_argument("--selector", choices=["cnn", "rf"], default="cnn")
+    parser = argparse.ArgumentParser(description="Feature analysis v2: Stage 1v3 + Stage 2v2/v3")
+    parser.add_argument("--stage", choices=["1", "2", "2v3", "all", "project"], default="all")
+    parser.add_argument("--selector", choices=["cnn", "rf"], default="cnn",
+                        help="Selector for Stage 2v2 (cnn or rf). Ignored for --stage 2v3.")
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory")
     return parser

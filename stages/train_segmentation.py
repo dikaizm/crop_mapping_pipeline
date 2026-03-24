@@ -65,6 +65,7 @@ from crop_mapping_pipeline.config import (
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
+from crop_mapping_pipeline.stages.losses import build_loss_v1, build_loss_v2, PhenologyAwareLoss
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
 
@@ -118,9 +119,12 @@ from crop_mapping_pipeline.stages.experiments import (
     build_exp_B_indices,
     build_exp_C_indices,
     build_exp_C_indices_projected,
+    build_registry,
+    expand_exp_keys,
     build_exp_C_v2_indices,
     build_exp_C_v2_indices_projected,
     build_exp_C_v2_rf_indices,
+    build_exp_C_v3_indices,
     build_exp_D_indices,
     build_exp_D_v2_indices,
 )
@@ -173,43 +177,6 @@ def compute_per_class_iou(logits, labels, num_classes):
         ious[cls] = float(inter / union) if union > 0 else float("nan")
     return ious
 
-
-class PhenologyAwareLoss(nn.Module):
-    """
-    Computes CrossEntropyLoss with dynamic per-pixel weights.
-    For pixels labeled as 'Crop' (1-10), if NDVI < threshold (0.3),
-    the loss weight is reduced to 0.1 to avoid penalizing the model
-    for identifying 'Background' during the off-season.
-    """
-    def __init__(self, base_weight, red_idx, nir_idx, threshold=0.3, penalty_reduction=0.1):
-        super().__init__()
-        self.base_criterion = nn.CrossEntropyLoss(weight=base_weight, reduction='none')
-        self.red_idx = red_idx
-        self.nir_idx = nir_idx
-        self.threshold = threshold
-        self.reduction_factor = penalty_reduction
-
-    def forward(self, logits, labels, images):
-        # images shape: (B, C, H, W)
-        # Calculate NDVI: (NIR - Red) / (NIR + Red + eps)
-        red = images[:, self.red_idx, :, :]
-        nir = images[:, self.nir_idx, :, :]
-        ndvi = (nir - red) / (nir + red + 1e-7)
-
-        # Standard loss per pixel
-        loss = self.base_criterion(logits, labels) # (B, H, W)
-
-        # Identify 'Crop' pixels (1 to NUM_CLASSES-1)
-        is_crop = (labels > 0)
-        
-        # Identify pixels that should be 'Active' but are 'Dormant' (low NDVI)
-        is_dormant_crop = is_crop & (ndvi < self.threshold)
-
-        # Apply reduction factor to dormant crop pixels
-        weights = torch.ones_like(loss)
-        weights[is_dormant_crop] = self.reduction_factor
-        
-        return (loss * weights).mean()
 
 @torch.no_grad()
 def validate_one_epoch(model, loader, criterion, device, num_classes):
@@ -339,6 +306,7 @@ def run_experiment(
     description,
     s2_processed,
     class_weights_tensor,
+    loss_version="v1",      # "v1" = WeightedCrossEntropy | "v2" = PhenologyAwareLoss
     force=False,
     skip_viz=False,
     source_stage2_run_id=None,
@@ -443,23 +411,18 @@ def run_experiment(
         optimizer, total_iters=MAX_EPOCHS, power=0.9
     )
 
-    # Phenology-Aware Loss Setup
-    # Attempt to find B4 and B8 in the band_names_list to calculate NDVI
-    try:
-        # We look for the first occurrence of B4 and B8 (usually the target date or first date)
-        red_idx = next(i for i, name in enumerate(band_names_list) if name.startswith("B4"))
-        nir_idx = next(i for i, name in enumerate(band_names_list) if name.startswith("B8"))
-        criterion = PhenologyAwareLoss(
-            base_weight=class_weights_tensor.to(DEVICE),
-            red_idx=red_idx,
-            nir_idx=nir_idx,
-            threshold=0.3,
-            penalty_reduction=0.1
+    # ── Loss function (versioned) ──────────────────────────────────────────
+    if loss_version == "v2":
+        criterion, red_idx, nir_idx = build_loss_v2(
+            class_weights_tensor.to(DEVICE), band_names_list
         )
-        log.info(f"  PhenologyAwareLoss active (Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})")
-    except StopIteration:
-        log.warning("  Could not find B4/B8 for PhenologyAwareLoss — falling back to standard CrossEntropy")
-        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE))
+        log.info(
+            f"  Loss v2 — PhenologyAwareLoss "
+            f"(Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})"
+        )
+    else:
+        criterion = build_loss_v1(class_weights_tensor.to(DEVICE))
+        log.info("  Loss v1 — WeightedCrossEntropy")
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")   # used for GDrive folder
@@ -479,7 +442,7 @@ def run_experiment(
             "weight_decay":   cfg["weight_decay"],
             "optimizer":      "AdamW",
             "lr_scheduler":   "PolynomialLR(power=0.9)",
-            "loss":           "PhenologyAwareLoss",
+            "loss":           f"loss_{loss_version}",
             "train_years":    str(TRAIN_YEARS),
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
@@ -931,11 +894,15 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
 def main(
     exps=None,
     archs=None,
+    loss_version="v1",
     force=False,
     data_dir=None,
     skip_viz=False,
     stage2_run_id=None,
     project_run_id=None,
+    v3_phases=("band",),
+    v3_ks=(3,),
+    stage2v3_sweep_run_id=None,
 ):
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
@@ -1039,49 +1006,62 @@ def main(
         exp_D_v2_idx, exp_D_v2_names = build_exp_D_v2_indices(mmdd_to_date, local_band_to_idx)
         log.info(f"Exp D_v2: Stage 1 v2 channel union, {len(exp_D_v2_idx)} channels")
 
+    # Exp C_v3: Stage 2v3 incremental top-K sweep — one variant per (phase, k) pair
+    # exp_C_v3_variants: {(phase, k): (idx_list, names_list)}
+    exp_C_v3_variants: dict = {}
+    if exps and "C_v3" in exps:
+        for _phase in v3_phases:
+            for _k in v3_ks:
+                _idx, _names = build_exp_C_v3_indices(
+                    phase=_phase,
+                    k=_k,
+                    mmdd_to_date=mmdd_to_date,
+                    local_band_to_idx=local_band_to_idx,
+                    mlflow_run_id=stage2v3_sweep_run_id,
+                )
+                exp_C_v3_variants[(_phase, _k)] = (_idx, _names)
+                log.info(f"Exp C_v3 phase={_phase} k={_k}: {len(_idx)} channels")
+
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
     log.info("Class weights computed")
 
-    # ── Experiment plan ────────────────────────────────────────────────────
+    # ── Build experiment registry & plan ───────────────────────────────────
     all_archs = list(ARCH_CFG.keys())
     run_exps  = exps  or ["A", "B", "C"]
     run_archs = archs or all_archs
 
-    plan = []
-    for exp_key in run_exps:
-        if exp_key == "A":
-            idx, names = exp_A_idx, exp_A_names
-            desc_fn = lambda a: f"Single-date {july30_key}, 9ch, {a}"
-        elif exp_key == "B":
-            idx, names = exp_B_idx, exp_B_names
-            desc_fn = lambda a, _p=phenol_map: f"4 phenol dates {list(_p.values())}, {len(exp_B_idx)}ch, {a}"
-        elif exp_key == "C":
-            idx, names = exp_C_idx, exp_C_names
-            desc_fn = lambda a, _i=exp_C_idx: f"Stage2 K*={len(_i) if _i else 0}ch, {a}"
-        elif exp_key == "C_v2":
-            idx, names = exp_C_v2_idx, exp_C_v2_names
-            desc_fn = lambda a, _i=exp_C_v2_idx: f"Stage2v2 K*_dates×K*_bands={len(_i) if isinstance(_i, list) else 0}ch, {a}"
-        elif exp_key == "C_v2_rf":
-            idx, names = exp_C_v2_rf_idx, exp_C_v2_rf_names
-            desc_fn = lambda a, _i=exp_C_v2_rf_idx: f"Stage2-RF K*={len(_i) if _i else 0}ch, {a}"
-        elif exp_key == "D":
-            idx, names = exp_D_idx, exp_D_names
-            desc_fn = lambda a, _i=exp_D_idx: f"Stage1v3 GSI top-K={len(_i) if _i else 0}ch, {a}"
-        elif exp_key == "D_v2":
-            idx, names = exp_D_v2_idx, exp_D_v2_names
-            desc_fn = lambda a, _i=exp_D_v2_idx: f"Stage1v2 candidate union={len(_i) if _i else 0}ch, {a}"
-        else:
-            log.warning(f"Unknown experiment key: {exp_key} — skipping")
-            continue
+    registry = build_registry(
+        exp_A_idx=exp_A_idx,   exp_A_names=exp_A_names,   july30_key=july30_key,
+        exp_B_idx=exp_B_idx,   exp_B_names=exp_B_names,   phenol_map=phenol_map,
+        exp_C_idx=exp_C_idx,   exp_C_names=exp_C_names,
+        resolved_stage2_run_id=resolved_stage2_run_id,
+        resolved_project_run_id=resolved_project_run_id,
+        exp_C_v2_idx=exp_C_v2_idx,   exp_C_v2_names=exp_C_v2_names,
+        resolved_stage2v3_run_id=resolved_stage2v3_run_id,
+        resolved_project_run_id_v2=resolved_project_run_id_v2,
+        exp_C_v2_rf_idx=exp_C_v2_rf_idx, exp_C_v2_rf_names=exp_C_v2_rf_names,
+        exp_C_v3_variants=exp_C_v3_variants,
+        exp_D_idx=exp_D_idx,   exp_D_names=exp_D_names,
+        exp_D_v2_idx=exp_D_v2_idx, exp_D_v2_names=exp_D_v2_names,
+    )
 
-        if idx is None:
+    expanded_exps = expand_exp_keys(run_exps, registry)
+    log.info(f"Registered experiments: {list(registry.keys())}")
+
+    plan = []
+    for exp_key in expanded_exps:
+        cfg = registry.get(exp_key)
+        if cfg is None:
+            log.warning(f"Experiment '{exp_key}' not in registry — skipping")
+            continue
+        if cfg.band_indices is None:
             raise RuntimeError(
                 f"Exp {exp_key}: band indices are None — required feature-selection output is missing."
             )
-
         for arch in run_archs:
-            plan.append((exp_key, arch, idx, names, desc_fn(arch)))
+            plan.append((exp_key, arch, cfg.band_indices, cfg.band_names,
+                         f"{cfg.description}, {arch}", cfg.extra_kw))
 
     log.info(f"Planned {len(plan)} run(s): {[(e, a) for e, a, *_ in plan]}")
 
@@ -1094,8 +1074,8 @@ def main(
     # Group plan by exp_key so each experiment gets one parent MLflow run
     all_results = []
     exp_groups: dict = {}
-    for exp_key, arch, band_idx, band_names, description in plan:
-        exp_groups.setdefault(exp_key, []).append((arch, band_idx, band_names, description))
+    for exp_key, arch, band_idx, band_names, description, extra_kw in plan:
+        exp_groups.setdefault(exp_key, []).append((arch, band_idx, band_names, description, extra_kw))
 
     for exp_key, arch_runs in exp_groups.items():
         n_ch            = len(arch_runs[0][1]) if arch_runs[0][1] else 0
@@ -1109,15 +1089,8 @@ def main(
                 "test_year":     TEST_YEAR,
             })
             log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
-            for arch, band_idx, band_names, description in arch_runs:
+            for arch, band_idx, band_names, description, extra_kw in arch_runs:
                 exp_name = f"exp_{exp_key}_{arch}"
-                extra_kw = {}
-                if exp_key == "C":
-                    extra_kw["source_stage2_run_id"]  = resolved_stage2_run_id
-                    extra_kw["source_project_run_id"] = resolved_project_run_id
-                elif exp_key == "C_v2":
-                    extra_kw["source_stage2_run_id"]  = resolved_stage2v3_run_id
-                    extra_kw["source_project_run_id"] = resolved_project_run_id_v2
                 result = run_experiment(
                     exp_name=exp_name,
                     arch=arch,
@@ -1126,6 +1099,7 @@ def main(
                     description=description,
                     s2_processed=s2_processed,
                     class_weights_tensor=cw_tensor,
+                    loss_version=loss_version,
                     force=force,
                     skip_viz=skip_viz,
                     **extra_kw,
@@ -1151,7 +1125,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
-        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "D", "D_v2"],
+        "--exp", nargs="+", choices=["A", "B", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
         default=["A", "B", "C"],
         help="Which experiments to run (default: A B C)",
     )
@@ -1159,6 +1133,10 @@ if __name__ == "__main__":
         "--arch", nargs="+", choices=list(ARCH_CFG.keys()),
         default=None,
         help="Which architectures to run (default: all)",
+    )
+    parser.add_argument(
+        "--loss-version", choices=["v1", "v2"], default="v1",
+        help="Loss function version: v1=WeightedCrossEntropy (default), v2=PhenologyAwareLoss",
     )
     parser.add_argument("--force",    action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz", action="store_true", help="Skip full-image visualization")
@@ -1177,6 +1155,22 @@ if __name__ == "__main__":
             "MLflow run ID of the stage2v2_project run to fetch "
             "stage3_exp_c_bands_projected.json from. "
             "If omitted and the file is absent locally, the latest project run is used."
+        ),
+    )
+    parser.add_argument(
+        "--v3-phase", nargs="+", choices=["band", "date"], default=["band"],
+        help="Exp C_v3: one or more sweep phases — 'band' (Phase A) and/or 'date' (Phase B). Each phase×k becomes a separate run. Default: band",
+    )
+    parser.add_argument(
+        "--v3-k", nargs="+", type=int, default=[3],
+        help="Exp C_v3: one or more sweep levels k (1-indexed). Each k becomes a separate run. Default: 3",
+    )
+    parser.add_argument(
+        "--stage2v3-sweep-run-id", default=None,
+        help=(
+            "MLflow run ID of the Stage 2v3 sweep run "
+            "(b3dbb46372e147fd997c85ea8ce5b9d0 by default). "
+            "Used to download band files if absent locally."
         ),
     )
     args = parser.parse_args()
@@ -1212,11 +1206,15 @@ if __name__ == "__main__":
     main(
         exps=args.exp,
         archs=args.arch,
+        loss_version=args.loss_version,
         force=args.force,
         data_dir=args.data_dir,
         skip_viz=args.skip_viz,
         stage2_run_id=args.stage2_run_id,
         project_run_id=args.project_run_id,
+        v3_phases=args.v3_phase,
+        v3_ks=args.v3_k,
+        stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
     )
 
     if args.shutdown:

@@ -183,6 +183,9 @@ STAGE3_EXP_D_BANDS       = PROCESSED_DIR / "stage3_exp_d_bands.txt"
 STAGE2V3_RF_PER_CROP_JSON  = PROCESSED_DIR / "stage2v3_rf_per_crop_results.json"
 STAGE3_EXP_C_V2_RF_JSON  = PROCESSED_DIR / "stage3_exp_c_v2_rf.json"
 STAGE3_EXP_C_V2_RF_BANDS = PROCESSED_DIR / "stage3_exp_c_v2_rf_bands.txt"
+STAGE2V3_SWEEP_PER_CROP_JSON = PROCESSED_DIR / "stage2v3_sweep_per_crop_results.json"
+STAGE3_EXP_C_V3_JSON         = PROCESSED_DIR / "stage3_exp_c_v3.json"
+STAGE3_EXP_C_V3_BANDS        = PROCESSED_DIR / "stage3_exp_c_v3_bands.txt"
 
 # ── RF selector hyperparameters (Stage 2v2-RF) ─────────────────────────────
 RF_N_ESTIMATORS       = 200    # trees in the binary RF oracle
