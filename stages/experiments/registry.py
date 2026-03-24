@@ -85,11 +85,12 @@ def build_registry(
     for label, (idx, names, date) in (exp_A_v2_variants or {}).items():
         key = f"A_v2_{label}"
         reg[key] = ExperimentConfig(
-            key         = key,
-            description = f"Single-date {date} [{label}], 9ch — phenological window baseline",
-            band_indices= idx,
-            band_names  = names,
-            default_loss= "v1",
+            key               = key,
+            description       = f"Single-date {date} [{label}], 9ch — phenological window baseline",
+            band_indices      = idx,
+            band_names        = names,
+            default_loss      = "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
         )
 
     reg["B"] = ExperimentConfig(
