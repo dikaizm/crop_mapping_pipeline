@@ -1,3 +1,23 @@
+# CDL class IDs that are NOT crops (non-agricultural land cover).
+# Everything not in this set (and not 0/background) is treated as a potential crop class.
+CDL_NON_CROP_IDS: frozenset = frozenset({
+    0,              # Background / NoData
+    61,             # Fallow/Idle Cropland  → remapped to background (class 0)
+    63, 64, 65,     # Forest / Shrubland / Barren
+    81,             # Clouds/No Data
+    82,             # Developed
+    83,             # Water
+    87, 88,         # Wetlands / Nonag/Undefined
+    92,             # Aquaculture
+    111, 112,       # Open Water / Perennial Ice/Snow
+    121, 122, 123, 124,  # Developed variants
+    131,            # Barren
+    141, 142, 143,  # Forest variants
+    152,            # Shrubland
+    176,            # Grass/Pasture
+    190, 195,       # Woody/Herbaceous Wetlands
+})
+
 USDA_CDL_COLORS = {
     0:  "#000000",  # Background
     1:  "#ffd400",  # Corn

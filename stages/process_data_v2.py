@@ -53,8 +53,10 @@ sys.path.insert(0, str(_ROOT.parent))
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
     S2_NODATA, KEEP_CLASSES,
+    CDL_KEEP_CLASSES_JSON, CDL_COVERAGE_THRESHOLD,
     GDRIVE_OAUTH_TOKEN,
 )
+from crop_mapping_pipeline.utils.constants import CDL_NON_CROP_IDS, USDA_CDL_NAMES
 from crop_mapping_pipeline.utils.label import label_filtering
 
 log = logging.getLogger(__name__)
@@ -183,9 +185,217 @@ def assign_nodata(in_path: str, out_path: str) -> str:
 
 # ── CDL processing ──────────────────────────────────────────────────────────────
 
+def download_cdl_usda(year: str, output_dir: Path) -> Path | None:
+    """Download California CDL (FIPS=06) for `year` from USDA NASS CropScape.
+
+    Saves the extracted GeoTIFF to:
+        output_dir / {year}_30m_cdls / CDL_{year}_06.tif
+
+    Returns the path to the .tif, or None on failure.
+    """
+    import urllib.request
+    import zipfile
+
+    url      = f"https://nassgeodata.gmu.edu/nass_data_cache/byfips/CDL_{year}_06.zip"
+    dest_dir = output_dir / f"{year}_30m_cdls"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = dest_dir / f"CDL_{year}_06.zip"
+    tif_path = dest_dir / f"CDL_{year}_06.tif"
+
+    if tif_path.exists():
+        log.info("  CDL %s already downloaded: %s", year, tif_path.name)
+        return tif_path
+
+    log.info("  Downloading CDL %s from USDA NASS ...", year)
+    try:
+        urllib.request.urlretrieve(url, zip_path)
+    except Exception as e:
+        log.error("  CDL download failed for %s: %s", year, e)
+        return None
+
+    log.info("  Extracting %s ...", zip_path.name)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        tif_names = [n for n in zf.namelist() if n.lower().endswith(".tif")]
+        if not tif_names:
+            log.error("  No .tif found inside %s", zip_path.name)
+            return None
+        # Extract first .tif, rename to standard name
+        extracted = dest_dir / Path(tif_names[0]).name
+        zf.extract(tif_names[0], dest_dir)
+        if extracted != tif_path:
+            extracted.rename(tif_path)
+
+    zip_path.unlink(missing_ok=True)
+    log.info("  CDL %s saved: %s", year, tif_path)
+    return tif_path
+
+
+def analyze_cdl_coverage(cdl_reprojected_path: str) -> dict:
+    """Count pixel coverage per crop class in the reprojected CDL raster.
+
+    Coverage = class_pixels / total_pixels (including background).
+    Only counts classes not in CDL_NON_CROP_IDS.
+
+    Returns:
+        {class_id (int): coverage_fraction (float)}
+    """
+    with rasterio.open(cdl_reprojected_path) as src:
+        data = src.read(1).flatten()
+
+    total = data.size
+    ids, counts = np.unique(data, return_counts=True)
+    coverage = {}
+    for cls_id, cnt in zip(ids, counts):
+        cls_id = int(cls_id)
+        if cls_id not in CDL_NON_CROP_IDS:
+            coverage[cls_id] = cnt / total
+    return coverage
+
+
+def select_classes_by_threshold(
+    coverage: dict,
+    threshold: float = CDL_COVERAGE_THRESHOLD,
+) -> list:
+    """Return sorted list of crop class IDs with coverage >= threshold."""
+    return sorted(
+        cls_id for cls_id, frac in coverage.items()
+        if frac >= threshold
+    )
+
+
+def save_keep_classes_json(
+    coverage_by_year: dict,
+    out_path: Path,
+    threshold: float = CDL_COVERAGE_THRESHOLD,
+) -> list:
+    """Merge per-year coverage dicts, compute union of selected classes, save JSON.
+
+    Args:
+        coverage_by_year: {year: {class_id: fraction}}
+        out_path:         destination JSON file
+        threshold:        coverage threshold
+
+    Returns:
+        Sorted list of keep_class IDs (union across years).
+    """
+    import json
+
+    years_data = {}
+    union_classes: set = set()
+    for yr, cov in coverage_by_year.items():
+        selected = select_classes_by_threshold(cov, threshold)
+        union_classes.update(selected)
+        years_data[yr] = {
+            "coverage": {str(k): round(v, 6) for k, v in sorted(cov.items())},
+            "selected": selected,
+        }
+
+    keep_classes = sorted(union_classes)
+    payload = {
+        "threshold": threshold,
+        "keep_classes": keep_classes,
+        "class_names": {
+            str(k): USDA_CDL_NAMES.get(k, f"CDL_{k}")
+            for k in keep_classes
+        },
+        "years": years_data,
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    log.info("  keep_classes.json saved → %s  (%d classes)", out_path, len(keep_classes))
+    return keep_classes
+
+
+def log_cdl_analysis_to_mlflow(
+    coverage_by_year: dict,
+    keep_classes: list,
+    json_path: Path,
+) -> None:
+    """Log CDL class coverage analysis to MLflow experiment `cropmap_dataset_analysis`.
+
+    Creates one parent run with per-year child runs. Each child logs:
+      - metrics:  coverage fraction per crop class (e.g. coverage_rice = 0.066)
+      - params:   year, threshold, n_selected
+      - tags:     selected class names
+
+    The parent run logs the union keep_classes list and uploads keep_classes.json
+    as an artifact.
+    """
+    import os
+    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
+
+    try:
+        import mlflow
+        from crop_mapping_pipeline.config import (
+            MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_DATASET, CDL_COVERAGE_THRESHOLD,
+        )
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_DATASET)
+
+        years_str = "_".join(sorted(coverage_by_year.keys()))
+        with mlflow.start_run(run_name=f"cdl_class_selection_{years_str}") as parent:
+            mlflow.log_param("threshold", CDL_COVERAGE_THRESHOLD)
+            mlflow.log_param("years", list(sorted(coverage_by_year.keys())))
+            mlflow.log_param("keep_classes", keep_classes)
+            mlflow.set_tag(
+                "class_names",
+                ", ".join(USDA_CDL_NAMES.get(c, str(c)) for c in keep_classes),
+            )
+            mlflow.log_param("n_classes", len(keep_classes))
+            if json_path.exists():
+                mlflow.log_artifact(str(json_path), artifact_path="cdl")
+
+            for yr, coverage in sorted(coverage_by_year.items()):
+                selected = select_classes_by_threshold(coverage)
+                with mlflow.start_run(
+                    run_name=f"cdl_coverage_{yr}", nested=True
+                ):
+                    mlflow.log_param("year", yr)
+                    mlflow.log_param("n_selected", len(selected))
+                    mlflow.log_param("selected_classes", selected)
+                    mlflow.set_tag(
+                        "selected_names",
+                        ", ".join(USDA_CDL_NAMES.get(c, str(c)) for c in selected),
+                    )
+                    for cls_id, frac in sorted(coverage.items()):
+                        name = USDA_CDL_NAMES.get(cls_id, f"cdl_{cls_id}")
+                        # sanitise name for MLflow metric key
+                        key  = "coverage_" + name.lower().replace("/", "_").replace(" ", "_")
+                        mlflow.log_metric(key, round(frac, 6))
+
+        log.info("  CDL analysis logged to MLflow experiment '%s'",
+                 MLFLOW_EXPERIMENT_DATASET)
+    except Exception as e:
+        log.warning("  MLflow logging skipped (%s)", e)
+
+
+def load_keep_classes_json(json_path: Path) -> list | None:
+    """Load keep_classes list from a previously saved JSON. Returns None if not found."""
+    import json
+    if not json_path.exists():
+        return None
+    with open(json_path) as f:
+        data = json.load(f)
+    return [int(k) for k in data.get("keep_classes", [])]
+
+
 def process_cdl(cdl_raw_path: str, s2_ref_path: str,
-                out_reprojected: str, out_filtered: str) -> None:
-    """Reproject CDL to S2 grid, then filter to KEEP_CLASSES."""
+                out_reprojected: str, out_filtered: str,
+                keep_classes: list | None = None,
+                out_coverage: dict | None = None) -> dict:
+    """Reproject CDL to S2 grid, analyse coverage, then filter.
+
+    Args:
+        keep_classes:  explicit list of class IDs to keep.  If None, coverage is
+                       analysed and classes >= CDL_COVERAGE_THRESHOLD are kept.
+        out_coverage:  if provided, the {class_id: fraction} dict is stored here
+                       (mutated in place) so the caller can persist it.
+
+    Returns:
+        coverage dict {class_id: fraction} for the reprojected raster.
+    """
     if Path(out_reprojected).exists():
         log.info("  CDL reprojected already exists: %s",
                  Path(out_reprojected).name)
@@ -220,6 +430,19 @@ def process_cdl(cdl_raw_path: str, s2_ref_path: str,
             dst.write(dst_data)
         log.info("  CDL reprojected: %s", Path(out_reprojected).name)
 
+    # ── Coverage analysis ────────────────────────────────────────────────────
+    coverage = analyze_cdl_coverage(out_reprojected)
+    if out_coverage is not None:
+        out_coverage.update(coverage)
+
+    if keep_classes is None:
+        keep_classes = select_classes_by_threshold(coverage)
+        log.info("  Dynamic class selection (threshold=%.0f%%): %d classes → %s",
+                 CDL_COVERAGE_THRESHOLD * 100, len(keep_classes),
+                 [USDA_CDL_NAMES.get(c, c) for c in keep_classes])
+    else:
+        log.info("  Using provided keep_classes: %d classes", len(keep_classes))
+
     if Path(out_filtered).exists():
         log.info("  CDL filtered already exists: %s", Path(out_filtered).name)
     else:
@@ -227,9 +450,11 @@ def process_cdl(cdl_raw_path: str, s2_ref_path: str,
         label_filtering(
             in_path      = out_reprojected,
             out_path     = out_filtered,
-            keep_classes = KEEP_CLASSES,
+            keep_classes = keep_classes,
         )
         log.info("  CDL filtered: %s", Path(out_filtered).name)
+
+    return coverage
 
 
 # ── Google Drive upload ─────────────────────────────────────────────────────────

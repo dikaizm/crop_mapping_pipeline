@@ -924,6 +924,36 @@ def main(
         FIGURES_DIR = data_dir / "figures"
         log.info(f"Data dir overridden to {data_dir}")
 
+    # ── Load dynamic class selection from keep_classes.json if available ──────
+    global KEEP_CLASSES, NUM_CLASSES, CLASS_REMAP, REMAP_LUT, CDL_CLASS_NAMES
+    global CLASS_LABELS, CROP_COLORS, SEG_CMAP, SEG_NORM
+
+    from crop_mapping_pipeline.config import CDL_KEEP_CLASSES_JSON
+    from crop_mapping_pipeline.stages.process_data_v2 import load_keep_classes_json
+    from crop_mapping_pipeline.utils.constants import USDA_CDL_NAMES, USDA_CDL_COLORS
+
+    _cdl_json = (Path(data_dir) / "cdl" / "keep_classes.json") if data_dir \
+                else CDL_KEEP_CLASSES_JSON
+    dynamic_classes = load_keep_classes_json(_cdl_json)
+    if dynamic_classes:
+        KEEP_CLASSES    = dynamic_classes
+        NUM_CLASSES     = len(KEEP_CLASSES) + 1
+        CLASS_REMAP     = {cls_id: i + 1 for i, cls_id in enumerate(KEEP_CLASSES)}
+        REMAP_LUT       = np.zeros(256, dtype=np.int64)
+        for _cid, _mid in CLASS_REMAP.items():
+            if _cid < 256:
+                REMAP_LUT[_cid] = _mid
+        CDL_CLASS_NAMES = {k: USDA_CDL_NAMES.get(k, f"CDL_{k}") for k in KEEP_CLASSES}
+        CLASS_LABELS    = ["Background"] + [CDL_CLASS_NAMES[c] for c in KEEP_CLASSES]
+        CROP_COLORS     = ["#000000"] + [USDA_CDL_COLORS.get(c, "#808080") for c in KEEP_CLASSES]
+        SEG_CMAP        = ListedColormap(CROP_COLORS)
+        SEG_NORM        = BoundaryNorm(boundaries=range(NUM_CLASSES + 1), ncolors=NUM_CLASSES)
+        log.info("Loaded dynamic KEEP_CLASSES from keep_classes.json: %d classes → %s",
+                 len(KEEP_CLASSES), KEEP_CLASSES)
+    else:
+        log.info("keep_classes.json not found — using hardcoded KEEP_CLASSES (%d classes)",
+                 len(KEEP_CLASSES))
+
     s2_processed = sorted(glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")))
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")

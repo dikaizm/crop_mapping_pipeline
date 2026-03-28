@@ -17,6 +17,9 @@ MODELS_DIR       = PROJECT_ROOT / "ml_models"
 FIGURES_DIR      = PROJECT_ROOT / "documents" / "thesis" / "figures"
 LOGS_DIR         = PROJECT_ROOT / "logs"
 
+CDL_KEEP_CLASSES_JSON  = CDL_DIR / "keep_classes.json"   # dynamic class selection output
+CDL_COVERAGE_THRESHOLD = 0.02                              # min fraction of total pixels
+
 CDL_BY_YEAR = {
     "2022": CDL_DIR / "cdl_2022_study_area_filtered.tif",
     "2023": CDL_DIR / "cdl_2023_study_area_filtered.tif",
@@ -119,13 +122,16 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2023": "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
     "2024": "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
 }
-GDRIVE_PROCESSED_CDL_FOLDER_ID = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
+GDRIVE_PROCESSED_CDL_FOLDER_ID    = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
+# V2 study area processed data — single parent folder; year subfolders created automatically
+GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
 GDRIVE_MODELS_FOLDER_ID        = "1Xj8i32ndkc_9wa7LCwBO8LhrpxsZ3jot"
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
 MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
 MLFLOW_EXPERIMENT_PIPELINE = "cropmap_pipeline_runs"
-MLFLOW_EXPERIMENT_FEATURE  = "cropmap_feature_analysis_s2"
+MLFLOW_EXPERIMENT_DATASET  = "cropmap_data_processing"
+MLFLOW_EXPERIMENT_FEATURE  = "cropmap_feature_selection_s2"
 MLFLOW_EXPERIMENT_TRAIN    = "cropmap_segmentation_s2"
 MLFLOW_EXPERIMENT_TRAIN_V2 = "cropmap_segmentation_s2_v2"
 MLFLOW_EXPERIMENT_TRAIN_V3 = "cropmap_segmentation_s2_v3"
