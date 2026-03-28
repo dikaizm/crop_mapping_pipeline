@@ -66,6 +66,10 @@ GDRIVE_FILES = {
     },
 }
 
+# Raw S2 GDrive folder ID for new study area (v2) — single flat folder, all years
+# Used by fetch_data_v2.py. Set to the GEE export folder ID.
+GDRIVE_RAW_S2_V2_FOLDER_ID = "1yZmKDjGnXZH6622d8SU4GDUB1z940HwY"
+
 # Raw S2 GDrive folder IDs — used by process_data.py to fetch raw files before processing
 GDRIVE_RAW_S2_FOLDER_IDS = {
     "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",

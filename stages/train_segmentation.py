@@ -1127,6 +1127,57 @@ def main(
     log.info("All experiments done — segmentation maps, confusion matrices, and IoU CSVs logged to MLflow.")
 
 
+def _upload_existing_models(filter_exps=None, filter_archs=None):
+    """Upload best_model.pth + last_model.pth for all existing run dirs.
+
+    Scans MODELS_DIR for subdirectories that contain at least one of the two
+    checkpoint files and uploads them to GDrive under runs/<run_dir_name>/.
+
+    filter_exps  — optional list of exp shorthand keys (e.g. ["C_v3", "A_v2"]).
+                   Run dir must contain any of the keys as a substring.
+    filter_archs — optional list of arch names to further filter.
+    """
+    import re as _re
+
+    def _matches(run_dir_name):
+        if filter_exps:
+            if not any(
+                _re.search(r"(?i)" + _re.escape(e.lower()), run_dir_name.lower())
+                for e in filter_exps
+            ):
+                return False
+        if filter_archs:
+            if not any(arch.lower() in run_dir_name.lower() for arch in filter_archs):
+                return False
+        return True
+
+    candidates = sorted(MODELS_DIR.iterdir()) if MODELS_DIR.exists() else []
+    run_dirs = [
+        d for d in candidates
+        if d.is_dir() and _matches(d.name)
+        and (
+            (d / "best_model.pth").exists()
+            or (d / "last_model.pth").exists()
+        )
+    ]
+
+    if not run_dirs:
+        log.warning("No matching run dirs with model checkpoints found under %s", MODELS_DIR)
+        return
+
+    log.info("Uploading models for %d run(s)…", len(run_dirs))
+    for run_dir in run_dirs:
+        model_files = [
+            f for f in [run_dir / "best_model.pth", run_dir / "last_model.pth"]
+            if f.exists()
+        ]
+        log.info("  %s: %s", run_dir.name, [f.name for f in model_files])
+        links = upload_models_to_gdrive(run_name=run_dir.name, model_files=model_files)
+        if links:
+            for fname, link in links.items():
+                log.info("    %s → %s", fname, link)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
@@ -1148,6 +1199,14 @@ if __name__ == "__main__":
     parser.add_argument("--skip-viz", action="store_true", help="Skip full-image visualization")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
+    parser.add_argument(
+        "--upload-existing", action="store_true",
+        help=(
+            "Upload best_model.pth and last_model.pth for all existing run dirs under "
+            "MODELS_DIR to Google Drive without re-training. "
+            "Optionally filter with --exp / --arch."
+        ),
+    )
     parser.add_argument(
         "--stage2-run-id", default=None,
         help=(
@@ -1208,6 +1267,10 @@ if __name__ == "__main__":
         _h.addFilter(_gdal_filter)
 
     log.info(f"Device: {_device_label()}  PyTorch: {torch.__version__}")
+
+    if args.upload_existing:
+        _upload_existing_models(filter_exps=args.exp, filter_archs=args.arch)
+        sys.exit(0)
 
     main(
         exps=args.exp,
