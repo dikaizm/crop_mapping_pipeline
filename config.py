@@ -127,6 +127,7 @@ MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
 MLFLOW_EXPERIMENT_PIPELINE = "cropmap_pipeline_runs"
 MLFLOW_EXPERIMENT_FEATURE  = "cropmap_feature_analysis_s2"
 MLFLOW_EXPERIMENT_TRAIN    = "cropmap_segmentation_s2"
+MLFLOW_EXPERIMENT_TRAIN_V2 = "cropmap_segmentation_s2_v2"
 MLFLOW_EXPERIMENT_TRAIN_V3 = "cropmap_segmentation_s2_v3"
 
 # ── Stage 1 hyperparameters ────────────────────────────────────────────────────

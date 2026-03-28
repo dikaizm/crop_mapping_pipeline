@@ -24,6 +24,7 @@ from typing import Any
 
 from crop_mapping_pipeline.config import (
     MLFLOW_EXPERIMENT_TRAIN,
+    MLFLOW_EXPERIMENT_TRAIN_V2,
     MLFLOW_EXPERIMENT_TRAIN_V3,
 )
 
@@ -54,14 +55,18 @@ def build_registry(
     resolved_project_run_id_v2  = None,
     # ── Exp C_v2_rf (Stage 2v2 RF selector) ───────────────────────────────
     exp_C_v2_rf_idx = None, exp_C_v2_rf_names = None,
-    # ── Exp C_v3 (Stage 2v3 incremental sweep, multi phase × k) ───────────
+    # ── Exp C_v3 (Stage 2v3 incremental sweep, multi phase × k) — V2 ────────
     exp_C_v3_variants = None,              # {(phase, k): (idx, names)}
     # ── Exp D (Stage 1v3 GSI direct, no Stage 2) ──────────────────────────
     exp_D_idx  = None, exp_D_names  = None,
     # ── Exp D_v2 (Stage 1v2 channel union) ────────────────────────────────
     exp_D_v2_idx = None, exp_D_v2_names = None,
-    # ── Exp A_v2 (per-window single-date) ──────────────────────────────────
+    # ── Exp A_v2 (per-window single-date) — V2 ─────────────────────────────
     exp_A_v2_variants = None,              # {label: (idx, names, date)}
+    # ── V3 experiments ─────────────────────────────────────────────────────
+    exp_A_v3_variants = None,              # {label: (idx, names, date)}
+    exp_B_v3_variants = None,              # {(phase, k): (idx, names)}
+    exp_C_v3_rf_idx   = None, exp_C_v3_rf_names = None,
 ) -> dict[str, ExperimentConfig]:
     """Build and return the experiment registry.
 
@@ -81,12 +86,24 @@ def build_registry(
         default_loss= "v1",
     )
 
-    # ── Exp A_v2: one entry per phenological window ─────────────────────────
+    # ── Exp A_v2: one entry per phenological window (V2 experiment) ────────────
     for label, (idx, names, date) in (exp_A_v2_variants or {}).items():
         key = f"A_v2_{label}"
         reg[key] = ExperimentConfig(
             key               = key,
             description       = f"Single-date {date} [{label}], 9ch — phenological window baseline",
+            band_indices      = idx,
+            band_names        = names,
+            default_loss      = "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V2,
+        )
+
+    # ── Exp A_v3: one entry per phenological window (V3 experiment) ────────────
+    for label, (idx, names, date) in (exp_A_v3_variants or {}).items():
+        key = f"A_v3_{label}"
+        reg[key] = ExperimentConfig(
+            key               = key,
+            description       = f"Single-date {date} [{label}], 9ch — v3 phenological baseline",
             band_indices      = idx,
             band_names        = names,
             default_loss      = "v1",
@@ -142,6 +159,17 @@ def build_registry(
             default_loss= "v1",
         )
 
+    # ── Exp C_v3 (RF forward selection — V3 proposed method) ────────────────
+    if exp_C_v3_rf_idx is not None:
+        reg["C_v3"] = ExperimentConfig(
+            key               = "C_v3",
+            description       = f"Stage2 RF forward-selection K*={len(exp_C_v3_rf_idx)}ch — v3 proposed method",
+            band_indices      = exp_C_v3_rf_idx,
+            band_names        = exp_C_v3_rf_names,
+            default_loss      = "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
+        )
+
     if exp_D_idx is not None:
         reg["D"] = ExperimentConfig(
             key         = "D",
@@ -160,13 +188,26 @@ def build_registry(
             default_loss= "v1",
         )
 
-    # ── C_v3: one entry per (phase, k) combination ─────────────────────────
+    # ── C_v3 sweep: one entry per (phase, k) — V2 experiment (legacy) ─────────
 
     for (phase, k), (idx, names) in sorted((exp_C_v3_variants or {}).items()):
         key = f"C_v3_{phase}_k{k:02d}"
         reg[key] = ExperimentConfig(
             key               = key,
             description       = f"Stage2v3 {phase}_sweep k={k} {len(idx)}ch",
+            band_indices      = idx,
+            band_names        = names,
+            default_loss      = "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V2,
+        )
+
+    # ── B_v3: Stage 1 GSI top-k sweep — V3 experiment ──────────────────────
+
+    for (phase, k), (idx, names) in sorted((exp_B_v3_variants or {}).items()):
+        key = f"B_v3_{phase}_k{k:02d}"
+        reg[key] = ExperimentConfig(
+            key               = key,
+            description       = f"Stage1 GSI {phase}_sweep top-k={k} {len(idx)}ch — v3 baseline",
             band_indices      = idx,
             band_names        = names,
             default_loss      = "v1",
@@ -192,13 +233,30 @@ def expand_exp_keys(
             if not matched:
                 raise RuntimeError("No A_v2 variants registered.")
             expanded.extend(matched)
-        elif key == "C_v3":
-            matched = sorted(k for k in registry if k.startswith("C_v3_"))
+        elif key == "A_v3":
+            matched = sorted(k for k in registry if k.startswith("A_v3_"))
+            if not matched:
+                raise RuntimeError("No A_v3 variants registered.")
+            expanded.extend(matched)
+        elif key == "B_v3":
+            matched = sorted(k for k in registry if k.startswith("B_v3_"))
             if not matched:
                 raise RuntimeError(
-                    "No C_v3 variants registered — did you pass --v3-phase and --v3-k?"
+                    "No B_v3 variants registered — did you pass --v3-phase and --v3-k?"
                 )
             expanded.extend(matched)
+        elif key == "C_v3":
+            if "C_v3" in registry:
+                # Direct entry: RF selection for V3 experiment
+                expanded.append("C_v3")
+            else:
+                # Legacy: expand to C_v3_* sweep entries (V2 experiment)
+                matched = sorted(k for k in registry if k.startswith("C_v3_"))
+                if not matched:
+                    raise RuntimeError(
+                        "No C_v3 entry registered — did you pass --v3-phase and --v3-k?"
+                    )
+                expanded.extend(matched)
         else:
             expanded.append(key)
     return expanded

@@ -114,6 +114,33 @@ def _year_from_filename(fname: str) -> str:
     return m.group(1) if m else ""
 
 
+def _date_key_from_filename(fname: str) -> str:
+    """Extract date key from tile filename, e.g. 'S2H_2022_2022_01_01-...' → 'S2H_2022_2022_01_01'."""
+    m = _TILE_RE.match(fname)
+    if not m:
+        return ""
+    # Reconstruct date key: everything before the first tile offset
+    # fname = S2H_{year}_{YYYY_MM_DD}-{row}-{col}.tif → stem without offsets
+    stem = fname[: fname.index("-")]
+    return stem
+
+
+def list_dates_by_year(folder_id: str, years: list = None) -> dict:
+    """
+    List all unique date keys per year from GDrive without downloading.
+    Returns {year: sorted list of date keys}, e.g.:
+        {'2022': ['S2H_2022_2022_01_01', 'S2H_2022_2022_01_16', ...], ...}
+    """
+    name_to_id = list_folder(folder_id, years=years)
+    dates_by_year: dict = {}
+    for fname in name_to_id:
+        yr  = _year_from_filename(fname)
+        key = _date_key_from_filename(fname)
+        if yr and key:
+            dates_by_year.setdefault(yr, set()).add(key)
+    return {yr: sorted(keys) for yr, keys in sorted(dates_by_year.items())}
+
+
 # ── Download ────────────────────────────────────────────────────────────────────
 
 def download_folder_by_year(folder_id: str, output_dir: str,
@@ -167,6 +194,70 @@ def download_folder_by_year(folder_id: str, output_dir: str,
         downloaded.append(str(out_path))
 
     log.info("Download complete: %d new, %d skipped",
+             len(downloaded) - skipped, skipped)
+    return downloaded
+
+
+def download_dates(folder_id: str, output_dir: str,
+                   date_keys: list, overwrite: bool = False) -> list:
+    """
+    Download only the tiles whose date key matches one of `date_keys`.
+    date_keys: list of date key strings, e.g. ['S2H_2022_2022_01_01', ...].
+    Files are routed to {output_dir}/{year}/ based on their filename.
+    Returns list of downloaded file paths.
+    """
+    from googleapiclient.http import MediaIoBaseDownload
+
+    date_keys_set = set(date_keys)
+    years         = {_year_from_filename(dk + "-0000000000-0000000000.tif") for dk in date_keys}
+    years         = {y for y in years if y}
+
+    name_to_id = list_folder(folder_id, years=list(years) if years else None)
+    # Filter to only tiles belonging to the requested date keys
+    name_to_id = {
+        name: fid for name, fid in name_to_id.items()
+        if _date_key_from_filename(name) in date_keys_set
+    }
+
+    if not name_to_id:
+        log.warning("  No tiles found for date_keys=%s", date_keys)
+        return []
+
+    service    = _build_drive_service()
+    downloaded = []
+    skipped    = 0
+
+    for fname in sorted(name_to_id):
+        yr = _year_from_filename(fname)
+        if not yr:
+            log.warning("  Cannot parse year from '%s' — skipping", fname)
+            continue
+
+        yr_dir   = Path(output_dir) / yr
+        yr_dir.mkdir(parents=True, exist_ok=True)
+        out_path = yr_dir / fname
+
+        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
+            log.info("  Skip (exists): %s/%s", yr, fname)
+            skipped += 1
+            downloaded.append(str(out_path))
+            continue
+
+        file_id = name_to_id[fname]
+        log.info("  Downloading → %s/%s  (id=%s)", yr, fname, file_id)
+        request = service.files().get_media(fileId=file_id)
+        with open(out_path, "wb") as fh:
+            dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = dl.next_chunk()
+                if status:
+                    log.info("    %s: %d%%", fname, int(status.progress() * 100))
+        log.info("  Done: %s/%s  (%.0f MB)", yr, fname,
+                 out_path.stat().st_size / 1e6)
+        downloaded.append(str(out_path))
+
+    log.info("Batch download complete: %d new, %d skipped",
              len(downloaded) - skipped, skipped)
     return downloaded
 

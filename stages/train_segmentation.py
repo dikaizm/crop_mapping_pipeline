@@ -11,6 +11,11 @@ Four experiment configurations × 2 architectures = up to 8 training runs.
 | Exp D      | Stage 1v3 GSI top-K (no Stage 2)  | K*   | Ablation: no CNN validation    |
 | Exp D_v2   | Stage 1v2 channel union           | K*   | Legacy Stage 1 direct baseline |
 | Exp C_v2_rf| Stage 2 RF importance selection   | K*   | Ablation: RF vs CNN oracle     |
+|            |                                   |      |                                |
+| V3 experiment (cropmap_segmentation_s2_v3):   |      |                                |
+| Exp A_v3   | 1 date per phenological window    | 9    | V3 temporal baseline           |
+| Exp B_v3   | Stage 1 GSI top-k sweep           | 1–N  | V3 GSI-only ablation           |
+| Exp C_v3   | Stage 2 RF forward selection      | K*   | V3 proposed method             |
 
 Usage:
     python scripts/train_segmentation.py                 # run all 6 experiments
@@ -1010,10 +1015,18 @@ def main(
         exp_D_v2_idx, exp_D_v2_names = build_exp_D_v2_indices(mmdd_to_date, local_band_to_idx)
         log.info(f"Exp D_v2: Stage 1 v2 channel union, {len(exp_D_v2_idx)} channels")
 
-    # Exp C_v3: Stage 2v3 incremental top-K sweep — one variant per (phase, k) pair
-    # exp_C_v3_variants: {(phase, k): (idx_list, names_list)}
+    # Exp C_v3 sweep (legacy, V2 experiment) — kept for backward compat
     exp_C_v3_variants: dict = {}
-    if exps and "C_v3" in exps:
+
+    # Exp A_v3: phenological window baselines → V3 experiment
+    exp_A_v3_variants = None
+    if exps and "A_v3" in exps:
+        exp_A_v3_variants = build_exp_A_v2_indices(local_date_to_idx, local_band_to_idx)
+        log.info(f"Exp A_v3: {len(exp_A_v3_variants)} phenological window variants")
+
+    # Exp B_v3: Stage 1 GSI top-k sweep → V3 experiment
+    exp_B_v3_variants: dict = {}
+    if exps and "B_v3" in exps:
         for _phase in v3_phases:
             for _k in v3_ks:
                 _idx, _names = build_exp_C_v3_indices(
@@ -1023,8 +1036,16 @@ def main(
                     local_band_to_idx=local_band_to_idx,
                     mlflow_run_id=stage2v3_sweep_run_id,
                 )
-                exp_C_v3_variants[(_phase, _k)] = (_idx, _names)
-                log.info(f"Exp C_v3 phase={_phase} k={_k}: {len(_idx)} channels")
+                exp_B_v3_variants[(_phase, _k)] = (_idx, _names)
+                log.info(f"Exp B_v3 phase={_phase} k={_k}: {len(_idx)} channels")
+
+    # Exp C_v3: Stage 2 RF forward selection → V3 experiment (proposed method)
+    exp_C_v3_rf_idx = exp_C_v3_rf_names = None
+    if exps and "C_v3" in exps:
+        exp_C_v3_rf_idx, exp_C_v3_rf_names = build_exp_C_v2_rf_indices(
+            mmdd_to_date, local_band_to_idx
+        )
+        log.info(f"Exp C_v3: RF forward-selection, {len(exp_C_v3_rf_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
@@ -1049,6 +1070,9 @@ def main(
         exp_C_v3_variants=exp_C_v3_variants,
         exp_D_idx=exp_D_idx,   exp_D_names=exp_D_names,
         exp_D_v2_idx=exp_D_v2_idx, exp_D_v2_names=exp_D_v2_names,
+        exp_A_v3_variants=exp_A_v3_variants,
+        exp_B_v3_variants=exp_B_v3_variants,
+        exp_C_v3_rf_idx=exp_C_v3_rf_idx, exp_C_v3_rf_names=exp_C_v3_rf_names,
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)
@@ -1182,9 +1206,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["A", "A_v2", "B", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
+        choices=["A", "A_v2", "A_v3", "B", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
         default=["A", "B", "C"],
-        help="Which experiments to run (default: A B C). A_v2 expands to all 4 phenological windows.",
+        help=(
+            "Which experiments to run (default: A B C). "
+            "V3 experiments (all log to cropmap_segmentation_s2_v3): "
+            "A_v3=phenological baselines, B_v3=Stage1 GSI top-k sweep, C_v3=Stage2 RF selection. "
+            "A_v3/B_v3 expand to multiple variants; use --v3-phase and --v3-k for B_v3."
+        ),
     )
     parser.add_argument(
         "--arch", nargs="+", choices=list(ARCH_CFG.keys()),

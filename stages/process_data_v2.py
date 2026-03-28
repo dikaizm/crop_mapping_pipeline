@@ -361,6 +361,60 @@ def _schedule_shutdown(delay_min: int = 8) -> None:
 
 # ── Test helper ─────────────────────────────────────────────────────────────────
 
+def process_date_batch(
+    date_groups  : dict,
+    yr           : str,
+    s2_out_dir,
+    merge_tmp_dir,
+    keep_merged  : bool = False,
+) -> tuple:
+    """
+    Merge + assign NoData for a subset of dates already downloaded locally.
+
+    Parameters
+    ----------
+    date_groups   : {date_key: [(row, col, path), ...]} — output of group_tiles_by_date(),
+                    filtered to the desired batch.
+    yr            : year string (used for logging).
+    s2_out_dir    : Path — directory to write *_processed.tif files.
+    merge_tmp_dir : Path — temporary directory for intermediate merged TIFs.
+    keep_merged   : bool — keep intermediate merged files.
+
+    Returns
+    -------
+    (raw_tile_paths, processed_paths, s2_ref_path)
+        raw_tile_paths : list[str] — all raw tile paths consumed (for deletion).
+        processed_paths: list[str] — all *_processed.tif paths produced.
+        s2_ref_path    : str | None — first processed file (CDL grid reference).
+    """
+    Path(s2_out_dir).mkdir(parents=True, exist_ok=True)
+    Path(merge_tmp_dir).mkdir(parents=True, exist_ok=True)
+
+    raw_tile_paths  = []
+    processed_paths = []
+    s2_ref_path     = None
+
+    for date_key, tiles in date_groups.items():
+        tile_paths = [t[2] for t in tiles]
+        raw_tile_paths.extend(tile_paths)
+
+        merged_path    = str(Path(merge_tmp_dir) / f"{date_key}_merged.tif")
+        processed_path = str(Path(s2_out_dir)   / f"{date_key}_processed.tif")
+
+        merge_tiles(tile_paths, merged_path)
+        assign_nodata(merged_path, processed_path)
+        processed_paths.append(processed_path)
+
+        if s2_ref_path is None:
+            s2_ref_path = processed_path
+
+        if not keep_merged and Path(merged_path).exists():
+            os.remove(merged_path)
+
+    log.info("  Batch: processed %d date(s) for year %s", len(processed_paths), yr)
+    return raw_tile_paths, processed_paths, s2_ref_path
+
+
 def test_merge(raw_dir: str, year: str, out_dir: str) -> None:
     """
     Merge + inspect only — no CDL, no upload, no delete.
@@ -448,31 +502,13 @@ def main(
         s2_out_dir   = S2_PROCESSED_DIR / yr
         s2_out_dir.mkdir(parents=True, exist_ok=True)
 
-        all_raw_tiles   = []
-        all_processed   = []
-        s2_ref_path     = None   # first processed file — used as CDL reference grid
-
-        for date_key, tiles in groups.items():
-            tile_paths   = [t[2] for t in tiles]
-            all_raw_tiles.extend(tile_paths)
-
-            merged_path    = str(merge_tmp_dir / f"{date_key}_merged.tif")
-            processed_path = str(s2_out_dir / f"{date_key}_processed.tif")
-
-            # Step 1: merge tiles
-            merge_tiles(tile_paths, merged_path)
-
-            # Step 2: assign NoData
-            assign_nodata(merged_path, processed_path)
-            all_processed.append(processed_path)
-
-            if s2_ref_path is None:
-                s2_ref_path = processed_path
-
-            # Remove temp merged file unless user wants to keep it
-            if not keep_merged and Path(merged_path).exists():
-                os.remove(merged_path)
-
+        all_raw_tiles, all_processed, s2_ref_path = process_date_batch(
+            date_groups   = groups,
+            yr            = yr,
+            s2_out_dir    = s2_out_dir,
+            merge_tmp_dir = merge_tmp_dir,
+            keep_merged   = keep_merged,
+        )
         log.info("  Processed %d date(s) for year %s", len(all_processed), yr)
 
         # ── CDL processing ─────────────────────────────────────────────────────

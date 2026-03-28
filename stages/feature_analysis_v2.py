@@ -46,6 +46,7 @@ from crop_mapping_pipeline.config import (
     MAX_BANDS_PER_CROP,
     MAX_DATES_PER_CROP,
     MLFLOW_EXPERIMENT_FEATURE,
+    MLFLOW_EXPERIMENT_TRAIN_V3,
     MLFLOW_TRACKING_URI,
     PROCESSED_DIR as _PROCESSED_DIR,
     REMAP_LUT,
@@ -371,9 +372,12 @@ def load_stage1_candidates() -> tuple[dict, dict, list]:
     return payload["date_candidates_per_crop"], payload["band_candidates_per_crop"], payload["all_dates"]
 
 
+_MLFLOW_EXPERIMENT_OVERRIDE: str | None = None
+
+
 def mlflow_setup() -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_FEATURE)
+    mlflow.set_experiment(_MLFLOW_EXPERIMENT_OVERRIDE or MLFLOW_EXPERIMENT_FEATURE)
     if mlflow.active_run():
         log.warning(f"Closing stale MLflow run: {mlflow.active_run().info.run_id}")
         mlflow.end_run(status="FAILED")
@@ -683,7 +687,13 @@ from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2_rf im
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v3 import run_stage2v3
 
 
-def main(force: bool = False, data_dir: str = None, stage: str = "all", selector: str = "cnn") -> None:
+def main(force: bool = False, data_dir: str = None, stage: str = "all", selector: str = "cnn",
+         mlflow_exp: str | None = None) -> None:
+    global _MLFLOW_EXPERIMENT_OVERRIDE
+    if mlflow_exp == "v3":
+        _MLFLOW_EXPERIMENT_OVERRIDE = MLFLOW_EXPERIMENT_TRAIN_V3
+    else:
+        _MLFLOW_EXPERIMENT_OVERRIDE = None
     configure_data_dir(data_dir)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -765,6 +775,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Selector for Stage 2v2 (cnn or rf). Ignored for --stage 2v3.")
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory")
+    parser.add_argument("--mlflow-exp", choices=["v3"], default=None,
+                        help="Route MLflow runs to a specific experiment. 'v3' → cropmap_segmentation_s2_v3.")
     return parser
 
 
@@ -783,7 +795,8 @@ def configure_logging() -> None:
 def cli(argv=None) -> None:
     args = build_parser().parse_args(argv)
     configure_logging()
-    main(force=args.force, data_dir=args.data_dir, stage=args.stage, selector=args.selector)
+    main(force=args.force, data_dir=args.data_dir, stage=args.stage, selector=args.selector,
+         mlflow_exp=args.mlflow_exp)
 
 
 if __name__ == "__main__":
