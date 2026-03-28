@@ -115,9 +115,19 @@ def main(
     cdl_folder_id_resolved = cdl_folder_id
     if not skip_upload and not s2_folder_ids:
         try:
-            from crop_mapping_pipeline.stages.process_data_v2 import (
-                _build_drive_service, _get_or_create_folder,
-            )
+            from crop_mapping_pipeline.stages.process_data_v2 import _build_drive_service
+
+            def _get_or_create_folder(svc, name, parent_id):
+                q = (f"name='{name}' and '{parent_id}' in parents "
+                     f"and mimeType='application/vnd.google-apps.folder' and trashed=false")
+                res = svc.files().list(q=q, fields="files(id)").execute()
+                if res.get("files"):
+                    return res["files"][0]["id"]
+                meta   = {"name": name, "mimeType": "application/vnd.google-apps.folder",
+                          "parents": [parent_id]}
+                folder = svc.files().create(body=meta, fields="id").execute()
+                return folder["id"]
+
             _svc = _build_drive_service()
             s2_parent  = _get_or_create_folder(_svc, "s2",  GDRIVE_PROCESSED_V2_FOLDER_ID)
             cdl_parent = _get_or_create_folder(_svc, "cdl", GDRIVE_PROCESSED_V2_FOLDER_ID)
