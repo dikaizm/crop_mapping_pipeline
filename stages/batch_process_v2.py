@@ -108,6 +108,19 @@ def main(
     for yr, dates in dates_by_year.items():
         log.info("  %s: %d date(s) found", yr, len(dates))
 
+    # ── Filter already-processed dates ───────────────────────────────────────
+    for yr in list(dates_by_year.keys()):
+        s2_out_dir = pdv2.S2_PROCESSED_DIR / yr
+        all_dates  = dates_by_year[yr]
+        remaining  = [
+            dk for dk in all_dates
+            if not (s2_out_dir / f"{dk}_processed.tif").exists()
+        ]
+        skipped = len(all_dates) - len(remaining)
+        if skipped:
+            log.info("  %s: %d already processed, %d remaining", yr, skipped, len(remaining))
+        dates_by_year[yr] = remaining
+
     coverage_by_year: dict = {}   # {year: {class_id: fraction}} — accumulated across years
 
     # ── Resolve upload folder IDs ─────────────────────────────────────────────
@@ -147,7 +160,7 @@ def main(
     for yr in years:
         all_dates = dates_by_year.get(yr, [])
         if not all_dates:
-            log.warning("No dates found for year %s — skipping", yr)
+            log.info("Year %s — all dates already processed, skipping", yr)
             continue
 
         log.info("=" * 60)
