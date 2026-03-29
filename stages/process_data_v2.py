@@ -136,11 +136,10 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
             width     = mosaic.shape[2],
             height    = mosaic.shape[1],
             transform = transform,
-            compress  = "deflate",
-            predictor = 2,
+            compress  = "lzw",
             tiled     = True,
-            blockxsize= 512,
-            blockysize= 512,
+            blockxsize= 256,
+            blockysize= 256,
         )
         with rasterio.open(out_path, "w", **profile) as dst:
             dst.write(mosaic)
@@ -168,8 +167,8 @@ def assign_nodata(in_path: str, out_path: str) -> str:
     with rasterio.open(in_path) as src:
         profile = src.profile.copy()
         profile.update(dtype="float32", nodata=S2_NODATA,
-                       compress="deflate", predictor=2,
-                       tiled=True, blockxsize=512, blockysize=512)
+                       compress="deflate", predictor=3,
+                       tiled=True, blockxsize=256, blockysize=256)
         data = src.read().astype(np.float32)
 
     invalid       = (data < 0) | np.isnan(data) | np.isinf(data)
@@ -177,6 +176,12 @@ def assign_nodata(in_path: str, out_path: str) -> str:
 
     with rasterio.open(out_path, "w", **profile) as dst:
         dst.write(data)
+
+    # Build internal overview pyramids for fast QGIS rendering at any zoom level.
+    # Skip level 2 (too large, adds ~33% file size with minimal benefit).
+    with rasterio.open(out_path, "r+") as dst:
+        dst.build_overviews([4, 8, 16, 32], Resampling.average)
+        dst.update_tags(ns="rio_overview", resampling="average")
 
     log.info("  Processed: %s  (invalid_px=%s)",
              Path(out_path).name, f"{invalid.sum():,}")
