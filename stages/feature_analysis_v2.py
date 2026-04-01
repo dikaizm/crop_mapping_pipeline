@@ -695,20 +695,6 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
     else:
         _MLFLOW_EXPERIMENT_OVERRIDE = None
 
-    # Load dynamic class selection from data processing if available
-    from crop_mapping_pipeline.config import CDL_KEEP_CLASSES_JSON
-    from crop_mapping_pipeline.stages.process_data_v2 import load_keep_classes_json
-    from crop_mapping_pipeline.utils.constants import USDA_CDL_NAMES
-    dynamic_classes = load_keep_classes_json(CDL_KEEP_CLASSES_JSON)
-    if dynamic_classes:
-        KEEP_CLASSES    = dynamic_classes
-        CDL_CLASS_NAMES = {k: USDA_CDL_NAMES.get(k, f"CDL_{k}") for k in KEEP_CLASSES}
-        log.info("Loaded dynamic KEEP_CLASSES from keep_classes.json: %d classes → %s",
-                 len(KEEP_CLASSES), KEEP_CLASSES)
-    else:
-        log.info("keep_classes.json not found — using hardcoded KEEP_CLASSES (%d classes)",
-                 len(KEEP_CLASSES))
-
     configure_data_dir(data_dir)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 

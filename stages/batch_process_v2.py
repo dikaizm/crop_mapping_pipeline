@@ -57,7 +57,7 @@ def main(
     shutdown     : bool  = False,
 ) -> None:
     from crop_mapping_pipeline.config import (
-        GDRIVE_RAW_S2_V2_FOLDER_ID, CDL_KEEP_CLASSES_JSON,
+        GDRIVE_RAW_S2_V2_FOLDER_ID,
         GDRIVE_PROCESSED_V2_FOLDER_ID,
     )
     from crop_mapping_pipeline.stages.fetch_data_v2 import (
@@ -69,11 +69,8 @@ def main(
         delete_files,
         download_cdl_usda,
         group_tiles_by_date,
-        load_keep_classes_json,
-        log_cdl_analysis_to_mlflow,
         process_cdl,
         process_date_batch,
-        save_keep_classes_json,
         upload_year,
     )
     import crop_mapping_pipeline.stages.process_data_v2 as pdv2
@@ -98,11 +95,6 @@ def main(
         for yr in years:
             download_cdl_usda(yr, cdl_dir)
 
-    # ── Load existing keep_classes (resume support) ───────────────────────────
-    existing_keep = load_keep_classes_json(CDL_KEEP_CLASSES_JSON)
-    if existing_keep:
-        log.info("Loaded existing keep_classes.json — %d classes", len(existing_keep))
-
     log.info("Listing dates from GDrive folder %s ...", folder_id)
     dates_by_year = list_dates_by_year(folder_id, years=years)
     for yr, dates in dates_by_year.items():
@@ -121,7 +113,6 @@ def main(
             log.info("  %s: %d already processed, %d remaining", yr, skipped, len(remaining))
         dates_by_year[yr] = remaining
 
-    coverage_by_year: dict = {}   # {year: {class_id: fraction}} — accumulated across years
 
     # ── Resolve upload folder IDs ─────────────────────────────────────────────
     # If --s2-folder-ids not passed, auto-create year subfolders under the v2 parent.
@@ -173,7 +164,7 @@ def main(
         merge_tmp_dir.mkdir(parents=True, exist_ok=True)
 
         cdl_processed = False
-        s2_ref_path   = None     # set from first batch
+        s2_ref_path   = None     # set from first processed batch
 
         for batch_num, date_batch in enumerate(_chunks(all_dates, batch_size), start=1):
             log.info("─── Batch %d/%d  (%d dates: %s … %s)",
@@ -225,13 +216,7 @@ def main(
                     cdl_out_dir     = pdv2.S2_PROCESSED_DIR.parent / "cdl"
                     cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
                     cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
-                    yr_coverage: dict = {}
-                    process_cdl(
-                        cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered,
-                        keep_classes   = existing_keep,   # None → auto-select
-                        out_coverage   = yr_coverage,
-                    )
-                    coverage_by_year[yr] = yr_coverage
+                    process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
                     cdl_processed = True
                 else:
                     log.warning("  Raw CDL for %s not found — skipping CDL step", yr)
@@ -270,15 +255,6 @@ def main(
             log.info("  Batch %d done.\n", batch_num)
 
         log.info("Year %s complete.\n", yr)
-
-    # ── Save union keep_classes.json + log to MLflow ─────────────────────────
-    if coverage_by_year:
-        log.info("Saving keep_classes.json (union across %d year(s))...",
-                 len(coverage_by_year))
-        keep_classes = save_keep_classes_json(coverage_by_year, CDL_KEEP_CLASSES_JSON)
-        log_cdl_analysis_to_mlflow(coverage_by_year, keep_classes, CDL_KEEP_CLASSES_JSON)
-    elif not existing_keep:
-        log.warning("No CDL coverage data collected — keep_classes.json not written.")
 
     if shutdown:
         _schedule_shutdown(delay_min=8)

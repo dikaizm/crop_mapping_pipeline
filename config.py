@@ -17,9 +17,6 @@ MODELS_DIR       = PROJECT_ROOT / "ml_models"
 FIGURES_DIR      = PROJECT_ROOT / "documents" / "thesis" / "figures"
 LOGS_DIR         = PROJECT_ROOT / "logs"
 
-CDL_KEEP_CLASSES_JSON  = CDL_DIR / "keep_classes.json"   # dynamic class selection output
-CDL_COVERAGE_THRESHOLD = 0.02                              # min fraction of total pixels
-
 CDL_BY_YEAR = {
     "2022": CDL_DIR / "cdl_2022_study_area_filtered.tif",
     "2023": CDL_DIR / "cdl_2023_study_area_filtered.tif",
@@ -89,7 +86,7 @@ VEGE_BANDS       = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B11", "B12"]
 
 # ── CDL classes ────────────────────────────────────────────────────────────────
 # Fallow/Idle Cropland (61) → background (class 0); not in KEEP_CLASSES
-KEEP_CLASSES = [3, 6, 24, 36, 37, 54, 69, 75, 76, 220]
+KEEP_CLASSES = [3, 6, 24, 36, 37, 54, 69, 75, 76, 210]
 CLASS_REMAP  = {cls_id: i + 1 for i, cls_id in enumerate(KEEP_CLASSES)}
 NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 11: 0=bg + 1–10=crops
 
@@ -97,7 +94,7 @@ CDL_CLASS_NAMES = {
     3:   "Rice",         6:   "Sunflower",    24:  "Winter Wheat",
     36:  "Alfalfa",      37:  "Other Hay",    54:  "Tomatoes",
     69:  "Grapes",       75:  "Almonds",      76:  "Walnuts",
-    220: "Plums",
+    210: "Prunes",
 }
 
 REMAP_LUT = np.zeros(256, dtype=np.int64)
