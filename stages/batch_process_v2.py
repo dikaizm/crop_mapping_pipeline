@@ -54,6 +54,7 @@ def main(
     keep_merged  : bool  = False,
     overwrite    : bool  = False,
     download_cdl : bool  = False,
+    cdl_only     : bool  = False,
     shutdown     : bool  = False,
 ) -> None:
     from crop_mapping_pipeline.config import (
@@ -94,6 +95,37 @@ def main(
         log.info("Downloading CDL from USDA NASS for years: %s", years)
         for yr in years:
             download_cdl_usda(yr, cdl_dir)
+
+    # ── CDL-only mode: reprocess CDL without touching S2 ─────────────────────
+    if cdl_only:
+        from glob import glob as _glob
+        for yr in years:
+            log.info("CDL-only: processing year %s ...", yr)
+            # Use any existing processed S2 file as grid reference
+            s2_refs = sorted(_glob(str(pdv2.S2_PROCESSED_DIR / yr / "*_processed.tif")))
+            if not s2_refs:
+                log.warning("  No processed S2 files found for %s — skipping", yr)
+                continue
+            s2_ref_path  = s2_refs[0]
+            cdl_out_dir  = pdv2.S2_PROCESSED_DIR.parent / "cdl"
+            cdl_raw = next(
+                (p for p in _glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
+            )
+            if not cdl_raw:
+                log.warning("  Raw CDL for %s not found in %s — skipping", yr, cdl_dir)
+                continue
+            cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
+            cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
+            # Remove existing outputs so process_cdl rewrites them
+            for p in (cdl_reprojected, cdl_filtered):
+                if pathlib.Path(p).exists():
+                    pathlib.Path(p).unlink()
+                    log.info("  Removed existing: %s", pathlib.Path(p).name)
+            process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
+            log.info("  CDL %s done.", yr)
+        if shutdown:
+            _schedule_shutdown(delay_min=8)
+        return
 
     log.info("Listing dates from GDrive folder %s ...", folder_id)
     dates_by_year = list_dates_by_year(folder_id, years=years)
@@ -323,6 +355,14 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--cdl-only", action="store_true",
+        help=(
+            "Reprocess CDL only — skip S2 download and processing entirely. "
+            "Uses the first existing processed S2 file as the grid reference. "
+            "Combine with --download-cdl to also re-download raw CDL first."
+        ),
+    )
+    parser.add_argument(
         "--shutdown", action="store_true",
         help="Stop the RunPod pod after all batches complete.",
     )
@@ -377,5 +417,6 @@ if __name__ == "__main__":
         keep_merged   = args.keep_merged,
         overwrite     = args.overwrite,
         download_cdl  = args.download_cdl,
+        cdl_only      = args.cdl_only,
         shutdown      = args.shutdown,
     )
