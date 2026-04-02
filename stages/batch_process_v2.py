@@ -158,7 +158,8 @@ def main(
             process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
             log.info("  CDL %s done.", yr)
             if not skip_upload and cdl_folder_id_resolved:
-                log.info("  Uploading CDL filtered → GDrive ...")
+                log.info("  Uploading CDL files → GDrive ...")
+                upload_file(cdl_reprojected, cdl_folder_id_resolved)
                 upload_file(cdl_filtered, cdl_folder_id_resolved)
         if shutdown:
             _schedule_shutdown(delay_min=8)
