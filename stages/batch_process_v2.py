@@ -72,6 +72,7 @@ def main(
         group_tiles_by_date,
         process_cdl,
         process_date_batch,
+        upload_file,
         upload_year,
     )
     import crop_mapping_pipeline.stages.process_data_v2 as pdv2
@@ -96,58 +97,7 @@ def main(
         for yr in years:
             download_cdl_usda(yr, cdl_dir)
 
-    # ── CDL-only mode: reprocess CDL without touching S2 ─────────────────────
-    if cdl_only:
-        from glob import glob as _glob
-        for yr in years:
-            log.info("CDL-only: processing year %s ...", yr)
-            # Use any existing processed S2 file as grid reference
-            s2_refs = sorted(_glob(str(pdv2.S2_PROCESSED_DIR / yr / "*_processed.tif")))
-            if not s2_refs:
-                log.warning("  No processed S2 files found for %s — skipping", yr)
-                continue
-            s2_ref_path  = s2_refs[0]
-            cdl_out_dir  = pdv2.S2_PROCESSED_DIR.parent / "cdl"
-            cdl_raw = next(
-                (p for p in _glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
-            )
-            if not cdl_raw:
-                log.warning("  Raw CDL for %s not found in %s — skipping", yr, cdl_dir)
-                continue
-            cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
-            cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
-            # Remove existing outputs so process_cdl rewrites them
-            for p in (cdl_reprojected, cdl_filtered):
-                if pathlib.Path(p).exists():
-                    pathlib.Path(p).unlink()
-                    log.info("  Removed existing: %s", pathlib.Path(p).name)
-            process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
-            log.info("  CDL %s done.", yr)
-        if shutdown:
-            _schedule_shutdown(delay_min=8)
-        return
-
-    log.info("Listing dates from GDrive folder %s ...", folder_id)
-    dates_by_year = list_dates_by_year(folder_id, years=years)
-    for yr, dates in dates_by_year.items():
-        log.info("  %s: %d date(s) found", yr, len(dates))
-
-    # ── Filter already-processed dates ───────────────────────────────────────
-    for yr in list(dates_by_year.keys()):
-        s2_out_dir = pdv2.S2_PROCESSED_DIR / yr
-        all_dates  = dates_by_year[yr]
-        remaining  = [
-            dk for dk in all_dates
-            if not (s2_out_dir / f"{dk}_processed.tif").exists()
-        ]
-        skipped = len(all_dates) - len(remaining)
-        if skipped:
-            log.info("  %s: %d already processed, %d remaining", yr, skipped, len(remaining))
-        dates_by_year[yr] = remaining
-
-
-    # ── Resolve upload folder IDs ─────────────────────────────────────────────
-    # If --s2-folder-ids not passed, auto-create year subfolders under the v2 parent.
+    # ── Resolve upload folder IDs (needed by both cdl-only and full mode) ─────
     cdl_folder_id_resolved = cdl_folder_id
     if not skip_upload and not s2_folder_ids:
         try:
@@ -179,6 +129,59 @@ def main(
         except Exception as e:
             log.warning("Could not resolve upload folders (%s) — upload will be skipped", e)
             s2_folder_ids = None
+
+    # ── CDL-only mode: reprocess CDL without touching S2 ─────────────────────
+    if cdl_only:
+        from glob import glob as _glob
+        for yr in years:
+            log.info("CDL-only: processing year %s ...", yr)
+            # Use any existing processed S2 file as grid reference
+            s2_refs = sorted(_glob(str(pdv2.S2_PROCESSED_DIR / yr / "*_processed.tif")))
+            if not s2_refs:
+                log.warning("  No processed S2 files found for %s — skipping", yr)
+                continue
+            s2_ref_path  = s2_refs[0]
+            cdl_out_dir  = pdv2.S2_PROCESSED_DIR.parent / "cdl"
+            cdl_raw = next(
+                (p for p in _glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
+            )
+            if not cdl_raw:
+                log.warning("  Raw CDL for %s not found in %s — skipping", yr, cdl_dir)
+                continue
+            cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
+            cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
+            # Remove existing outputs so process_cdl rewrites them
+            for p in (cdl_reprojected, cdl_filtered):
+                if pathlib.Path(p).exists():
+                    pathlib.Path(p).unlink()
+                    log.info("  Removed existing: %s", pathlib.Path(p).name)
+            process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
+            log.info("  CDL %s done.", yr)
+            if not skip_upload and cdl_folder_id_resolved:
+                log.info("  Uploading CDL filtered → GDrive ...")
+                upload_file(cdl_filtered, cdl_folder_id_resolved)
+        if shutdown:
+            _schedule_shutdown(delay_min=8)
+        return
+
+    log.info("Listing dates from GDrive folder %s ...", folder_id)
+    dates_by_year = list_dates_by_year(folder_id, years=years)
+    for yr, dates in dates_by_year.items():
+        log.info("  %s: %d date(s) found", yr, len(dates))
+
+    # ── Filter already-processed dates ───────────────────────────────────────
+    for yr in list(dates_by_year.keys()):
+        s2_out_dir = pdv2.S2_PROCESSED_DIR / yr
+        all_dates  = dates_by_year[yr]
+        remaining  = [
+            dk for dk in all_dates
+            if not (s2_out_dir / f"{dk}_processed.tif").exists()
+        ]
+        skipped = len(all_dates) - len(remaining)
+        if skipped:
+            log.info("  %s: %d already processed, %d remaining", yr, skipped, len(remaining))
+        dates_by_year[yr] = remaining
+
 
     for yr in years:
         all_dates = dates_by_year.get(yr, [])
