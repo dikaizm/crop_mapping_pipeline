@@ -720,7 +720,7 @@ SEG_NORM     = BoundaryNorm(boundaries=range(NUM_CLASSES + 1), ncolors=NUM_CLASS
 
 
 def _build_drive_service():
-    """Authenticate GDrive API v3 using the OAuth token from process_data."""
+    """Authenticate GDrive API v3 using the OAuth token."""
     import pickle
     from googleapiclient.discovery import build
     from google.auth.transport.requests import Request
@@ -729,7 +729,7 @@ def _build_drive_service():
         raise FileNotFoundError(
             f"OAuth token not found: {GDRIVE_OAUTH_TOKEN}\n"
             "Generate it locally with:\n"
-            "  python stages/process_data.py --auth\n"
+            "  python stages/batch_process_v2.py --auth\n"
             "Then copy to the server via scp."
         )
     with open(GDRIVE_OAUTH_TOKEN, "rb") as f:

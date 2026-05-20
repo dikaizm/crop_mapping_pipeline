@@ -4,7 +4,7 @@ Pipeline orchestrator — runs all stages end-to-end.
 Stages:
   process  — Stage 0.5: download raw S2 + CDL, process, upload to GDrive, delete raw
   fetch    — Stage 0: download processed S2 + CDL from Google Drive
-  feature  — Stage 1+2: GSI ranking + CNN forward selection (feature_analysis.py)
+  feature  — Stage 1+2: GSI ranking + CNN forward selection (feature_analysis_v2.py)
   train    — Stage 3: train Exp A/B/C × 2 architectures (train_segmentation.py)
   all      — run fetch + feature + train in order
 
@@ -50,35 +50,23 @@ VALID_STAGES = ["process", "fetch", "feature", "train", "all"]
 # ── Stage runners ─────────────────────────────────────────────────────────────
 
 def run_process(force=False, data_dir=None, years=None, raw_s2_dir=None, raw_cdl_dir=None):
-    """Stage 0.5 — fetch raw S2 + processed CDL, process S2, upload, delete raw."""
+    """Stage 0.5 — fetch raw S2 tiles + CDL, process, upload, delete raw."""
     log.info("=" * 60)
     log.info("STAGE 0.5 — Process raw S2 + CDL")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.fetch_data import main as fetch_main
-    from crop_mapping_pipeline.stages.process_data import main as process_main
+    from crop_mapping_pipeline.stages.batch_process_v2 import main as batch_main
+    from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
 
-    # Download processed CDL from GDrive (already processed locally, no need to reprocess)
-    log.info("Fetching processed CDL from GDrive...")
-    from crop_mapping_pipeline.stages.fetch_data import download_folder
-    from crop_mapping_pipeline.config import GDRIVE_FILES, CDL_DIR
-    cdl_entry = GDRIVE_FILES.get("cdl", {})
-    if cdl_entry.get("id"):
-        download_folder(cdl_entry["id"], str(CDL_DIR), overwrite=force)
-    else:
-        log.warning("CDL GDrive ID not configured — skipping CDL download")
-
-    # Process S2 year by year to keep disk usage low
-    for yr in (years or ["2022", "2023", "2024"]):
-        log.info(f"Fetching raw S2 for {yr}...")
-        fetch_main(years=[yr], raw=True, raw_s2_dir=raw_s2_dir)
-
-        log.info(f"Processing {yr}...")
-        process_main(
-            years       = [yr],
-            raw_s2_dir  = raw_s2_dir,
-            raw_cdl_dir = raw_cdl_dir,
-            data_dir    = data_dir,
-        )
+    raw_dir = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
+    batch_main(
+        folder_id   = GDRIVE_RAW_S2_V2_FOLDER_ID,
+        output_dir  = raw_dir,
+        years       = years or ["2022", "2023", "2024"],
+        data_dir    = data_dir,
+        raw_cdl_dir = raw_cdl_dir,
+        download_cdl= True,
+        overwrite   = force,
+    )
 
 
 def run_fetch(force=False, data_dir=None, years=None):
@@ -86,8 +74,45 @@ def run_fetch(force=False, data_dir=None, years=None):
     log.info("=" * 60)
     log.info("STAGE 0 — Fetch processed data from Google Drive")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.fetch_data import main as fetch_main
-    fetch_main(overwrite=force, years=years)
+    import os
+    from googleapiclient.http import MediaIoBaseDownload
+    from crop_mapping_pipeline.stages.fetch_data_v2 import _build_drive_service, list_folder
+    from crop_mapping_pipeline.config import (
+        GDRIVE_PROCESSED_S2_FOLDER_IDS, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+        S2_PROCESSED_DIR, CDL_DIR,
+    )
+
+    service     = _build_drive_service()
+    dl_years    = years or ["2022", "2023", "2024"]
+
+    def _dl_folder(folder_id, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        name_to_id = list_folder(folder_id)
+        for fname, fid in sorted(name_to_id.items()):
+            out_path = os.path.join(out_dir, fname)
+            if not force and os.path.exists(out_path):
+                log.info("  Already exists — skip: %s", fname)
+                continue
+            log.info("  Downloading %s ...", fname)
+            req  = service.files().get_media(fileId=fid)
+            with open(out_path, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, req, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
+
+    for yr in dl_years:
+        folder_id = GDRIVE_PROCESSED_S2_FOLDER_IDS.get(yr)
+        if not folder_id:
+            log.warning("No processed S2 GDrive folder for year %s — skipping", yr)
+            continue
+        log.info("Fetching processed S2 for %s ...", yr)
+        _dl_folder(folder_id, str(S2_PROCESSED_DIR / yr))
+
+    log.info("Fetching CDL ...")
+    _dl_folder(GDRIVE_PROCESSED_CDL_FOLDER_ID, str(CDL_DIR))
 
 
 def run_feature(force=False, data_dir=None):
@@ -95,7 +120,7 @@ def run_feature(force=False, data_dir=None):
     log.info("=" * 60)
     log.info("STAGE 1+2 — Feature analysis")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.feature_analysis import main as feature_main
+    from crop_mapping_pipeline.stages.feature_analysis_v2 import main as feature_main
     feature_main(force=force, data_dir=data_dir, stage="all")
 
 

@@ -1,5 +1,5 @@
 """
-Pipeline configuration — edit GDRIVE_FILES IDs and paths before running.
+Pipeline configuration — edit GDrive folder IDs and paths before running.
 All path settings can be overridden via --data-dir in pipeline.py.
 """
 
@@ -27,55 +27,6 @@ CDL_BY_YEAR = {
 STAGE2_RESULTS_CSV          = PROCESSED_DIR / "stage2v2_per_crop_results.csv"
 STAGE3_EXP_C_BANDS          = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 STAGE3_EXP_C_BANDS_PROJECTED = PROCESSED_DIR / "stage3_exp_c_bands_projected.json"
-
-# ── Google Drive file IDs ──────────────────────────────────────────────────────
-# Fill in before running fetch_data.py.
-#   type="folder" → gdown.download_folder (e.g. GEE export folder per year)
-#   type="file"   → gdown.download         (single file)
-#
-# Example (folder — all S2 files in one GDrive folder):
-#   "s2": {"type": "folder", "id": "1ABC...", "output_dir": str(S2_PROCESSED_DIR)}
-# Example (file):
-#   "cdl_2022": {"type": "file", "id": "1DEF...", "output_path": str(CDL_BY_YEAR["2022"])}
-
-GDRIVE_FILES = {
-    # S2 processed TIFs — one GDrive folder per year
-    "s2_2022": {
-        "type":       "folder",
-        "id":         "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",
-        "output_dir": str(S2_PROCESSED_DIR / "2022"),
-        "year":       "2022",
-    },
-    "s2_2023": {
-        "type":       "folder",
-        "id":         "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
-        "output_dir": str(S2_PROCESSED_DIR / "2023"),
-        "year":       "2023",
-    },
-    "s2_2024": {
-        "type":       "folder",
-        "id":         "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
-        "output_dir": str(S2_PROCESSED_DIR / "2024"),
-        "year":       "2024",
-    },
-    # CDL filtered rasters — all years in one folder (small files, download together)
-    "cdl": {
-        "type":       "folder",
-        "id":         "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0",
-        "output_dir": str(CDL_DIR),
-    },
-}
-
-# Raw S2 GDrive folder ID for new study area (v2) — single flat folder, all years
-# Used by fetch_data_v2.py. Set to the GEE export folder ID.
-GDRIVE_RAW_S2_V2_FOLDER_ID = "1yZmKDjGnXZH6622d8SU4GDUB1z940HwY"
-
-# Raw S2 GDrive folder IDs — used by process_data.py to fetch raw files before processing
-GDRIVE_RAW_S2_FOLDER_IDS = {
-    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
-    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
-    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
-}
 
 # ── S2 metadata ────────────────────────────────────────────────────────────────
 S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
