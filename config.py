@@ -28,13 +28,6 @@ STAGE2_RESULTS_CSV          = PROCESSED_DIR / "stage2v2_per_crop_results.csv"
 STAGE3_EXP_C_BANDS          = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 STAGE3_EXP_C_BANDS_PROJECTED = PROCESSED_DIR / "stage3_exp_c_bands_projected.json"
 
-# ── Google Drive — raw S2 per-year folders ────────────────────────────────────
-GDRIVE_RAW_S2_FOLDER_IDS = {
-    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
-    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
-    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
-}
-
 # ── S2 metadata ────────────────────────────────────────────────────────────────
 S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 N_BANDS_PER_DATE = len(S2_BAND_NAMES)
@@ -71,11 +64,10 @@ GDRIVE_OAUTH_SECRET = Path(__file__).parent / "ssh" / next(
     "client_secret.json",
 )
 GDRIVE_OAUTH_TOKEN  = Path(__file__).parent / "ssh" / "gdrive_token.pickle"
-# Same folder IDs as GDRIVE_FILES above — upload destination matches download source
 GDRIVE_PROCESSED_S2_FOLDER_IDS = {
-    "2022": "1NUFpuQ0q9IsJSBdA9475T4YadQXGEccH",
-    "2023": "1nNWnPapTSeUxJ5E2Wv_ajbkvEkrpRqIs",
-    "2024": "1r4TGaX1aIRlCyp7saFpS-J77J2II66Z0",
+    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
+    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
+    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
 }
 GDRIVE_PROCESSED_CDL_FOLDER_ID    = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
 # V2 study area processed data — single parent folder; year subfolders created automatically
