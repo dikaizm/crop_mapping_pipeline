@@ -44,7 +44,7 @@ from crop_mapping_pipeline.config import (
 
 log = logging.getLogger(__name__)
 
-VALID_STAGES = ["process", "fetch", "feature", "train", "all"]
+VALID_STAGES = ["process", "fetch-raw", "fetch-processed", "fetch", "feature", "train", "all"]
 
 
 # ── Stage runners ─────────────────────────────────────────────────────────────
@@ -69,10 +69,27 @@ def run_process(force=False, data_dir=None, years=None, raw_s2_dir=None, raw_cdl
     )
 
 
-def run_fetch(force=False, data_dir=None, years=None):
-    """Stage 0 — download processed S2 + CDL from Google Drive."""
+def run_fetch_raw(force=False, data_dir=None, years=None, raw_s2_dir=None, **_):
+    """fetch-raw — download raw S2 tiles from flat GDrive folder."""
     log.info("=" * 60)
-    log.info("STAGE 0 — Fetch processed data from Google Drive")
+    log.info("FETCH RAW — Download raw S2 tiles from Google Drive")
+    log.info("=" * 60)
+    from crop_mapping_pipeline.stages.fetch_data_v2 import main as fetch_raw_main
+    from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
+
+    raw_dir = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
+    fetch_raw_main(
+        folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
+        output_dir = raw_dir,
+        years      = years or ["2022", "2023", "2024"],
+        overwrite  = force,
+    )
+
+
+def run_fetch(force=False, data_dir=None, years=None, **_):
+    """fetch / fetch-processed — download processed S2 + CDL from Google Drive."""
+    log.info("=" * 60)
+    log.info("FETCH PROCESSED — Download processed data from Google Drive")
     log.info("=" * 60)
     import os
     from googleapiclient.http import MediaIoBaseDownload
@@ -136,10 +153,12 @@ def run_train(force=False, data_dir=None):
 # ── Pipeline runner ───────────────────────────────────────────────────────────
 
 STAGE_FNS = {
-    "process": run_process,
-    "fetch":   run_fetch,
-    "feature": run_feature,
-    "train":   run_train,
+    "process":        run_process,
+    "fetch-raw":      run_fetch_raw,
+    "fetch-processed": run_fetch,
+    "fetch":          run_fetch,      # alias for fetch-processed
+    "feature":        run_feature,
+    "train":          run_train,
 }
 
 
@@ -167,8 +186,9 @@ def run_pipeline(stages, force=False, data_dir=None, years=None,
             if stage == "process":
                 fn(force=force, data_dir=data_dir, years=years,
                    raw_s2_dir=raw_s2_dir, raw_cdl_dir=raw_cdl_dir)
-            elif stage == "fetch":
-                fn(force=force, data_dir=data_dir, years=years)
+            elif stage in ("fetch", "fetch-processed", "fetch-raw"):
+                fn(force=force, data_dir=data_dir, years=years,
+                   raw_s2_dir=raw_s2_dir)
             else:
                 fn(force=force, data_dir=data_dir)
             elapsed        = time.time() - t0
