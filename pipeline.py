@@ -50,23 +50,60 @@ VALID_STAGES = ["process", "fetch-raw", "fetch-processed", "fetch", "feature", "
 # ── Stage runners ─────────────────────────────────────────────────────────────
 
 def run_process(force=False, data_dir=None, years=None, raw_s2_dir=None, raw_cdl_dir=None):
-    """Stage 0.5 — fetch raw S2 tiles + CDL, process, upload, delete raw."""
+    """Stage 0.5 — fetch raw S2 (per-year folders), process, upload, delete raw."""
     log.info("=" * 60)
     log.info("STAGE 0.5 — Process raw S2 + CDL")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.batch_process_v2 import main as batch_main
-    from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
-
-    raw_dir = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
-    batch_main(
-        folder_id   = GDRIVE_RAW_S2_V2_FOLDER_ID,
-        output_dir  = raw_dir,
-        years       = years or ["2022", "2023", "2024"],
-        data_dir    = data_dir,
-        raw_cdl_dir = raw_cdl_dir,
-        download_cdl= True,
-        overwrite   = force,
+    import os
+    from googleapiclient.http import MediaIoBaseDownload
+    from crop_mapping_pipeline.stages.fetch_data_v2 import _build_drive_service, list_folder
+    from crop_mapping_pipeline.stages.process_data_v2 import main as process_main
+    from crop_mapping_pipeline.config import (
+        GDRIVE_RAW_S2_FOLDER_IDS, GDRIVE_PROCESSED_S2_FOLDER_IDS,
+        GDRIVE_PROCESSED_CDL_FOLDER_ID,
     )
+
+    service  = _build_drive_service()
+    dl_years = years or ["2022", "2023", "2024"]
+    base_raw = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
+
+    def _dl_folder(folder_id, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        name_to_id = list_folder(folder_id)
+        for fname, fid in sorted(name_to_id.items()):
+            out_path = os.path.join(out_dir, fname)
+            if not force and os.path.exists(out_path):
+                log.info("  Already exists — skip: %s", fname)
+                continue
+            log.info("  Downloading %s ...", fname)
+            req = service.files().get_media(fileId=fid)
+            with open(out_path, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, req, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
+
+    for yr in dl_years:
+        folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(yr)
+        if not folder_id:
+            log.warning("No raw GDrive folder for year %s — skipping", yr)
+            continue
+
+        yr_raw_dir = os.path.join(base_raw, yr)
+        log.info("Fetching raw S2 for %s → %s ...", yr, yr_raw_dir)
+        _dl_folder(folder_id, yr_raw_dir)
+
+        log.info("Processing %s ...", yr)
+        process_main(
+            years         = [yr],
+            raw_s2_dir    = base_raw,
+            raw_cdl_dir   = raw_cdl_dir,
+            data_dir      = data_dir,
+            s2_folder_ids = {yr: GDRIVE_PROCESSED_S2_FOLDER_IDS.get(yr)},
+            cdl_folder_id = GDRIVE_PROCESSED_CDL_FOLDER_ID,
+        )
 
 
 def run_fetch_raw(force=False, data_dir=None, years=None, raw_s2_dir=None, **_):
