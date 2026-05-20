@@ -70,20 +70,44 @@ def run_process(force=False, data_dir=None, years=None, raw_s2_dir=None, raw_cdl
 
 
 def run_fetch_raw(force=False, data_dir=None, years=None, raw_s2_dir=None, **_):
-    """fetch-raw — download raw S2 tiles from flat GDrive folder."""
+    """fetch-raw — download raw S2 TIFs from per-year GDrive folders."""
     log.info("=" * 60)
-    log.info("FETCH RAW — Download raw S2 tiles from Google Drive")
+    log.info("FETCH RAW — Download raw S2 from Google Drive")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.fetch_data_v2 import main as fetch_raw_main
-    from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
+    import os
+    from googleapiclient.http import MediaIoBaseDownload
+    from crop_mapping_pipeline.stages.fetch_data_v2 import _build_drive_service, list_folder
+    from crop_mapping_pipeline.config import GDRIVE_RAW_S2_FOLDER_IDS
 
-    raw_dir = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
-    fetch_raw_main(
-        folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
-        output_dir = raw_dir,
-        years      = years or ["2022", "2023", "2024"],
-        overwrite  = force,
-    )
+    service  = _build_drive_service()
+    dl_years = years or ["2022", "2023", "2024"]
+    base_dir = raw_s2_dir or str(_ROOT / "data" / "raw" / "s2")
+
+    def _dl_folder(folder_id, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        name_to_id = list_folder(folder_id)
+        for fname, fid in sorted(name_to_id.items()):
+            out_path = os.path.join(out_dir, fname)
+            if not force and os.path.exists(out_path):
+                log.info("  Already exists — skip: %s", fname)
+                continue
+            log.info("  Downloading %s ...", fname)
+            req = service.files().get_media(fileId=fid)
+            with open(out_path, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, req, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
+
+    for yr in dl_years:
+        folder_id = GDRIVE_RAW_S2_FOLDER_IDS.get(yr)
+        if not folder_id:
+            log.warning("No raw S2 GDrive folder for year %s — skipping", yr)
+            continue
+        log.info("Fetching raw S2 for %s ...", yr)
+        _dl_folder(folder_id, os.path.join(base_dir, yr))
 
 
 def run_fetch(force=False, data_dir=None, years=None, **_):

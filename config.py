@@ -28,6 +28,13 @@ STAGE2_RESULTS_CSV          = PROCESSED_DIR / "stage2v2_per_crop_results.csv"
 STAGE3_EXP_C_BANDS          = PROCESSED_DIR / "stage3_exp_c_bands.txt"
 STAGE3_EXP_C_BANDS_PROJECTED = PROCESSED_DIR / "stage3_exp_c_bands_projected.json"
 
+# ── Google Drive — raw S2 per-year folders ────────────────────────────────────
+GDRIVE_RAW_S2_FOLDER_IDS = {
+    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
+    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
+    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
+}
+
 # ── S2 metadata ────────────────────────────────────────────────────────────────
 S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 N_BANDS_PER_DATE = len(S2_BAND_NAMES)
