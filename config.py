@@ -64,6 +64,8 @@ GDRIVE_OAUTH_SECRET = Path(__file__).parent / "ssh" / next(
     "client_secret.json",
 )
 GDRIVE_OAUTH_TOKEN  = Path(__file__).parent / "ssh" / "gdrive_token.pickle"
+GDRIVE_RAW_S2_V2_FOLDER_ID = "1yZmKDjGnXZH6622d8SU4GDUB1z940HwY"
+
 GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
     "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
