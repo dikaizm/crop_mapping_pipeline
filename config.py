@@ -148,7 +148,16 @@ STAGE2V3_SWEEP_PER_CROP_JSON = PROCESSED_DIR / "stage2v3_sweep_per_crop_results.
 STAGE3_EXP_C_V3_JSON         = PROCESSED_DIR / "stage3_exp_c_v3.json"
 STAGE3_EXP_C_V3_BANDS        = PROCESSED_DIR / "stage3_exp_c_v3_bands.txt"
 
-# ── RF selector hyperparameters (Stage 2v2-RF) ─────────────────────────────
+# ── Direct single-stage selectors (no Stage 1 prefilter, no CNN oracle) ────
+# GSI-direct: rank all (date × band) channels by per-crop SI_global, take top-K union
+# RF-direct:  rank all (date × band) channels by per-crop RF importance, take top-K union
+SELECT_TOP_K_PER_CROP    = 20   # channels selected per crop before union
+SELECT_GSI_DIRECT_JSON   = PROCESSED_DIR / "select_gsi_direct.json"
+SELECT_GSI_DIRECT_BANDS  = PROCESSED_DIR / "select_gsi_direct_bands.txt"
+SELECT_RF_DIRECT_JSON    = PROCESSED_DIR / "select_rf_direct.json"
+SELECT_RF_DIRECT_BANDS   = PROCESSED_DIR / "select_rf_direct_bands.txt"
+
+# ── RF selector hyperparameters (Stage 2v2-RF and RF-direct) ───────────────
 RF_N_ESTIMATORS       = 200    # trees in the binary RF oracle
 RF_MAX_PIXELS         = 50_000 # pixel sample cap (crop + rest) to keep RF fast
 RF_IMPORTANCE_THRESH  = 0.10   # keep dates/bands with importance >= 10% of max

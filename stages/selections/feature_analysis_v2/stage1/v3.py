@@ -17,13 +17,8 @@ import crop_mapping_pipeline.stages.feature_analysis_v2 as fa2
 log = logging.getLogger(__name__)
 
 
-def run_stage1v3(s2_paths, cdl_path, data_dir=None):
-    log.info("Stage 1v3: computing per-crop GSI and deriving date + band candidates...")
-
-    fa2.mlflow_setup()
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    stage1_run = mlflow.start_run(run_name=f"stage1v3_{ts}")
-
+def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[str], pd.DataFrame]:
+    """Load one year's S2 + CDL, return (bandnames, dates, sampled pixel DataFrame)."""
     all_bandnames = []
     all_dates_set = []
     for s2_path in s2_paths:
@@ -35,11 +30,9 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         all_bandnames.extend([f"{band}_{date_str}" for band in fa2.S2_BAND_NAMES])
 
     all_dates = sorted(all_dates_set)
-    band_name_to_idx = {name: idx for idx, name in enumerate(all_bandnames)}
     n_channels = len(all_bandnames)
-    log.info(f"S2 files: {len(s2_paths)}  |  {n_channels} channels  |  {len(all_dates)} dates")
+    log.info(f"  {len(s2_paths)} files | {n_channels} channels | {len(all_dates)} dates")
 
-    log.info(f"Loading {len(s2_paths)} S2 files for Stage 1v3 pixel sampling...")
     all_arrays = []
     for s2_path in s2_paths:
         with rasterio.open(s2_path) as src:
@@ -49,7 +42,6 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
 
     stacked = np.concatenate(all_arrays, axis=0)
     _, height, width = stacked.shape
-    log.info(f"Stacked S2: {n_channels} channels × {height} × {width} px")
 
     with rasterio.open(cdl_path) as src:
         cdl = src.read(1).astype(np.int32)
@@ -57,15 +49,11 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
 
     img_2d = stacked.reshape(n_channels, -1).T
     lbl_1d = cdl.flatten()
+    del stacked
 
     valid_mask = np.isin(lbl_1d, fa2.KEEP_CLASSES)
     img_valid = img_2d[valid_mask]
     lbl_valid = lbl_1d[valid_mask]
-
-    log.info(
-        f"Labeled crop pixels: {len(lbl_valid):,} "
-        f"({100 * len(lbl_valid) / len(lbl_1d):.1f}% of {len(lbl_1d):,})"
-    )
 
     rng = np.random.default_rng(42)
     n = min(len(lbl_valid), max(1000, int(len(lbl_valid) * fa2.SAMPLE_FRACTION)))
@@ -73,20 +61,14 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
 
     df = pd.DataFrame(img_valid[idx], columns=all_bandnames)
     df.insert(0, "class_label", lbl_valid[idx].astype(int))
+    log.info(f"  Sampled {len(df):,} pixels from {len(lbl_valid):,} crop pixels")
 
-    log.info(f"Sampled {len(df):,} pixels (SAMPLE_FRACTION={fa2.SAMPLE_FRACTION})")
-    log.info(f"Classes in sample: {sorted(df['class_label'].unique())}")
-    sample_values = df[all_bandnames].values
-    nan_pixels = np.isnan(sample_values).any(axis=1).sum()
-    nan_channels = np.isnan(sample_values).any(axis=0).sum()
-    log.info(
-        f"NaN in sample: {nan_pixels:,} pixels ({100 * nan_pixels / len(df):.1f}%) "
-        f"have ≥1 NaN channel;  {nan_channels}/{n_channels} channels have ≥1 NaN pixel"
-    )
-    del stacked, img_2d
+    return all_bandnames, all_dates, df
 
-    log.info("Computing per-crop binary SI_global (one-vs-all)...")
-    x_all = df[all_bandnames].values.astype(np.float32)
+
+def _compute_gsi(df: pd.DataFrame, bandnames: list[str]) -> dict[int, pd.Series]:
+    """Per-crop binary SI_global (one-vs-all). Returns {crop_id: pd.Series(index=bandnames)}."""
+    x_all = df[bandnames].values.astype(np.float32)
     y_all = df["class_label"].values
 
     gsi_dict = {}
@@ -95,64 +77,130 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         rest_mask = np.isin(y_all, fa2.KEEP_CLASSES) & ~crop_mask
         if crop_mask.sum() < 10:
             log.warning(
-                f"Crop {crop_id} ({fa2.CDL_CLASS_NAMES[crop_id]}) has only "
+                f"  Crop {crop_id} ({fa2.CDL_CLASS_NAMES[crop_id]}) has only "
                 f"{crop_mask.sum()} samples — using zeros"
             )
-            gsi_dict[crop_id] = pd.Series(0.0, index=all_bandnames)
+            gsi_dict[crop_id] = pd.Series(0.0, index=bandnames)
             continue
         x_crop = x_all[crop_mask]
         x_rest = x_all[rest_mask]
         mean_crop = np.nanmean(x_crop, axis=0)
-        std_crop = np.nanstd(x_crop, axis=0)
+        std_crop  = np.nanstd(x_crop, axis=0)
         mean_rest = np.nanmean(x_rest, axis=0)
         si = np.abs(mean_crop - mean_rest) / (std_crop + 1e-9)
-        gsi_dict[crop_id] = pd.Series(si.astype(np.float32), index=all_bandnames)
+        gsi_dict[crop_id] = pd.Series(si.astype(np.float32), index=bandnames)
 
-    gsi_df = pd.DataFrame(gsi_dict)
-    gsi_mean_global = gsi_df.mean(axis=1).sort_values(ascending=False)
-    values = gsi_df.values
-    log.info(f"gsi_df shape: {gsi_df.shape}  (channels × crops)")
+    return gsi_dict
+
+
+def _band_level_gsi(gsi_dict: dict[int, pd.Series], bandnames: list[str]) -> dict[int, pd.Series]:
+    """Collapse date dimension — return {crop_id: Series(index=S2_BAND_NAMES)} with mean SI per band."""
+    result = {}
+    for crop_id, si_series in gsi_dict.items():
+        band_si = {}
+        for band in fa2.S2_BAND_NAMES:
+            keys = [k for k in bandnames if k.startswith(f"{band}_")]
+            band_si[band] = float(si_series[keys].mean()) if keys else 0.0
+        result[crop_id] = pd.Series(band_si)
+    return result
+
+
+def run_stage1v3(
+    years_data: list[tuple[str, list[str], str]],
+    data_dir: str | None = None,
+):
+    """Stage 1v3: per-crop GSI over all training years.
+
+    years_data: [(year, s2_paths, cdl_path), ...]
+      - Date candidates come from the primary year (first entry, 2022) only,
+        so they remain compatible with Stage 2 which operates on 2022 files.
+      - Band ranking averages band-level GSI across all years for robustness.
+    """
+    log.info("Stage 1v3: computing per-crop GSI across training years...")
+    log.info(f"  Years: {[yr for yr, _, _ in years_data]}")
+
+    fa2.mlflow_setup()
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stage1_run = mlflow.start_run(run_name=f"stage1v3_{ts}")
+
+    # ── Per-year GSI ──────────────────────────────────────────────────────────
+    year_gsi: dict[str, dict[int, pd.Series]] = {}       # year → {crop → channel SI}
+    year_band_gsi: dict[str, dict[int, pd.Series]] = {}  # year → {crop → band SI}
+    primary_bandnames: list[str] = []
+    primary_dates: list[str] = []
+    primary_band_name_to_idx: dict[str, int] = {}
+    total_files = 0
+
+    for i, (year, s2_paths, cdl_path) in enumerate(years_data):
+        log.info(f"Loading year {year} ({len(s2_paths)} files)...")
+        bandnames, dates, df = _sample_year(s2_paths, cdl_path)
+        gsi_dict = _compute_gsi(df, bandnames)
+        year_gsi[year] = gsi_dict
+        year_band_gsi[year] = _band_level_gsi(gsi_dict, bandnames)
+        total_files += len(s2_paths)
+
+        if i == 0:
+            primary_bandnames = bandnames
+            primary_dates = dates
+            primary_band_name_to_idx = {name: idx for idx, name in enumerate(bandnames)}
+            primary_df = df  # keep for logging stats
+
+    n_channels = len(primary_bandnames)
+    log.info(f"Primary year channels: {n_channels}  |  dates: {len(primary_dates)}")
+
+    # ── Date ranking — primary year only ─────────────────────────────────────
+    primary_gsi = year_gsi[years_data[0][0]]
+    primary_gsi_df = pd.DataFrame(primary_gsi)
+    gsi_mean_global = primary_gsi_df.mean(axis=1).sort_values(ascending=False)
+
+    values = primary_gsi_df.values
     log.info(
-        f"  SI range:  min={np.nanmin(values):.4f}  p25={np.nanpercentile(values, 25):.4f}  "
-        f"median={np.nanmedian(values):.4f}  p75={np.nanpercentile(values, 75):.4f}  "
-        f"p95={np.nanpercentile(values, 95):.4f}  max={np.nanmax(values):.4f}"
+        f"Primary GSI  SI range:  min={np.nanmin(values):.4f}  "
+        f"median={np.nanmedian(values):.4f}  max={np.nanmax(values):.4f}"
     )
-    log.info(f"  Top-K selection: TOP_DATES_PER_CROP={fa2.TOP_DATES_PER_CROP}  TOP_BANDS_PER_CROP={fa2.TOP_BANDS_PER_CROP}  (no threshold — always selects top-K)")
+    log.info(
+        f"Top-K selection: TOP_DATES_PER_CROP={fa2.TOP_DATES_PER_CROP}  "
+        f"TOP_BANDS_PER_CROP={fa2.TOP_BANDS_PER_CROP}"
+    )
 
-    date_candidates_per_crop = {}
-    band_candidates_per_crop = {}
+    date_candidates_per_crop: dict[str, list[str]] = {}
 
     for crop_id in fa2.KEEP_CLASSES:
         crop_key = str(crop_id)
-        si_crop = gsi_df[crop_id] if crop_id in gsi_df.columns else gsi_mean_global
-        if crop_id not in gsi_df.columns:
-            log.warning(
-                f"Crop {crop_id} ({fa2.CDL_CLASS_NAMES[crop_id]}) not in sample — "
-                "falling back to global mean ranking"
-            )
+        si_crop = primary_gsi_df[crop_id] if crop_id in primary_gsi_df.columns else gsi_mean_global
 
         date_si = {}
-        for date in all_dates:
+        for date in primary_dates:
             band_keys = [f"{band}_{date}" for band in fa2.S2_BAND_NAMES if f"{band}_{date}" in si_crop.index]
             date_si[date] = float(si_crop[band_keys].mean()) if band_keys else 0.0
         sorted_dates = sorted(date_si.items(), key=lambda item: item[1], reverse=True)
-        selected_dates = [date for date, _ in sorted_dates[: fa2.TOP_DATES_PER_CROP]]
-        date_candidates_per_crop[crop_key] = selected_dates
+        date_candidates_per_crop[crop_key] = [d for d, _ in sorted_dates[: fa2.TOP_DATES_PER_CROP]]
 
-        band_si = {}
+    # ── Band ranking — averaged across all years ──────────────────────────────
+    band_candidates_per_crop: dict[str, list[str]] = {}
+    n_years = len(year_band_gsi)
+
+    for crop_id in fa2.KEEP_CLASSES:
+        crop_key = str(crop_id)
+        avg_band_si: dict[str, float] = {}
         for band in fa2.S2_BAND_NAMES:
-            band_keys = [f"{band}_{date}" for date in selected_dates if f"{band}_{date}" in si_crop.index]
-            band_si[band] = float(si_crop[band_keys].mean()) if band_keys else 0.0
-        sorted_bands = sorted(band_si.items(), key=lambda item: item[1], reverse=True)
-        band_candidates_per_crop[crop_key] = [band for band, _ in sorted_bands[: fa2.TOP_BANDS_PER_CROP]]
+            scores = []
+            for yr_band_gsi in year_band_gsi.values():
+                if crop_id in yr_band_gsi and band in yr_band_gsi[crop_id].index:
+                    scores.append(float(yr_band_gsi[crop_id][band]))
+            avg_band_si[band] = float(np.mean(scores)) if scores else 0.0
+
+        sorted_bands = sorted(avg_band_si.items(), key=lambda item: item[1], reverse=True)
+        band_candidates_per_crop[crop_key] = [b for b, _ in sorted_bands[: fa2.TOP_BANDS_PER_CROP]]
 
         log.info(
             f"  {fa2.CDL_CLASS_NAMES[crop_id]:20s}: "
-            f"top {len(selected_dates)} dates={selected_dates[:3]}...  "
-            f"top {len(band_candidates_per_crop[crop_key])} bands={band_candidates_per_crop[crop_key][:3]}... "
-            f"(scored within {len(selected_dates)}-date window)"
+            f"top dates={date_candidates_per_crop[crop_key][:3]}...  "
+            f"top bands={band_candidates_per_crop[crop_key][:3]}..."
+            f"  (band GSI averaged over {n_years} year(s))"
         )
 
+    # ── Save outputs ──────────────────────────────────────────────────────────
     stage1_path = fa2.STAGE1V3_CANDIDATES_JSON
     if data_dir:
         stage1_path = pathlib.Path(data_dir) / "s2" / "2022" / "stage1v3_candidates.json"
@@ -161,7 +209,9 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
     run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     payload = {
         "run_ts": run_ts,
-        "all_dates": all_dates,
+        "years": [yr for yr, _, _ in years_data],
+        "primary_year": years_data[0][0],
+        "all_dates": primary_dates,
         "date_candidates_per_crop": date_candidates_per_crop,
         "band_candidates_per_crop": band_candidates_per_crop,
     }
@@ -169,47 +219,37 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         json.dump(payload, f, indent=2)
     log.info(f"Stage 1v3 candidates saved: {stage1_path}")
 
-    fa2.save_exp_d_bands(date_candidates_per_crop, band_candidates_per_crop, band_name_to_idx, data_dir=data_dir)
+    fa2.save_exp_d_bands(date_candidates_per_crop, band_candidates_per_crop,
+                         primary_band_name_to_idx, data_dir=data_dir)
 
-    mlflow.log_params(
-        {
-            "stage": "1v3_date_band_ranking",
-            "version": "v3",
-            "n_images": len(s2_paths),
-            "n_dates": len(all_dates),
-            "total_channels": n_channels,
-            "sample_fraction": fa2.SAMPLE_FRACTION,
-            "n_sampled": len(df),
-            "top_dates_per_crop": fa2.TOP_DATES_PER_CROP,
-            "top_bands_per_crop": fa2.TOP_BANDS_PER_CROP,
-            "max_bands_per_crop": fa2.MAX_BANDS_PER_CROP,
-            "keep_classes": str(fa2.KEEP_CLASSES),
-        }
-    )
+    # ── MLflow logging ────────────────────────────────────────────────────────
+    nan_pixels = np.isnan(primary_df[primary_bandnames].values).any(axis=1).sum()
+    mlflow.log_params({
+        "stage":             "1v3_date_band_ranking",
+        "version":           "v3",
+        "years":             str([yr for yr, _, _ in years_data]),
+        "primary_year":      years_data[0][0],
+        "n_train_years":     n_years,
+        "n_images_total":    total_files,
+        "n_dates_primary":   len(primary_dates),
+        "total_channels":    n_channels,
+        "sample_fraction":   fa2.SAMPLE_FRACTION,
+        "n_sampled_primary": len(primary_df),
+        "nan_pixels":        int(nan_pixels),
+        "top_dates_per_crop": fa2.TOP_DATES_PER_CROP,
+        "top_bands_per_crop": fa2.TOP_BANDS_PER_CROP,
+        "keep_classes":      str(fa2.KEEP_CLASSES),
+    })
 
     rows = []
     for crop_id in fa2.KEEP_CLASSES:
         crop_key = str(crop_id)
         for rank, date in enumerate(date_candidates_per_crop[crop_key], start=1):
-            rows.append(
-                {
-                    "crop_id": crop_id,
-                    "crop_name": fa2.CDL_CLASS_NAMES[crop_id],
-                    "type": "date",
-                    "rank": rank,
-                    "value": date,
-                }
-            )
+            rows.append({"crop_id": crop_id, "crop_name": fa2.CDL_CLASS_NAMES[crop_id],
+                         "type": "date", "rank": rank, "value": date})
         for rank, band in enumerate(band_candidates_per_crop[crop_key], start=1):
-            rows.append(
-                {
-                    "crop_id": crop_id,
-                    "crop_name": fa2.CDL_CLASS_NAMES[crop_id],
-                    "type": "band",
-                    "rank": rank,
-                    "value": band,
-                }
-            )
+            rows.append({"crop_id": crop_id, "crop_name": fa2.CDL_CLASS_NAMES[crop_id],
+                         "type": "band", "rank": rank, "value": band})
 
     with tempfile.TemporaryDirectory() as tmp:
         artifact_path = pathlib.Path(tmp) / "stage1v3_per_crop_candidates.csv"
@@ -222,10 +262,10 @@ def run_stage1v3(s2_paths, cdl_path, data_dir=None):
         mlflow.log_artifact(str(fa2.STAGE3_EXP_D_BANDS))
 
     heatmap_dir = fa2.FIGURES_DIR / "stage1v3_gsi"
-    for heatmap_path in fa2.plot_gsi_heatmaps(gsi_df, all_dates, heatmap_dir):
+    for heatmap_path in fa2.plot_gsi_heatmaps(primary_gsi_df, primary_dates, heatmap_dir):
         mlflow.log_artifact(str(heatmap_path))
 
     mlflow.end_run(status="FINISHED")
     log.info(f"Stage 1v3 MLflow run_id: {stage1_run.info.run_id}")
 
-    return date_candidates_per_crop, band_candidates_per_crop, band_name_to_idx, all_dates
+    return date_candidates_per_crop, band_candidates_per_crop, primary_band_name_to_idx, primary_dates

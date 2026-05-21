@@ -82,6 +82,11 @@ from crop_mapping_pipeline.config import (
     STAGE3_EXP_C_V3_JSON as _STAGE3_EXP_C_V3_JSON,
     STAGE3_EXP_D_BANDS as _STAGE3_EXP_D_BANDS,
     STAGE3_EXP_D_JSON as _STAGE3_EXP_D_JSON,
+    SELECT_GSI_DIRECT_JSON,
+    SELECT_GSI_DIRECT_BANDS,
+    SELECT_RF_DIRECT_JSON,
+    SELECT_RF_DIRECT_BANDS,
+    SELECT_TOP_K_PER_CROP,
     TEST_YEAR,
     TOP_BANDS_PER_CROP,
     TOP_DATES_PER_CROP,
@@ -160,12 +165,33 @@ def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, in
 
 
 def get_train_year_inputs() -> tuple[str, list[str], str]:
+    """Primary training year (2022) — used by Stage 2 and Stage 2v3."""
     s2_year = TRAIN_YEARS[0]
     s2_files = sorted(glob(str(S2_PROCESSED_DIR / s2_year / "*_processed.tif")))
     assert s2_files, f"No S2 files for year {s2_year} in {S2_PROCESSED_DIR}"
     cdl_path = str(CDL_BY_YEAR[s2_year])
     assert os.path.exists(cdl_path), f"CDL not found: {cdl_path}"
     return s2_year, s2_files, cdl_path
+
+
+def get_stage1_inputs() -> list[tuple[str, list[str], str]]:
+    """All training years — used by Stage 1 for more robust GSI band ranking.
+    Date candidates always come from TRAIN_YEARS[0] (2022) to stay compatible with Stage 2.
+    Returns [(year, s2_files, cdl_path), ...] for each year that has data on disk.
+    """
+    result = []
+    for yr in TRAIN_YEARS:
+        s2_files = sorted(glob(str(S2_PROCESSED_DIR / yr / "*_processed.tif")))
+        cdl_path = str(CDL_BY_YEAR[yr])
+        if not s2_files:
+            log.warning(f"Stage 1: no S2 files for year {yr} — skipping")
+            continue
+        if not os.path.exists(cdl_path):
+            log.warning(f"Stage 1: CDL not found for year {yr} ({cdl_path}) — skipping")
+            continue
+        result.append((yr, s2_files, cdl_path))
+    assert result, f"No S2 files found for any training year in {S2_PROCESSED_DIR}"
+    return result
 
 
 def _get_device() -> str:
@@ -685,6 +711,13 @@ from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage1.v3 impor
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2 import run_stage2v2
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2_rf import run_stage2v2_rf
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v3 import run_stage2v3
+from crop_mapping_pipeline.stages.selections.gsi_direct import run_gsi_direct
+from crop_mapping_pipeline.stages.selections.rf_direct import run_rf_direct
+
+_DIRECT_OUTPUT_MAP = {
+    "gsi_direct": (SELECT_GSI_DIRECT_JSON, SELECT_GSI_DIRECT_BANDS),
+    "rf_direct":  (SELECT_RF_DIRECT_JSON,  SELECT_RF_DIRECT_BANDS),
+}
 
 
 def main(force: bool = False, data_dir: str = None, stage: str = "all", selector: str = "cnn",
@@ -704,8 +737,8 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
             log.info("Use --force to re-run.")
         else:
             log.info(f"Device: {device_label()}")
-            _s2_year, s2_files, cdl_path = get_train_year_inputs()
-            run_stage1v3(s2_files, cdl_path, data_dir=data_dir)
+            years_data = get_stage1_inputs()
+            run_stage1v3(years_data, data_dir=data_dir)
             log.info("Stage 1v3 complete.")
         if stage == "1":
             return
@@ -766,14 +799,43 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
         log.info("Band projection complete.")
         return
 
+    if stage == "select":
+        if selector not in _DIRECT_OUTPUT_MAP:
+            raise ValueError(
+                f"--selector must be 'gsi_direct' or 'rf_direct' for --stage select, got {selector!r}"
+            )
+        json_out, txt_out = _DIRECT_OUTPUT_MAP[selector]
+        if data_dir:
+            from pathlib import Path as _Path
+            json_out = _Path(data_dir) / json_out.name
+            txt_out  = _Path(data_dir) / txt_out.name
+        if not force and json_out.exists():
+            log.info(f"Direct selection output already exists: {json_out}")
+            log.info("Use --force to re-run.")
+            return
+        years_data = get_stage1_inputs()
+        fn = run_gsi_direct if selector == "gsi_direct" else run_rf_direct
+        fn(years_data, top_k=SELECT_TOP_K_PER_CROP, data_dir=data_dir)
+        log.info(f"Direct selection ({selector}) complete.")
+        return
+
     log.info("Feature analysis v2 complete.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Feature analysis v2: Stage 1v3 + Stage 2v2/v3")
-    parser.add_argument("--stage", choices=["1", "2", "2v3", "all", "project"], default="all")
-    parser.add_argument("--selector", choices=["cnn", "rf"], default="cnn",
-                        help="Selector for Stage 2v2 (cnn or rf). Ignored for --stage 2v3.")
+    parser.add_argument(
+        "--stage",
+        choices=["1", "2", "2v3", "all", "project", "select"],
+        default="all",
+        help="'select' runs a single-stage direct selector (gsi_direct or rf_direct).",
+    )
+    parser.add_argument(
+        "--selector",
+        choices=["cnn", "rf", "gsi_direct", "rf_direct"],
+        default="cnn",
+        help="Selector: cnn/rf for Stage 2v2; gsi_direct/rf_direct for --stage select.",
+    )
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory")
     parser.add_argument("--mlflow-exp", choices=["v3"], default=None,
