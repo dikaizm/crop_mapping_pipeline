@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent   # crop_mapping_pipeline/
 
 # ── Data paths ─────────────────────────────────────────────────────────────────
-PROCESSED_DIR    = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DIR    = Path("/Volumes/T7/research-crop-mapping-geoai") / "data" / "processed_v2"
 S2_PROCESSED_DIR = PROCESSED_DIR / "s2"
 CDL_DIR          = PROCESSED_DIR / "cdl"
 MODELS_DIR       = PROJECT_ROOT / "ml_models"

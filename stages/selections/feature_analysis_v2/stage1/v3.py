@@ -18,7 +18,9 @@ log = logging.getLogger(__name__)
 
 
 def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[str], pd.DataFrame]:
-    """Load one year's S2 + CDL, return (bandnames, dates, sampled pixel DataFrame)."""
+    """Load one year's S2 + CDL, return (bandnames, dates, sampled pixel DataFrame).
+    Reads one S2 file at a time to avoid stacking all 25 files (~28 GB) into RAM.
+    """
     all_bandnames = []
     all_dates_set = []
     for s2_path in s2_paths:
@@ -33,35 +35,45 @@ def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[st
     n_channels = len(all_bandnames)
     log.info(f"  {len(s2_paths)} files | {n_channels} channels | {len(all_dates)} dates")
 
-    all_arrays = []
-    for s2_path in s2_paths:
-        with rasterio.open(s2_path) as src:
-            arr = src.read().astype(np.float32)
-        arr[arr == fa2.S2_NODATA] = np.nan
-        all_arrays.append(arr)
-
-    stacked = np.concatenate(all_arrays, axis=0)
-    _, height, width = stacked.shape
-
+    # Read CDL once to get valid pixel indices
     with rasterio.open(cdl_path) as src:
         cdl = src.read(1).astype(np.int32)
-    assert cdl.shape == (height, width), f"CDL/S2 shape mismatch: {cdl.shape} vs ({height},{width})"
+        height, width = cdl.shape
 
-    img_2d = stacked.reshape(n_channels, -1).T
     lbl_1d = cdl.flatten()
-    del stacked
+    del cdl
 
     valid_mask = np.isin(lbl_1d, fa2.KEEP_CLASSES)
-    img_valid = img_2d[valid_mask]
+    valid_indices = np.where(valid_mask)[0]
     lbl_valid = lbl_1d[valid_mask]
+    del lbl_1d
 
     rng = np.random.default_rng(42)
-    n = min(len(lbl_valid), max(1000, int(len(lbl_valid) * fa2.SAMPLE_FRACTION)))
-    idx = rng.choice(len(lbl_valid), n, replace=False)
+    n = min(len(valid_indices), max(1000, int(len(valid_indices) * fa2.SAMPLE_FRACTION)))
+    chosen = rng.choice(len(valid_indices), n, replace=False)
+    sample_flat_idx = valid_indices[chosen]
+    lbl_sample = lbl_valid[chosen]
+    del valid_indices, lbl_valid
 
-    df = pd.DataFrame(img_valid[idx], columns=all_bandnames)
-    df.insert(0, "class_label", lbl_valid[idx].astype(int))
-    log.info(f"  Sampled {len(df):,} pixels from {len(lbl_valid):,} crop pixels")
+    log.info(f"  Sampled {n:,} pixels — reading {len(s2_paths)} files one at a time...")
+
+    # Fill data column-by-column, one S2 file at a time
+    data = np.full((n, n_channels), np.nan, dtype=np.float32)
+    col = 0
+    for s2_path in s2_paths:
+        with rasterio.open(s2_path) as src:
+            n_file_bands = src.count
+            arr = src.read().astype(np.float32)
+        arr[arr == fa2.S2_NODATA] = np.nan
+        arr_2d = arr.reshape(n_file_bands, -1).T
+        del arr
+        data[:, col:col + n_file_bands] = arr_2d[sample_flat_idx]
+        del arr_2d
+        col += n_file_bands
+
+    df = pd.DataFrame(data, columns=all_bandnames)
+    df.insert(0, "class_label", lbl_sample.astype(int))
+    log.info(f"  DataFrame shape: {df.shape}")
 
     return all_bandnames, all_dates, df
 
