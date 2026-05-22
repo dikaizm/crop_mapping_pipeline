@@ -1236,7 +1236,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["A", "A_v2", "A_v3", "B", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2"],
+        choices=["A", "A_v2", "A_v3", "B", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
         default=["A", "B", "C"],
         help=(
             "Which experiments to run (default: A B C). "
