@@ -134,6 +134,11 @@ from crop_mapping_pipeline.stages.experiments import (
     build_exp_D_indices,
     build_exp_D_v2_indices,
 )
+from crop_mapping_pipeline.stages.experiments.exp_select_direct import build_direct_indices
+from crop_mapping_pipeline.config import (
+    SELECT_GSI_DIRECT_JSON,
+    SELECT_RF_DIRECT_JSON,
+)
 
 
 # ── Class weights ─────────────────────────────────────────────────────────────
@@ -1047,6 +1052,26 @@ def main(
         )
         log.info(f"Exp C_v3: RF forward-selection, {len(exp_C_v3_rf_idx)} channels")
 
+    # GSI-direct: single-stage all-channel GSI ranking
+    exp_gsi_direct_idx = exp_gsi_direct_names = None
+    if exps and "gsi_direct" in exps:
+        gsi_json = SELECT_GSI_DIRECT_JSON if not data_dir else \
+            Path(data_dir) / SELECT_GSI_DIRECT_JSON.name
+        exp_gsi_direct_idx, exp_gsi_direct_names = build_direct_indices(
+            gsi_json, mmdd_to_date, local_band_to_idx, selector_name="gsi_direct"
+        )
+        log.info(f"Exp gsi_direct: {len(exp_gsi_direct_idx)} channels")
+
+    # RF-direct: single-stage all-channel RF importance ranking
+    exp_rf_direct_idx = exp_rf_direct_names = None
+    if exps and "rf_direct" in exps:
+        rf_json = SELECT_RF_DIRECT_JSON if not data_dir else \
+            Path(data_dir) / SELECT_RF_DIRECT_JSON.name
+        exp_rf_direct_idx, exp_rf_direct_names = build_direct_indices(
+            rf_json, mmdd_to_date, local_band_to_idx, selector_name="rf_direct"
+        )
+        log.info(f"Exp rf_direct: {len(exp_rf_direct_idx)} channels")
+
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
     log.info("Class weights computed")
@@ -1073,6 +1098,8 @@ def main(
         exp_A_v3_variants=exp_A_v3_variants,
         exp_B_v3_variants=exp_B_v3_variants,
         exp_C_v3_rf_idx=exp_C_v3_rf_idx, exp_C_v3_rf_names=exp_C_v3_rf_names,
+        exp_gsi_direct_idx=exp_gsi_direct_idx, exp_gsi_direct_names=exp_gsi_direct_names,
+        exp_rf_direct_idx=exp_rf_direct_idx,   exp_rf_direct_names=exp_rf_direct_names,
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)

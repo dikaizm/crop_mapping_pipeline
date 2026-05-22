@@ -61,6 +61,10 @@ def build_registry(
     exp_D_idx  = None, exp_D_names  = None,
     # ── Exp D_v2 (Stage 1v2 channel union) ────────────────────────────────
     exp_D_v2_idx = None, exp_D_v2_names = None,
+    # ── GSI-direct (single-stage, all channels ranked by SI_global) ───────
+    exp_gsi_direct_idx = None, exp_gsi_direct_names = None,
+    # ── RF-direct (single-stage, all channels ranked by RF importance) ────
+    exp_rf_direct_idx  = None, exp_rf_direct_names  = None,
     # ── Exp A_v2 (per-window single-date) — V2 ─────────────────────────────
     exp_A_v2_variants = None,              # {label: (idx, names, date)}
     # ── V3 experiments ─────────────────────────────────────────────────────
@@ -186,6 +190,28 @@ def build_registry(
             band_indices= exp_D_v2_idx,
             band_names  = exp_D_v2_names,
             default_loss= "v1",
+        )
+
+    # ── Single-stage direct selectors ───────────────────────────────────────
+
+    if exp_gsi_direct_idx is not None:
+        reg["gsi_direct"] = ExperimentConfig(
+            key         = "gsi_direct",
+            description = f"GSI-direct all-channel ranking top-K union={len(exp_gsi_direct_idx)}ch — single-stage baseline",
+            band_indices= exp_gsi_direct_idx,
+            band_names  = exp_gsi_direct_names,
+            default_loss= "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
+        )
+
+    if exp_rf_direct_idx is not None:
+        reg["rf_direct"] = ExperimentConfig(
+            key         = "rf_direct",
+            description = f"RF-direct all-channel ranking top-K union={len(exp_rf_direct_idx)}ch — single-stage proposed",
+            band_indices= exp_rf_direct_idx,
+            band_names  = exp_rf_direct_names,
+            default_loss= "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
         )
 
     # ── C_v3 sweep: one entry per (phase, k) — V2 experiment (legacy) ─────────
