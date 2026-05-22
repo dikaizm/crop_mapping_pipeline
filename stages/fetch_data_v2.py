@@ -44,8 +44,10 @@ log = logging.getLogger(__name__)
 
 ALL_YEARS = ["2022", "2023", "2024"]
 
-# Matches: S2H_{year}_{YYYY_MM_DD}-{10d}-{10d}.tif
+# Matches raw tiles:      S2H_{year}_{YYYY_MM_DD}-{10d}-{10d}.tif
 _TILE_RE = re.compile(r"^S2H_(\d{4})_\d{4}_\d{2}_\d{2}-\d{10}-\d{10}\.tif$")
+# Matches processed files: S2H_{year}_{YYYY_MM_DD}_processed.tif[.*]
+_PROC_RE = re.compile(r"^S2H_(\d{4})_\d{4}_\d{2}_\d{2}_processed\.tif")
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────────
@@ -109,8 +111,8 @@ def list_folder(folder_id: str, years: list = None) -> dict:
 
 
 def _year_from_filename(fname: str) -> str:
-    """Extract year string from tile filename, e.g. 'S2H_2022_...' → '2022'."""
-    m = _TILE_RE.match(fname)
+    """Extract year string from filename (raw tile or processed)."""
+    m = _TILE_RE.match(fname) or _PROC_RE.match(fname)
     return m.group(1) if m else ""
 
 
@@ -435,12 +437,11 @@ if __name__ == "__main__":
             if year not in GDRIVE_PROCESSED_S2_FOLDER_IDS:
                 log.warning(f"No processed folder ID for year {year} — skipping")
                 continue
-            year_out = str(Path(base_out) / year)
-            log.info(f"=== Downloading processed S2 for {year} → {year_out} ===")
+            log.info(f"=== Downloading processed S2 for {year} → {base_out}/{year}/ ===")
             main(
                 folder_id   = GDRIVE_PROCESSED_S2_FOLDER_IDS[year],
-                output_dir  = year_out,
-                years       = None,
+                output_dir  = base_out,
+                years       = [year],
                 overwrite   = args.overwrite,
                 verify_only = args.verify_only,
                 list_files  = args.list_files,
