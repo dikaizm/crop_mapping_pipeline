@@ -484,21 +484,28 @@ def run_experiment(
 
             model.train()
             train_loss_acc, n_batches = 0.0, 0
+            _logged_vram = epoch > 0   # log VRAM once on first batch of epoch 0
             for imgs, masks in train_dl:
                 imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
                 imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
                 optimizer.zero_grad()
                 logits = model(imgs)
-                
+
                 if isinstance(criterion, PhenologyAwareLoss):
                     loss = criterion(logits, masks, imgs)
                 else:
                     loss = criterion(logits, masks)
-                
+
                 loss.backward()
                 optimizer.step()
                 train_loss_acc += loss.item()
                 n_batches += 1
+
+                if not _logged_vram and torch.cuda.is_available():
+                    alloc  = torch.cuda.memory_allocated()  / 1024**3
+                    reserv = torch.cuda.memory_reserved()   / 1024**3
+                    log.info(f"  [VRAM] allocated={alloc:.2f} GB  reserved={reserv:.2f} GB")
+                    _logged_vram = True
 
             train_loss = train_loss_acc / n_batches
             val_m = validate_one_epoch(model, val_dl, criterion, DEVICE, NUM_CLASSES)
