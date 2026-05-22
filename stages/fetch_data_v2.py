@@ -75,10 +75,10 @@ def _build_drive_service():
 
 # ── Folder listing ──────────────────────────────────────────────────────────────
 
-def list_folder(folder_id: str, years: list = None) -> dict:
+def list_folder(folder_id: str, years: list = None, dates: list = None) -> dict:
     """
     Return {filename: file_id} for all files in the flat GDrive folder.
-    Optionally filter to only files whose filename matches the given years.
+    Optionally filter by years and/or dates (YYYY-MM-DD or YYYY_MM_DD).
     """
     service    = _build_drive_service()
     name_to_id = {}
@@ -100,12 +100,19 @@ def list_folder(folder_id: str, years: list = None) -> dict:
 
     if years:
         years_set = set(years)
-        filtered  = {
+        name_to_id = {
             name: fid for name, fid in name_to_id.items()
             if _year_from_filename(name) in years_set
         }
-        log.info("  %d file(s) match years=%s", len(filtered), years)
-        return filtered
+        log.info("  %d file(s) match years=%s", len(name_to_id), years)
+
+    if dates:
+        dates_set = {_normalize_date(d) for d in dates}
+        name_to_id = {
+            name: fid for name, fid in name_to_id.items()
+            if _date_from_filename(name) in dates_set
+        }
+        log.info("  %d file(s) match dates=%s", len(name_to_id), dates)
 
     return name_to_id
 
@@ -114,6 +121,17 @@ def _year_from_filename(fname: str) -> str:
     """Extract year string from filename (raw tile or processed)."""
     m = _TILE_RE.match(fname) or _PROC_RE.match(fname)
     return m.group(1) if m else ""
+
+
+def _date_from_filename(fname: str) -> str:
+    """Extract YYYY_MM_DD from raw tile or processed filename."""
+    m = re.search(r"_(\d{4}_\d{2}_\d{2})[-_]", fname)
+    return m.group(1) if m else ""
+
+
+def _normalize_date(d: str) -> str:
+    """Normalize user date input to YYYY_MM_DD (accepts YYYY-MM-DD or YYYY_MM_DD)."""
+    return d.replace("-", "_")
 
 
 def _date_key_from_filename(fname: str) -> str:
@@ -146,7 +164,8 @@ def list_dates_by_year(folder_id: str, years: list = None) -> dict:
 # ── Download ────────────────────────────────────────────────────────────────────
 
 def download_folder_by_year(folder_id: str, output_dir: str,
-                            years: list = None, overwrite: bool = False) -> list:
+                            years: list = None, dates: list = None,
+                            overwrite: bool = False) -> list:
     """
     Download all tile files from a flat GDrive folder, sorted into year subdirs:
         {output_dir}/{year}/S2H_{year}_{date}-{row}-{col}.tif
@@ -155,7 +174,7 @@ def download_folder_by_year(folder_id: str, output_dir: str,
     """
     from googleapiclient.http import MediaIoBaseDownload
 
-    name_to_id = list_folder(folder_id, years=years)
+    name_to_id = list_folder(folder_id, years=years, dates=dates)
 
     if not name_to_id:
         log.warning("  No files to download.")
@@ -354,6 +373,7 @@ def main(
     folder_id   : str,
     output_dir  : str,
     years       : list = None,
+    dates       : list = None,
     overwrite   : bool = False,
     verify_only : bool = False,
     list_files  : bool = False,
@@ -361,7 +381,7 @@ def main(
 ) -> None:
 
     if list_files:
-        name_to_id = list_folder(folder_id, years=years)
+        name_to_id = list_folder(folder_id, years=years, dates=dates)
         print(f"\n{len(name_to_id)} file(s) in folder {folder_id}:")
         for name in sorted(name_to_id):
             print(f"  {name}")
@@ -372,7 +392,7 @@ def main(
         sys.exit(0 if ok else 1)
 
     download_folder_by_year(folder_id, output_dir,
-                            years=years, overwrite=overwrite)
+                            years=years, dates=dates, overwrite=overwrite)
     verify(output_dir, years=years)
 
     if delete:
@@ -424,6 +444,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--years", nargs="+", default=None, choices=ALL_YEARS, metavar="YEAR",
         help="Only download tiles for these years (default: all years in the folder).",
+    )
+    parser.add_argument(
+        "--dates", nargs="+", default=None, metavar="DATE",
+        help=(
+            "Only download files for these dates (YYYY-MM-DD or YYYY_MM_DD). "
+            "Works with both raw and --processed modes. "
+            "Example: --dates 2022-01-16 2023-01-01"
+        ),
     )
     parser.add_argument(
         "--overwrite", action="store_true",
@@ -497,6 +525,7 @@ if __name__ == "__main__":
                 folder_id   = GDRIVE_PROCESSED_S2_FOLDER_IDS[year],
                 output_dir  = base_out,
                 years       = [year],
+                dates       = args.dates,
                 overwrite   = args.overwrite,
                 verify_only = args.verify_only,
                 list_files  = args.list_files,
@@ -523,6 +552,7 @@ if __name__ == "__main__":
         folder_id   = folder_id,
         output_dir  = output_dir,
         years       = args.years,
+        dates       = args.dates,
         overwrite   = args.overwrite,
         verify_only = args.verify_only,
         list_files  = args.list_files,
