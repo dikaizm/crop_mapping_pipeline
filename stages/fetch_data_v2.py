@@ -411,7 +411,7 @@ if __name__ == "__main__":
         "--processed", action="store_true",
         help=(
             "Download processed S2 files (GDRIVE_PROCESSED_V2_FOLDER_ID) "
-            "into data/processed_v2/ instead of raw files."
+            "into data/processed/ instead of raw files."
         ),
     )
     args = parser.parse_args()
@@ -451,7 +451,7 @@ if __name__ == "__main__":
     if args.output_dir:
         output_dir = args.output_dir
     elif args.processed:
-        output_dir = str(_ROOT / "data" / "processed_v2")
+        output_dir = str(_ROOT / "data" / "processed")
     else:
         output_dir = str(_ROOT / "data" / "raw" / "s2")
 
