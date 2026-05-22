@@ -151,13 +151,13 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
 
 # ── NoData assignment ───────────────────────────────────────────────────────────
 
-def assign_nodata(in_path: str, out_path: str) -> str:
+def assign_nodata(in_path: str, out_path: str, overwrite: bool = False) -> str:
     """
     Assign NoData (negative / NaN / Inf → S2_NODATA) and cast to float32.
-    Skips if out_path already exists.
+    Skips if out_path already exists (unless overwrite=True).
     Returns out_path.
     """
-    if Path(out_path).exists():
+    if Path(out_path).exists() and not overwrite:
         log.info("  Already processed: %s", Path(out_path).name)
         return out_path
 
@@ -424,6 +424,7 @@ def process_date_batch(
     s2_out_dir,
     merge_tmp_dir,
     keep_merged  : bool = False,
+    overwrite    : bool = False,
 ) -> tuple:
     """
     Merge + assign NoData for a subset of dates already downloaded locally.
@@ -459,7 +460,7 @@ def process_date_batch(
         processed_path = str(Path(s2_out_dir)   / f"{date_key}_processed.tif")
 
         merge_tiles(tile_paths, merged_path)
-        assign_nodata(merged_path, processed_path)
+        assign_nodata(merged_path, processed_path, overwrite=overwrite)
         processed_paths.append(processed_path)
 
         if s2_ref_path is None:
@@ -519,6 +520,7 @@ def main(
     keep_merged        : bool = False,
     flat_dir           : bool = False,  # raw_s2_dir has no year subdir
     shutdown           : bool = False,
+    overwrite          : bool = False,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
 
@@ -565,6 +567,7 @@ def main(
             s2_out_dir    = s2_out_dir,
             merge_tmp_dir = merge_tmp_dir,
             keep_merged   = keep_merged,
+            overwrite     = overwrite,
         )
         log.info("  Processed %d date(s) for year %s", len(all_processed), yr)
 
@@ -689,6 +692,10 @@ if __name__ == "__main__":
         help="GDrive folder ID for processed CDL output.",
     )
     parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Re-process dates that already have a *_processed.tif output.",
+    )
+    parser.add_argument(
         "--skip-upload", action="store_true",
         help="Process files but do not upload to Google Drive.",
     )
@@ -762,4 +769,5 @@ if __name__ == "__main__":
         keep_merged   = args.keep_merged,
         flat_dir      = args.flat_dir,
         shutdown      = args.shutdown,
+        overwrite     = args.overwrite,
     )
