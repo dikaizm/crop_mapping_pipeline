@@ -264,6 +264,42 @@ def download_dates(folder_id: str, output_dir: str,
     return downloaded
 
 
+# ── Flat download (CDL / non-tiled files) ───────────────────────────────────────
+
+def download_flat(folder_id: str, output_dir: str, overwrite: bool = False) -> list:
+    """Download all files from a flat GDrive folder into output_dir (no year subdir)."""
+    from googleapiclient.http import MediaIoBaseDownload
+
+    name_to_id = list_folder(folder_id)
+    if not name_to_id:
+        log.warning("  No files found in folder.")
+        return []
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    service    = _build_drive_service()
+    downloaded = []
+    skipped    = 0
+
+    for fname in sorted(name_to_id):
+        out_path = Path(output_dir) / fname
+        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
+            log.info("  Skip (exists): %s", fname)
+            skipped += 1
+            continue
+        log.info("  Downloading → %s  (id=%s)", fname, name_to_id[fname])
+        req = service.files().get_media(fileId=name_to_id[fname])
+        with open(out_path, "wb") as fh:
+            dl = MediaIoBaseDownload(fh, req, chunksize=32 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+        downloaded.append(str(out_path))
+        log.info("  Done: %s", fname)
+
+    log.info("Flat download complete: %d new, %d skipped", len(downloaded), skipped)
+    return downloaded
+
+
 # ── Verify ──────────────────────────────────────────────────────────────────────
 
 def verify(output_dir: str, years: list = None) -> bool:
@@ -412,8 +448,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--processed", action="store_true",
         help=(
-            "Download processed S2 files (GDRIVE_PROCESSED_V2_FOLDER_ID) "
-            "into data/processed/ instead of raw files."
+            "Download processed S2 files (GDRIVE_PROCESSED_S2_FOLDER_IDS per year) "
+            "into data/processed/s2/{year}/."
+        ),
+    )
+    parser.add_argument(
+        "--cdl", action="store_true",
+        help=(
+            "Download CDL files (GDRIVE_PROCESSED_CDL_FOLDER_ID) "
+            "into data/processed/cdl/."
         ),
     )
     args = parser.parse_args()
@@ -427,6 +470,18 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
+
+    # --cdl: download CDL files flat into data/processed/cdl/
+    if args.cdl:
+        from crop_mapping_pipeline.config import GDRIVE_PROCESSED_CDL_FOLDER_ID
+        cdl_out = args.output_dir or str(_ROOT / "data" / "processed" / "cdl")
+        log.info(f"=== Downloading CDL files → {cdl_out} ===")
+        download_flat(
+            folder_id  = GDRIVE_PROCESSED_CDL_FOLDER_ID,
+            output_dir = cdl_out,
+            overwrite  = args.overwrite,
+        )
+        sys.exit(0)
 
     # --processed: iterate per-year folders from GDRIVE_PROCESSED_S2_FOLDER_IDS
     if args.processed:

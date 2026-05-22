@@ -71,7 +71,7 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2023": "1FdPm-sAS1dWCM4DJCMsmFPBiohLt8P3-",
     "2024": "1tvV87h8kCqk81BD8EOMBjvLhTOzMfEyY",
 }
-GDRIVE_PROCESSED_CDL_FOLDER_ID    = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
+GDRIVE_PROCESSED_CDL_FOLDER_ID    = "1limegK5Eu3NpNOKHG9xDPe8RoW1B7qMQ"
 # V2 study area processed data — single parent folder; year subfolders created automatically
 GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
 GDRIVE_MODELS_FOLDER_ID        = "1Xj8i32ndkc_9wa7LCwBO8LhrpxsZ3jot"
