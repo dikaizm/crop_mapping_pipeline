@@ -48,6 +48,8 @@ from torch.utils.data import DataLoader, random_split, ConcatDataset
 import rasterio
 
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
+# Cache HuggingFace model weights persistently so they are not re-downloaded each run
+os.environ.setdefault("HF_HOME", str(Path(__file__).parent.parent / ".hf_cache"))
 import mlflow
 
 _ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
@@ -944,25 +946,38 @@ def main(
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 
     # ── Validate TIF files — drop corrupt and empty-data files ────────────
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     corrupt  = []
     no_data  = []
     valid_s2 = []
     MIN_VALID_FRAC_FILE = 0.01   # <1% valid pixels → skip date
+    VALIDATION_WIN      = 512    # read 512×512 centre sample (not half the image)
 
-    for path in s2_processed:
+    def _check_file(path):
         try:
             with rasterio.open(path) as src:
-                h, w  = src.height, src.width
-                win   = rasterio.windows.Window(w // 4, h // 4, w // 2, h // 2)
-                data  = src.read(4, window=win).astype(np.float32)
+                h, w = src.height, src.width
+                sz   = min(VALIDATION_WIN, w // 2, h // 2)
+                win  = rasterio.windows.Window(w // 2 - sz // 2, h // 2 - sz // 2, sz, sz)
+                data = src.read(4, window=win).astype(np.float32)
             ok   = (data != S2_NODATA) & (data > 0) & np.isfinite(data)
-            frac = ok.sum() / ok.size
-            if frac < MIN_VALID_FRAC_FILE:
+            return path, ok.sum() / ok.size, None
+        except Exception as e:
+            return path, 0.0, str(e)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_check_file, p): p for p in s2_processed}
+        for fut in as_completed(futures):
+            path, frac, err = fut.result()
+            if err:
+                corrupt.append((path, err))
+            elif frac < MIN_VALID_FRAC_FILE:
                 no_data.append((path, frac))
             else:
                 valid_s2.append(path)
-        except Exception as e:
-            corrupt.append((path, str(e)))
+
+    valid_s2.sort()   # restore sorted order after parallel completion
 
     if corrupt:
         log.error(f"Found {len(corrupt)} corrupt S2 file(s) — re-download before training:")
