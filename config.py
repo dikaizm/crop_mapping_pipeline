@@ -67,9 +67,9 @@ GDRIVE_OAUTH_TOKEN  = Path(__file__).parent / "ssh" / "gdrive_token.pickle"
 GDRIVE_RAW_S2_V2_FOLDER_ID = "1yZmKDjGnXZH6622d8SU4GDUB1z940HwY"
 
 GDRIVE_PROCESSED_S2_FOLDER_IDS = {
-    "2022": "1l1nI9nn4WIfyoYyAUTewrVPooCTrZ6Bx",
-    "2023": "1FQaW3NZhuFNl01JGg6yHURFnIL7aYLUL",
-    "2024": "1jP7Oz5mPjkTpCxvJOFnN7Ml0kfWkR5m6",
+    "2022": "1bbRb0oXg3o4wl2SJ9WjyU3yyEH7JAJB8",
+    "2023": "1FdPm-sAS1dWCM4DJCMsmFPBiohLt8P3-",
+    "2024": "1tvV87h8kCqk81BD8EOMBjvLhTOzMfEyY",
 }
 GDRIVE_PROCESSED_CDL_FOLDER_ID    = "17a-EkYGDBDluhqTXvQin4UlxMT4X5xt0"
 # V2 study area processed data — single parent folder; year subfolders created automatically

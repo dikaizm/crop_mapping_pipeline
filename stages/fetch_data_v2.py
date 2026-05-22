@@ -426,34 +426,42 @@ if __name__ == "__main__":
         handlers=[logging.StreamHandler()],
     )
 
-    # Resolve folder ID
+    # --processed: iterate per-year folders from GDRIVE_PROCESSED_S2_FOLDER_IDS
+    if args.processed:
+        from crop_mapping_pipeline.config import GDRIVE_PROCESSED_S2_FOLDER_IDS
+        years_to_dl = args.years if args.years else list(GDRIVE_PROCESSED_S2_FOLDER_IDS.keys())
+        base_out = args.output_dir or str(_ROOT / "data" / "processed" / "s2")
+        for year in sorted(years_to_dl):
+            if year not in GDRIVE_PROCESSED_S2_FOLDER_IDS:
+                log.warning(f"No processed folder ID for year {year} — skipping")
+                continue
+            year_out = str(Path(base_out) / year)
+            log.info(f"=== Downloading processed S2 for {year} → {year_out} ===")
+            main(
+                folder_id   = GDRIVE_PROCESSED_S2_FOLDER_IDS[year],
+                output_dir  = year_out,
+                years       = None,
+                overwrite   = args.overwrite,
+                verify_only = args.verify_only,
+                list_files  = args.list_files,
+                delete      = args.delete,
+            )
+        sys.exit(0)
+
+    # Resolve folder ID (raw mode)
     folder_id = args.folder_id
     if not folder_id:
-        if args.processed:
-            try:
-                from crop_mapping_pipeline.config import GDRIVE_PROCESSED_V2_FOLDER_ID
-                folder_id = GDRIVE_PROCESSED_V2_FOLDER_ID
-            except ImportError:
-                pass
-        else:
-            try:
-                from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
-                folder_id = GDRIVE_RAW_S2_V2_FOLDER_ID
-            except ImportError:
-                pass
+        try:
+            from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
+            folder_id = GDRIVE_RAW_S2_V2_FOLDER_ID
+        except ImportError:
+            pass
     if not folder_id:
         parser.error(
-            "--folder-id is required (or set GDRIVE_RAW_S2_V2_FOLDER_ID / "
-            "GDRIVE_PROCESSED_V2_FOLDER_ID in config.py)"
+            "--folder-id is required (or set GDRIVE_RAW_S2_V2_FOLDER_ID in config.py)"
         )
 
-    # Resolve output dir
-    if args.output_dir:
-        output_dir = args.output_dir
-    elif args.processed:
-        output_dir = str(_ROOT / "data" / "processed")
-    else:
-        output_dir = str(_ROOT / "data" / "raw" / "s2")
+    output_dir = args.output_dir or str(_ROOT / "data" / "raw" / "s2")
 
     main(
         folder_id   = folder_id,
