@@ -4,7 +4,9 @@ ssh/
 venv/
 .venv/
 .env
-data/
+data/raw/
+data/processed/s2/
+data/processed/cdl/
 results/
 .DS_Store
 logs/
