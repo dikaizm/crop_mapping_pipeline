@@ -957,21 +957,24 @@ def main(
     def _check_file(path):
         try:
             with rasterio.open(path) as src:
-                h, w   = src.height, src.width
-                sz     = min(VALIDATION_WIN, w // 4, h // 4)
+                h, w      = src.height, src.width
+                n_bands   = src.count
+                sz        = min(VALIDATION_WIN, w // 4, h // 4)
                 valid_px, total_px = 0, 0
-                # 3×3 grid across full image to catch corruption at any offset
-                for gy in range(3):
-                    for gx in range(3):
-                        ox = int((gx + 0.5) * w / 3) - sz // 2
-                        oy = int((gy + 0.5) * h / 3) - sz // 2
-                        ox = max(0, min(ox, w - sz))
-                        oy = max(0, min(oy, h - sz))
-                        win  = rasterio.windows.Window(ox, oy, sz, sz)
-                        data = src.read(4, window=win).astype(np.float32)
-                        ok   = (data != S2_NODATA) & (data > 0) & np.isfinite(data)
-                        valid_px += ok.sum()
-                        total_px += ok.size
+                # Check first, middle, and last band to catch corruption anywhere in file
+                check_bands = sorted({1, n_bands // 2, n_bands})
+                for band in check_bands:
+                    for gy in range(3):
+                        for gx in range(3):
+                            ox = int((gx + 0.5) * w / 3) - sz // 2
+                            oy = int((gy + 0.5) * h / 3) - sz // 2
+                            ox = max(0, min(ox, w - sz))
+                            oy = max(0, min(oy, h - sz))
+                            win  = rasterio.windows.Window(ox, oy, sz, sz)
+                            data = src.read(band, window=win).astype(np.float32)
+                            ok   = (data != S2_NODATA) & np.isfinite(data)
+                            valid_px += ok.sum()
+                            total_px += ok.size
             return path, valid_px / total_px, None
         except Exception as e:
             return path, 0.0, str(e)
