@@ -316,8 +316,9 @@ def _build_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def upload_file(local_path: str, folder_id: str, service=None) -> str:
-    """Upload a single file. Skips if already present. Returns GDrive file ID."""
+def upload_file(local_path: str, folder_id: str, service=None,
+                overwrite: bool = False) -> str:
+    """Upload a single file. Replaces existing file if overwrite=True, else skips. Returns GDrive file ID."""
     from googleapiclient.http import MediaFileUpload
 
     if service is None:
@@ -326,15 +327,23 @@ def upload_file(local_path: str, folder_id: str, service=None) -> str:
     fname  = Path(local_path).name
     query  = f"name='{fname}' and '{folder_id}' in parents and trashed=false"
     result = service.files().list(q=query, fields="files(id,name)").execute()
-    if result.get("files"):
-        log.info("  Already on GDrive: %s", fname)
-        return result["files"][0]["id"]
+    existing = result.get("files", [])
 
-    size    = os.path.getsize(local_path)
-    log.info("  Uploading: %s  (%.0f MB)", fname, size / 1e6)
-    media   = MediaFileUpload(local_path, mimetype="image/tiff", resumable=True)
-    meta    = {"name": fname, "parents": [folder_id]}
-    request = service.files().create(body=meta, media_body=media, fields="id")
+    size  = os.path.getsize(local_path)
+    media = MediaFileUpload(local_path, mimetype="image/tiff", resumable=True)
+
+    if existing and overwrite:
+        log.info("  Replacing on GDrive: %s  (%.0f MB)", fname, size / 1e6)
+        request = service.files().update(
+            fileId=existing[0]["id"], media_body=media, fields="id"
+        )
+    elif existing:
+        log.info("  Already on GDrive: %s", fname)
+        return existing[0]["id"]
+    else:
+        log.info("  Uploading: %s  (%.0f MB)", fname, size / 1e6)
+        meta    = {"name": fname, "parents": [folder_id]}
+        request = service.files().create(body=meta, media_body=media, fields="id")
 
     response = None
     while response is None:
@@ -348,7 +357,8 @@ def upload_file(local_path: str, folder_id: str, service=None) -> str:
 
 
 def upload_year(s2_processed_paths: list, cdl_filtered_path: str,
-                year: str, s2_folder_ids: dict, cdl_folder_id: str) -> None:
+                year: str, s2_folder_ids: dict, cdl_folder_id: str,
+                overwrite: bool = False) -> None:
     """Upload all processed S2 + CDL files for one year."""
     s2_folder = s2_folder_ids.get(year, "")
     if not s2_folder or not cdl_folder_id:
@@ -360,11 +370,11 @@ def upload_year(s2_processed_paths: list, cdl_filtered_path: str,
     service = _build_drive_service()
     log.info("  Uploading %d S2 files (year=%s)...", len(s2_processed_paths), year)
     for path in s2_processed_paths:
-        upload_file(path, s2_folder, service)
+        upload_file(path, s2_folder, service, overwrite=overwrite)
 
     if cdl_filtered_path and Path(cdl_filtered_path).exists():
         log.info("  Uploading CDL filtered file...")
-        upload_file(cdl_filtered_path, cdl_folder_id, service)
+        upload_file(cdl_filtered_path, cdl_folder_id, service, overwrite=overwrite)
 
 
 # ── Cleanup ─────────────────────────────────────────────────────────────────────
@@ -591,14 +601,20 @@ def main(
 
         # ── Upload ─────────────────────────────────────────────────────────────
         if not skip_upload:
-            if s2_folder_ids and cdl_folder_id:
+            from crop_mapping_pipeline.config import (
+                GDRIVE_PROCESSED_S2_FOLDER_IDS, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+            )
+            _s2_ids  = s2_folder_ids  or GDRIVE_PROCESSED_S2_FOLDER_IDS
+            _cdl_id  = cdl_folder_id  or GDRIVE_PROCESSED_CDL_FOLDER_ID
+            if _s2_ids and _cdl_id:
                 log.info("  Uploading to Google Drive...")
                 upload_year(
                     s2_processed_paths = all_processed,
                     cdl_filtered_path  = cdl_filtered or "",
                     year               = yr,
-                    s2_folder_ids      = s2_folder_ids,
-                    cdl_folder_id      = cdl_folder_id,
+                    s2_folder_ids      = _s2_ids,
+                    cdl_folder_id      = _cdl_id,
+                    overwrite          = overwrite,
                 )
             else:
                 log.warning(
