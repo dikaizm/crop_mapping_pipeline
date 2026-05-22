@@ -149,6 +149,22 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
     log.info("  Merged → %s  (%d tiles)", Path(out_path).name, len(tile_paths))
 
 
+# ── Valid-data check ────────────────────────────────────────────────────────────
+
+def _has_valid_data(path: str, min_valid_frac: float = 0.01) -> bool:
+    """
+    Return True if the merged TIF has at least min_valid_frac valid pixels.
+    Valid = positive, finite, non-zero across all bands.
+    Dates where GEE captured nothing useful will have near-0% valid pixels.
+    """
+    with rasterio.open(path) as src:
+        data = src.read().astype(np.float32)   # (bands, H, W)
+    valid = np.all((data > 0) & np.isfinite(data), axis=0)  # pixel valid iff ALL bands positive
+    frac  = valid.sum() / valid.size
+    log.info("  Valid pixel fraction: %.2f%%", frac * 100)
+    return frac >= min_valid_frac
+
+
 # ── NoData assignment ───────────────────────────────────────────────────────────
 
 def assign_nodata(in_path: str, out_path: str, overwrite: bool = False) -> str:
@@ -470,6 +486,13 @@ def process_date_batch(
         processed_path = str(Path(s2_out_dir)   / f"{date_key}_processed.tif")
 
         merge_tiles(tile_paths, merged_path)
+
+        if not _has_valid_data(merged_path):
+            log.warning("  Skipping %s — no valid data (all fill/NoData)", date_key)
+            if Path(merged_path).exists():
+                os.remove(merged_path)
+            continue
+
         assign_nodata(merged_path, processed_path, overwrite=overwrite)
         processed_paths.append(processed_path)
 
