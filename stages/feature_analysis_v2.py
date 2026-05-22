@@ -37,6 +37,9 @@ sys.modules.setdefault("crop_mapping_pipeline.stages.feature_analysis_v2", sys.m
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 import mlflow
 
+from crop_mapping_pipeline.utils.mlflow_utils import patch_artifact_logging
+patch_artifact_logging()
+
 from crop_mapping_pipeline.config import (
     CDL_BY_YEAR as _CDL_BY_YEAR,
     CDL_CLASS_NAMES,

@@ -53,6 +53,9 @@ import mlflow
 _ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
 sys.path.insert(0, str(_ROOT.parent))
 
+from crop_mapping_pipeline.utils.mlflow_utils import patch_artifact_logging
+patch_artifact_logging()
+
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
     PROCESSED_DIR,
