@@ -81,9 +81,10 @@ MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
 MLFLOW_EXPERIMENT_PIPELINE = "cropmap_pipeline_runs"
 MLFLOW_EXPERIMENT_DATASET  = "cropmap_data_processing"
 MLFLOW_EXPERIMENT_FEATURE  = "cropmap_feature_selection_s2"
-MLFLOW_EXPERIMENT_TRAIN    = "cropmap_segmentation_s2"
-MLFLOW_EXPERIMENT_TRAIN_V2 = "cropmap_segmentation_s2_v2"
-MLFLOW_EXPERIMENT_TRAIN_V3 = "cropmap_segmentation_s2_v3"
+MLFLOW_EXPERIMENT_TRAIN        = "cropmap_segmentation_s2"
+MLFLOW_EXPERIMENT_TRAIN_V2     = "cropmap_segmentation_s2_v2"
+MLFLOW_EXPERIMENT_TRAIN_V3     = "cropmap_segmentation_s2_v3"
+MLFLOW_EXPERIMENT_TRAIN_DIRECT = "cropmap_segmentation_s2_direct"
 
 # ── Stage 1 hyperparameters ────────────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5 % of labeled crop pixels for GSI computation
