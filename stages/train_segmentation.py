@@ -936,23 +936,41 @@ def main(
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 
-    # ── Validate TIF files — fail fast on corrupt/truncated downloads ──────
-    corrupt = []
+    # ── Validate TIF files — drop corrupt and empty-data files ────────────
+    corrupt  = []
+    no_data  = []
+    valid_s2 = []
+    MIN_VALID_FRAC_FILE = 0.01   # <1% valid pixels → skip date
+
     for path in s2_processed:
         try:
             with rasterio.open(path) as src:
-                src.read(1, window=rasterio.windows.Window(0, 0, min(256, src.width), min(256, src.height)))
+                h, w  = src.height, src.width
+                win   = rasterio.windows.Window(w // 4, h // 4, w // 2, h // 2)
+                data  = src.read(4, window=win).astype(np.float32)
+            ok   = (data != S2_NODATA) & (data > 0) & np.isfinite(data)
+            frac = ok.sum() / ok.size
+            if frac < MIN_VALID_FRAC_FILE:
+                no_data.append((path, frac))
+            else:
+                valid_s2.append(path)
         except Exception as e:
             corrupt.append((path, str(e)))
+
     if corrupt:
-        log.error(f"Found {len(corrupt)} corrupt S2 file(s) — re-process before training:")
+        log.error(f"Found {len(corrupt)} corrupt S2 file(s) — re-download before training:")
         for p, err in corrupt:
             log.error(f"  {p}  ({err})")
         raise RuntimeError(
-            f"{len(corrupt)} corrupt S2 file(s) detected (likely truncated during processing). "
-            "Delete the bad files and re-run:  python stages/process_data.py --years <year>"
+            f"{len(corrupt)} corrupt S2 file(s) detected. "
+            "Re-download:  python stages/fetch_data_v2.py --processed --years <year> --overwrite"
         )
-    log.info(f"All {len(s2_processed)} S2 files validated OK")
+    if no_data:
+        log.warning(f"Excluding {len(no_data)} file(s) with <{MIN_VALID_FRAC_FILE*100:.0f}% valid pixels (no capture):")
+        for p, frac in no_data:
+            log.warning(f"  {Path(p).name}  ({frac*100:.2f}% valid)")
+    s2_processed = valid_s2
+    log.info(f"{len(s2_processed)} S2 files valid for training ({len(no_data)} empty excluded)")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
