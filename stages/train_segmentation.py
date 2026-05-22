@@ -972,19 +972,21 @@ def main(
         local_date_to_idx, local_band_to_idx
     )
     # Exp C: prefer per-year projected indices; fall back to single-ref-year
-    exp_C_projected, resolved_project_run_id = build_exp_C_indices_projected(
-        s2_processed, project_run_id=project_run_id
-    )
-    resolved_stage2_run_id = None
-    if exp_C_projected:
-        exp_C_idx   = exp_C_projected          # dict {yr: (idx, names)}
-        exp_C_names = exp_C_projected[TRAIN_YEARS[0]][1]   # ref names for logging
-        log.info("Exp C: using per-year projected band indices")
-    else:
-        exp_C_idx, exp_C_names, resolved_stage2_run_id = build_exp_C_indices(
-            mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
+    exp_C_idx = exp_C_names = exp_C_projected = resolved_project_run_id = resolved_stage2_run_id = None
+    if not exps or "C" in exps:
+        exp_C_projected, resolved_project_run_id = build_exp_C_indices_projected(
+            s2_processed, project_run_id=project_run_id
         )
-        log.info("Exp C: using single reference-year band indices (no projected file)")
+        resolved_stage2_run_id = None
+        if exp_C_projected:
+            exp_C_idx   = exp_C_projected          # dict {yr: (idx, names)}
+            exp_C_names = exp_C_projected[TRAIN_YEARS[0]][1]   # ref names for logging
+            log.info("Exp C: using per-year projected band indices")
+        else:
+            exp_C_idx, exp_C_names, resolved_stage2_run_id = build_exp_C_indices(
+                mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
+            )
+            log.info("Exp C: using single reference-year band indices (no projected file)")
 
     # Exp C v2: only loaded when explicitly requested via --exp C_v2
     exp_C_v2_idx = exp_C_v2_names = resolved_project_run_id_v2 = resolved_stage2v3_run_id = None
