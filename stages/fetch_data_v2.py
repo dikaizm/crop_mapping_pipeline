@@ -407,6 +407,13 @@ if __name__ == "__main__":
         "--auth", action="store_true",
         help="Generate OAuth token via browser (run locally once, then copy to server).",
     )
+    parser.add_argument(
+        "--processed", action="store_true",
+        help=(
+            "Download processed S2 files (GDRIVE_PROCESSED_V2_FOLDER_ID) "
+            "into data/processed_v2/ instead of raw files."
+        ),
+    )
     args = parser.parse_args()
 
     if args.auth:
@@ -422,18 +429,31 @@ if __name__ == "__main__":
     # Resolve folder ID
     folder_id = args.folder_id
     if not folder_id:
-        try:
-            from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
-            folder_id = GDRIVE_RAW_S2_V2_FOLDER_ID
-        except ImportError:
-            pass
+        if args.processed:
+            try:
+                from crop_mapping_pipeline.config import GDRIVE_PROCESSED_V2_FOLDER_ID
+                folder_id = GDRIVE_PROCESSED_V2_FOLDER_ID
+            except ImportError:
+                pass
+        else:
+            try:
+                from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
+                folder_id = GDRIVE_RAW_S2_V2_FOLDER_ID
+            except ImportError:
+                pass
     if not folder_id:
         parser.error(
-            "--folder-id is required (or set GDRIVE_RAW_S2_V2_FOLDER_ID in config.py)"
+            "--folder-id is required (or set GDRIVE_RAW_S2_V2_FOLDER_ID / "
+            "GDRIVE_PROCESSED_V2_FOLDER_ID in config.py)"
         )
 
     # Resolve output dir
-    output_dir = args.output_dir or str(_ROOT / "data" / "raw" / "s2")
+    if args.output_dir:
+        output_dir = args.output_dir
+    elif args.processed:
+        output_dir = str(_ROOT / "data" / "processed_v2")
+    else:
+        output_dir = str(_ROOT / "data" / "raw" / "s2")
 
     main(
         folder_id   = folder_id,
