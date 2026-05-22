@@ -203,13 +203,19 @@ def download_folder_by_year(folder_id: str, output_dir: str,
         file_id = name_to_id[fname]
         log.info("  Downloading → %s/%s  (id=%s)", yr, fname, file_id)
         request = service.files().get_media(fileId=file_id)
-        with open(out_path, "wb") as fh:
-            dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
-            done = False
-            while not done:
-                status, done = dl.next_chunk()
-                if status:
-                    log.info("    %s: %d%%", fname, int(status.progress() * 100))
+        try:
+            with open(out_path, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
+        except Exception as e:
+            if out_path.exists():
+                out_path.unlink()
+            log.error("  Download failed — deleted partial file: %s (%s)", fname, e)
+            raise
         log.info("  Done: %s/%s  (%.0f MB)", yr, fname,
                  out_path.stat().st_size / 1e6)
         downloaded.append(str(out_path))
@@ -267,13 +273,19 @@ def download_dates(folder_id: str, output_dir: str,
         file_id = name_to_id[fname]
         log.info("  Downloading → %s/%s  (id=%s)", yr, fname, file_id)
         request = service.files().get_media(fileId=file_id)
-        with open(out_path, "wb") as fh:
-            dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
-            done = False
-            while not done:
-                status, done = dl.next_chunk()
-                if status:
-                    log.info("    %s: %d%%", fname, int(status.progress() * 100))
+        try:
+            with open(out_path, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
+        except Exception as e:
+            if out_path.exists():
+                out_path.unlink()
+            log.error("  Download failed — deleted partial file: %s (%s)", fname, e)
+            raise
         log.info("  Done: %s/%s  (%.0f MB)", yr, fname,
                  out_path.stat().st_size / 1e6)
         downloaded.append(str(out_path))
