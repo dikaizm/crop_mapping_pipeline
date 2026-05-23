@@ -74,6 +74,7 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
 GDRIVE_PROCESSED_CDL_FOLDER_ID    = "1limegK5Eu3NpNOKHG9xDPe8RoW1B7qMQ"
 # V2 study area processed data — single parent folder; year subfolders created automatically
 GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
+GDRIVE_PROCESSED_V3_FOLDER_ID     = "1WyMw6j1jRdTeIMrG0rkbRv712RBw5rz_"
 GDRIVE_MODELS_FOLDER_ID        = "1Xj8i32ndkc_9wa7LCwBO8LhrpxsZ3jot"
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────

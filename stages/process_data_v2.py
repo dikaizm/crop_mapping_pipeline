@@ -793,9 +793,9 @@ def main(
         s2_out_dir    = S2_PROCESSED_DIR / yr
 
         from crop_mapping_pipeline.config import (
-            GDRIVE_PROCESSED_S2_FOLDER_IDS, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+            GDRIVE_PROCESSED_V3_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
         )
-        _s2_ids = s2_folder_ids or GDRIVE_PROCESSED_S2_FOLDER_IDS
+        _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V3_FOLDER_ID for yr in ALL_YEARS}
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
 
         all_processed, s2_ref_path = _pipeline_year(
