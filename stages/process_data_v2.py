@@ -646,14 +646,15 @@ def _pipeline_year(
             except Exception as exc:
                 log.error("GDrive auth failed: %s", exc)
 
-        # Resolve year subfolder — create inside parent if needed
+        # Resolve processed_v3/s2/{yr}/ — create intermediate folders if needed
         parent_folder = (s2_folder_ids or {}).get(yr, "")
         s2_folder = ""
         if service and parent_folder:
             try:
-                s2_folder = get_or_create_subfolder(parent_folder, yr, service)
+                s2_subfolder = get_or_create_subfolder(parent_folder, "s2", service)
+                s2_folder    = get_or_create_subfolder(s2_subfolder,  yr,  service)
             except Exception as exc:
-                log.error("Failed to get/create year subfolder %s: %s", yr, exc)
+                log.error("Failed to get/create s2/%s subfolder: %s", yr, exc)
 
         while True:
             item = upload_q.get()
@@ -856,10 +857,12 @@ def main(
             cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
             process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
 
-        # ── Upload CDL (S2 files uploaded per-date inside pipeline) ───────────
-        if not skip_upload and cdl_filtered and _s2_ids and _cdl_id:
-            service = _build_drive_service()
-            upload_file(cdl_filtered, _cdl_id, service)
+        # ── Upload CDL into processed_v3/cdl/ ────────────────────────────────
+        if not skip_upload and cdl_filtered and _s2_ids:
+            service    = _build_drive_service()
+            v3_parent  = next(iter(_s2_ids.values()))
+            cdl_folder = get_or_create_subfolder(v3_parent, "cdl", service)
+            upload_file(cdl_filtered, cdl_folder, service)
 
         log.info("Year %s done.\n", yr)
 
