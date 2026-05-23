@@ -382,6 +382,24 @@ def _build_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def get_or_create_subfolder(parent_id: str, name: str, service) -> str:
+    """Return GDrive folder ID for `name` inside `parent_id`, creating it if missing."""
+    query  = (f"name='{name}' and '{parent_id}' in parents "
+              f"and mimeType='application/vnd.google-apps.folder' and trashed=false")
+    result = service.files().list(q=query, fields="files(id,name)").execute()
+    folders = result.get("files", [])
+    if folders:
+        return folders[0]["id"]
+    meta = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = service.files().create(body=meta, fields="id").execute()
+    log.info("  Created GDrive subfolder: %s (id=%s)", name, folder["id"])
+    return folder["id"]
+
+
 def upload_file(local_path: str, folder_id: str, service=None,
                 overwrite: bool = False) -> str:
     """Upload a single file. Replaces existing file if overwrite=True, else skips. Returns GDrive file ID."""
@@ -628,7 +646,14 @@ def _pipeline_year(
             except Exception as exc:
                 log.error("GDrive auth failed: %s", exc)
 
-        s2_folder = (s2_folder_ids or {}).get(yr, "")
+        # Resolve year subfolder — create inside parent if needed
+        parent_folder = (s2_folder_ids or {}).get(yr, "")
+        s2_folder = ""
+        if service and parent_folder:
+            try:
+                s2_folder = get_or_create_subfolder(parent_folder, yr, service)
+            except Exception as exc:
+                log.error("Failed to get/create year subfolder %s: %s", yr, exc)
 
         while True:
             item = upload_q.get()
