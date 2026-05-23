@@ -746,8 +746,23 @@ def main(
         else:
             s2_raw_dir = _ROOT / "data" / "raw" / "s2" / yr
 
-        # ── Group tiles by date ────────────────────────────────────────────────
+        # ── Group tiles by date (auto-download if missing) ────────────────────
         groups = group_tiles_by_date(str(s2_raw_dir), yr)
+        if not groups:
+            log.info("  No raw tiles found for %s — attempting GDrive download...", yr)
+            try:
+                from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
+                from crop_mapping_pipeline.stages.fetch_data_v2 import download_folder_by_year
+                download_folder_by_year(
+                    folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
+                    output_dir = str(s2_raw_dir.parent),
+                    years      = [yr],
+                    workers    = upload_workers,  # reuse upload_workers for download
+                )
+                groups = group_tiles_by_date(str(s2_raw_dir), yr)
+            except Exception as exc:
+                log.error("  Auto-download failed for %s: %s", yr, exc)
+
         if not groups:
             log.warning("  No tile groups for year %s — skipping", yr)
             continue

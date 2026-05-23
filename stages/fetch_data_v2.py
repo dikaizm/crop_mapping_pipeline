@@ -33,6 +33,8 @@ import sys
 import re
 import argparse
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
@@ -71,6 +73,54 @@ def _build_drive_service():
         with open(GDRIVE_OAUTH_TOKEN, "wb") as f:
             pickle.dump(creds, f)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+# One Drive service per thread (httplib2 is not thread-safe)
+_thread_local = threading.local()
+
+
+def _get_thread_service():
+    if not hasattr(_thread_local, "service"):
+        _thread_local.service = _build_drive_service()
+    return _thread_local.service
+
+
+def _download_one(fname: str, file_id: str, output_dir: str,
+                  overwrite: bool = False) -> tuple[str, str]:
+    """Download a single tile file. Returns (out_path, status) where status is 'new'|'skip'|'error'."""
+    from googleapiclient.http import MediaIoBaseDownload
+
+    yr = _year_from_filename(fname)
+    if not yr:
+        log.warning("  Cannot parse year from '%s' — skipping", fname)
+        return "", "error"
+
+    yr_dir   = Path(output_dir) / yr
+    yr_dir.mkdir(parents=True, exist_ok=True)
+    out_path = yr_dir / fname
+
+    if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
+        log.info("  Skip (exists): %s/%s", yr, fname)
+        return str(out_path), "skip"
+
+    service = _get_thread_service()
+    request = service.files().get_media(fileId=file_id)
+    tmp     = out_path.with_suffix(".tmp.tif")
+    try:
+        with open(tmp, "wb") as fh:
+            dl   = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = dl.next_chunk()
+                if status:
+                    log.info("  %s: %d%%", fname, int(status.progress() * 100))
+        tmp.rename(out_path)
+        log.info("  Done: %s/%s  (%.0f MB)", yr, fname, out_path.stat().st_size / 1e6)
+        return str(out_path), "new"
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        log.error("  Download failed — deleted partial: %s (%s)", fname, exc)
+        return "", "error"
 
 
 # ── Folder listing ──────────────────────────────────────────────────────────────
@@ -163,84 +213,72 @@ def list_dates_by_year(folder_id: str, years: list = None) -> dict:
 
 # ── Download ────────────────────────────────────────────────────────────────────
 
+def _download_many(name_to_id: dict, output_dir: str,
+                   overwrite: bool = False, workers: int = 2) -> list:
+    """Parallel download core — one Drive service per thread via thread-local storage."""
+    total     = len(name_to_id)
+    results   = []
+    new_count = skipped = errors = 0
+    lock      = threading.Lock()
+
+    log.info("  Downloading %d file(s) with %d worker(s)...", total, workers)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dl") as pool:
+        futures = {
+            pool.submit(_download_one, fname, fid, output_dir, overwrite): fname
+            for fname, fid in name_to_id.items()
+        }
+        done_n = 0
+        for fut in as_completed(futures):
+            fname  = futures[fut]
+            done_n += 1
+            try:
+                path, status = fut.result()
+            except Exception as exc:
+                log.error("  [%d/%d] Error %s: %s", done_n, total, fname, exc)
+                with lock:
+                    errors += 1
+                continue
+            with lock:
+                if status == "new":
+                    results.append(path)
+                    new_count += 1
+                elif status == "skip":
+                    results.append(path)
+                    skipped += 1
+                else:
+                    errors += 1
+
+    log.info("  Done: %d new, %d skipped, %d errors", new_count, skipped, errors)
+    return results
+
+
 def download_folder_by_year(folder_id: str, output_dir: str,
                             years: list = None, dates: list = None,
-                            overwrite: bool = False) -> list:
+                            overwrite: bool = False, workers: int = 2) -> list:
     """
-    Download all tile files from a flat GDrive folder, sorted into year subdirs:
-        {output_dir}/{year}/S2H_{year}_{date}-{row}-{col}.tif
-
+    Download all tile files from a flat GDrive folder, sorted into year subdirs.
     Returns list of downloaded file paths.
     """
-    from googleapiclient.http import MediaIoBaseDownload
-
     name_to_id = list_folder(folder_id, years=years, dates=dates)
-
     if not name_to_id:
         log.warning("  No files to download.")
         return []
-
-    service    = _build_drive_service()
-    downloaded = []
-    skipped    = 0
-
-    for fname in sorted(name_to_id):
-        yr = _year_from_filename(fname)
-        if not yr:
-            log.warning("  Cannot parse year from '%s' — skipping", fname)
-            continue
-
-        yr_dir   = Path(output_dir) / yr
-        yr_dir.mkdir(parents=True, exist_ok=True)
-        out_path = yr_dir / fname
-
-        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
-            log.info("  Skip (exists): %s/%s", yr, fname)
-            skipped += 1
-            downloaded.append(str(out_path))
-            continue
-
-        file_id = name_to_id[fname]
-        log.info("  Downloading → %s/%s  (id=%s)", yr, fname, file_id)
-        request = service.files().get_media(fileId=file_id)
-        try:
-            with open(out_path, "wb") as fh:
-                dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
-                done = False
-                while not done:
-                    status, done = dl.next_chunk()
-                    if status:
-                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
-        except Exception as e:
-            if out_path.exists():
-                out_path.unlink()
-            log.error("  Download failed — deleted partial file: %s (%s)", fname, e)
-            raise
-        log.info("  Done: %s/%s  (%.0f MB)", yr, fname,
-                 out_path.stat().st_size / 1e6)
-        downloaded.append(str(out_path))
-
-    log.info("Download complete: %d new, %d skipped",
-             len(downloaded) - skipped, skipped)
-    return downloaded
+    return _download_many(name_to_id, output_dir, overwrite, workers)
 
 
 def download_dates(folder_id: str, output_dir: str,
-                   date_keys: list, overwrite: bool = False) -> list:
+                   date_keys: list, overwrite: bool = False,
+                   workers: int = 2) -> list:
     """
-    Download only the tiles whose date key matches one of `date_keys`.
-    date_keys: list of date key strings, e.g. ['S2H_2022_2022_01_01', ...].
-    Files are routed to {output_dir}/{year}/ based on their filename.
+    Download only tiles whose date key matches one of `date_keys`.
     Returns list of downloaded file paths.
     """
-    from googleapiclient.http import MediaIoBaseDownload
-
     date_keys_set = set(date_keys)
     years         = {_year_from_filename(dk + "-0000000000-0000000000.tif") for dk in date_keys}
     years         = {y for y in years if y}
 
     name_to_id = list_folder(folder_id, years=list(years) if years else None)
-    # Filter to only tiles belonging to the requested date keys
     name_to_id = {
         name: fid for name, fid in name_to_id.items()
         if _date_key_from_filename(name) in date_keys_set
@@ -250,49 +288,7 @@ def download_dates(folder_id: str, output_dir: str,
         log.warning("  No tiles found for date_keys=%s", date_keys)
         return []
 
-    service    = _build_drive_service()
-    downloaded = []
-    skipped    = 0
-
-    for fname in sorted(name_to_id):
-        yr = _year_from_filename(fname)
-        if not yr:
-            log.warning("  Cannot parse year from '%s' — skipping", fname)
-            continue
-
-        yr_dir   = Path(output_dir) / yr
-        yr_dir.mkdir(parents=True, exist_ok=True)
-        out_path = yr_dir / fname
-
-        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
-            log.info("  Skip (exists): %s/%s", yr, fname)
-            skipped += 1
-            downloaded.append(str(out_path))
-            continue
-
-        file_id = name_to_id[fname]
-        log.info("  Downloading → %s/%s  (id=%s)", yr, fname, file_id)
-        request = service.files().get_media(fileId=file_id)
-        try:
-            with open(out_path, "wb") as fh:
-                dl = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
-                done = False
-                while not done:
-                    status, done = dl.next_chunk()
-                    if status:
-                        log.info("    %s: %d%%", fname, int(status.progress() * 100))
-        except Exception as e:
-            if out_path.exists():
-                out_path.unlink()
-            log.error("  Download failed — deleted partial file: %s (%s)", fname, e)
-            raise
-        log.info("  Done: %s/%s  (%.0f MB)", yr, fname,
-                 out_path.stat().st_size / 1e6)
-        downloaded.append(str(out_path))
-
-    log.info("Batch download complete: %d new, %d skipped",
-             len(downloaded) - skipped, skipped)
-    return downloaded
+    return _download_many(name_to_id, output_dir, overwrite, workers)
 
 
 # ── Flat download (CDL / non-tiled files) ───────────────────────────────────────
@@ -390,6 +386,7 @@ def main(
     verify_only : bool = False,
     list_files  : bool = False,
     delete      : bool = False,
+    workers     : int  = 2,
 ) -> None:
 
     if list_files:
@@ -404,7 +401,8 @@ def main(
         sys.exit(0 if ok else 1)
 
     download_folder_by_year(folder_id, output_dir,
-                            years=years, dates=dates, overwrite=overwrite)
+                            years=years, dates=dates, overwrite=overwrite,
+                            workers=workers)
     verify(output_dir, years=years)
 
     if delete:
@@ -482,6 +480,10 @@ if __name__ == "__main__":
         help="Delete downloaded tiles after verification (frees disk space).",
     )
     parser.add_argument(
+        "--workers", type=int, default=2,
+        help="Parallel download workers (default: 2; GDrive throttles above 2-3)",
+    )
+    parser.add_argument(
         "--auth", action="store_true",
         help="Generate OAuth token via browser (run locally once, then copy to server).",
     )
@@ -542,6 +544,7 @@ if __name__ == "__main__":
                 verify_only = args.verify_only,
                 list_files  = args.list_files,
                 delete      = args.delete,
+                workers     = args.workers,
             )
         sys.exit(0)
 
@@ -569,4 +572,5 @@ if __name__ == "__main__":
         verify_only = args.verify_only,
         list_files  = args.list_files,
         delete      = args.delete,
+        workers     = args.workers,
     )
