@@ -493,7 +493,7 @@ def main(
     years = years or ALL_YEARS
 
     from crop_mapping_pipeline.config import (
-        GDRIVE_PROCESSED_V3_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+        GDRIVE_PROCESSED_V5_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
         GDRIVE_RAW_S2_V2_FOLDER_ID,
     )
 
@@ -507,9 +507,9 @@ def main(
             else _ROOT / "data" / "raw" / "s2" / yr
         )
 
-        _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V3_FOLDER_ID for yr in ALL_YEARS}
+        _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V5_FOLDER_ID for yr in ALL_YEARS}
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
-        _v3     = GDRIVE_PROCESSED_V3_FOLDER_ID
+        _v3     = GDRIVE_PROCESSED_V5_FOLDER_ID
 
         # ── Step 1: Check processed_v3 — what's already uploaded ─────────────
         already_uploaded: set = set()
