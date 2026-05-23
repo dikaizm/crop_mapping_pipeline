@@ -821,59 +821,73 @@ def main(
         else:
             s2_raw_dir = _ROOT / "data" / "raw" / "s2" / yr
 
-        # ── Group tiles by date (auto-download if missing) ────────────────────
-        groups = group_tiles_by_date(str(s2_raw_dir), yr)
-        if not groups:
-            log.info("  No raw tiles found for %s — attempting GDrive download...", yr)
+        from crop_mapping_pipeline.config import (
+            GDRIVE_PROCESSED_V3_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+            GDRIVE_RAW_S2_V2_FOLDER_ID,
+        )
+        _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V3_FOLDER_ID for yr in ALL_YEARS}
+        _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
+        _v3     = GDRIVE_PROCESSED_V3_FOLDER_ID
+
+        # ── Step 1: Check processed_v3 first — what's already uploaded ────────
+        already_uploaded: set = set()
+        if not overwrite and not skip_upload:
             try:
-                from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
-                from crop_mapping_pipeline.stages.fetch_data_v2 import download_folder_by_year
-                download_folder_by_year(
+                _svc = _build_drive_service()
+                already_uploaded = list_gdrive_processed(_v3, yr, _svc)
+            except Exception as exc:
+                log.warning("  GDrive pre-check failed (%s) — will process all local dates", exc)
+
+        # ── Step 2: Scan local raw tiles ──────────────────────────────────────
+        local_groups = group_tiles_by_date(str(s2_raw_dir), yr)
+
+        # ── Step 3: Filter local to dates that still need processing ──────────
+        needed_local = {
+            dk: tiles for dk, tiles in local_groups.items()
+            if f"{dk}_processed.tif" not in already_uploaded
+        }
+        n_skipped_local = len(local_groups) - len(needed_local)
+        if n_skipped_local:
+            log.info("  Skipping %d local date(s) already in processed_v3/s2/%s/",
+                     n_skipped_local, yr)
+
+        # ── Step 4: Discover + download only missing raw dates from GDrive ────
+        try:
+            from crop_mapping_pipeline.stages.fetch_data_v2 import (
+                list_dates_by_year, download_dates,
+            )
+            raw_gdrive_keys = set(
+                list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
+            )
+            needed_gdrive_keys = {
+                dk for dk in raw_gdrive_keys
+                if f"{dk}_processed.tif" not in already_uploaded
+            }
+            to_download = needed_gdrive_keys - set(local_groups.keys())
+            if to_download:
+                log.info("  Downloading %d missing raw date(s) from GDrive...", len(to_download))
+                download_dates(
                     folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
                     output_dir = str(s2_raw_dir.parent),
-                    years      = [yr],
+                    date_keys  = list(to_download),
                     workers    = download_workers,
                 )
-                groups = group_tiles_by_date(str(s2_raw_dir), yr)
-            except Exception as exc:
-                log.error("  Auto-download failed for %s: %s", yr, exc)
+                local_groups = group_tiles_by_date(str(s2_raw_dir), yr)
+                needed_local = {
+                    dk: tiles for dk, tiles in local_groups.items()
+                    if f"{dk}_processed.tif" not in already_uploaded
+                }
+        except Exception as exc:
+            log.warning("  GDrive raw listing/download failed (%s) — using local tiles only", exc)
+
+        groups = needed_local
 
         if not groups:
-            log.warning("  No tile groups for year %s — skipping", yr)
+            log.info("  All dates for year %s already in processed_v3 or no raw tiles — skipping", yr)
             continue
 
         merge_tmp_dir = _ROOT / "data" / "raw" / "s2" / yr / "_merged"
         s2_out_dir    = S2_PROCESSED_DIR / yr
-
-        from crop_mapping_pipeline.config import (
-            GDRIVE_PROCESSED_V3_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
-        )
-        _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V3_FOLDER_ID for yr in ALL_YEARS}
-        _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
-
-        # ── Filter dates already uploaded to processed_v3 ─────────────────────
-        if not overwrite and not skip_upload:
-            try:
-                _svc = _build_drive_service()
-                _v3  = next(iter(_s2_ids.values()))
-                already_uploaded = list_gdrive_processed(_v3, yr, _svc)
-                before = len(groups)
-                groups = {
-                    dk: tiles for dk, tiles in groups.items()
-                    if f"{dk}_processed.tif" not in already_uploaded
-                }
-                skipped = before - len(groups)
-                if skipped:
-                    log.info(
-                        "  Skipping %d date(s) already in GDrive processed_v3/s2/%s/ "
-                        "(%d remaining to process)",
-                        skipped, yr, len(groups),
-                    )
-                if not groups:
-                    log.info("  All dates for year %s already uploaded — nothing to do.", yr)
-                    continue
-            except Exception as exc:
-                log.warning("  GDrive pre-check failed (%s) — processing all dates", exc)
 
         all_processed, s2_ref_path = _pipeline_year(
             date_groups    = groups,
