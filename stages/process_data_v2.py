@@ -440,6 +440,33 @@ def upload_file(local_path: str, folder_id: str, service=None,
     return file_id
 
 
+def list_gdrive_processed(v3_folder_id: str, yr: str, service) -> set:
+    """Return set of filenames already uploaded to processed_v3/s2/{yr}/."""
+    try:
+        s2_sub = get_or_create_subfolder(v3_folder_id, "s2", service)
+        yr_sub = get_or_create_subfolder(s2_sub, yr, service)
+        names  = set()
+        page_token = None
+        while True:
+            kwargs = dict(
+                q      = f"'{yr_sub}' in parents and trashed=false",
+                fields = "nextPageToken, files(name)",
+                pageSize = 1000,
+            )
+            if page_token:
+                kwargs["pageToken"] = page_token
+            result     = service.files().list(**kwargs).execute()
+            names     |= {f["name"] for f in result.get("files", [])}
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+        log.info("  GDrive processed_v3/s2/%s/ has %d file(s)", yr, len(names))
+        return names
+    except Exception as exc:
+        log.warning("  Could not list GDrive processed_v3/s2/%s: %s", yr, exc)
+        return set()
+
+
 def upload_year(s2_processed_paths: list, cdl_filtered_path: str,
                 year: str, s2_folder_ids: dict, cdl_folder_id: str,
                 overwrite: bool = False) -> None:
@@ -823,6 +850,30 @@ def main(
         )
         _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V3_FOLDER_ID for yr in ALL_YEARS}
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
+
+        # ── Filter dates already uploaded to processed_v3 ─────────────────────
+        if not overwrite and not skip_upload:
+            try:
+                _svc = _build_drive_service()
+                _v3  = next(iter(_s2_ids.values()))
+                already_uploaded = list_gdrive_processed(_v3, yr, _svc)
+                before = len(groups)
+                groups = {
+                    dk: tiles for dk, tiles in groups.items()
+                    if f"{dk}_processed.tif" not in already_uploaded
+                }
+                skipped = before - len(groups)
+                if skipped:
+                    log.info(
+                        "  Skipping %d date(s) already in GDrive processed_v3/s2/%s/ "
+                        "(%d remaining to process)",
+                        skipped, yr, len(groups),
+                    )
+                if not groups:
+                    log.info("  All dates for year %s already uploaded — nothing to do.", yr)
+                    continue
+            except Exception as exc:
+                log.warning("  GDrive pre-check failed (%s) — processing all dates", exc)
 
         all_processed, s2_ref_path = _pipeline_year(
             date_groups    = groups,
