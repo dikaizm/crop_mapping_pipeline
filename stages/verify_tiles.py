@@ -19,17 +19,36 @@ import rasterio.windows
 TILE = 256
 DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
 
+# Valid TIFF/BigTIFF magic byte sequences
+_TIFF_MAGIC = {
+    b"II\x2a\x00",  # little-endian TIFF
+    b"MM\x00\x2a",  # big-endian TIFF
+    b"II\x2b\x00",  # little-endian BigTIFF
+    b"MM\x00\x2b",  # big-endian BigTIFF
+}
+
+
+def _check_magic(path: Path) -> str | None:
+    """Return error string if TIFF magic bytes are invalid, else None."""
+    with open(path, "rb") as f:
+        header = f.read(4)
+    if header not in _TIFF_MAGIC:
+        return f"bad TIFF magic: {header.hex()} (expected II/MM + 2a/2b)"
+    return None
+
 
 def scan_file(path: Path, tile_size: int = TILE) -> tuple[Path, bool, str, int, float]:
     """Read every tile of every band. Return (path, ok, error_msg, tiles_read, elapsed_s)."""
     t0 = time.monotonic()
     tiles_read = 0
+
+    magic_err = _check_magic(path)
+    if magic_err:
+        return path, False, magic_err, 0, time.monotonic() - t0
+
     try:
         with rasterio.open(path) as src:
             h, w, nb = src.height, src.width, src.count
-            cols = (w + tile_size - 1) // tile_size
-            rows = (h + tile_size - 1) // tile_size
-            total_tiles = nb * rows * cols
             for band in range(1, nb + 1):
                 for y in range(0, h, tile_size):
                     for x in range(0, w, tile_size):
@@ -37,11 +56,9 @@ def scan_file(path: Path, tile_size: int = TILE) -> tuple[Path, bool, str, int, 
                         pw = min(tile_size, w - x)
                         src.read(band, window=rasterio.windows.Window(x, y, pw, ph))
                         tiles_read += 1
-        elapsed = time.monotonic() - t0
-        return path, True, "", tiles_read, elapsed
+        return path, True, "", tiles_read, time.monotonic() - t0
     except Exception as e:
-        elapsed = time.monotonic() - t0
-        return path, False, str(e), tiles_read, elapsed
+        return path, False, str(e), tiles_read, time.monotonic() - t0
 
 
 def main():
@@ -119,7 +136,7 @@ def main():
                 f"[{done:>3}/{total}  {done/total*100:5.1f}%]  "
                 f"{status}  {yr}/{date}  "
                 f"{tiles:>6} tiles  {elapsed:5.1f}s"
-                + (f"  — {err}" if not ok else "")
+                + (f"\n         {err}" if not ok else "")
             )
 
     wall_elapsed = time.monotonic() - wall_t0

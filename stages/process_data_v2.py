@@ -113,6 +113,22 @@ def group_tiles_by_date(raw_dir: str, year: str) -> dict:
 
 # ── Merge ───────────────────────────────────────────────────────────────────────
 
+_TIFF_MAGIC = {
+    b"II\x2a\x00",  # little-endian TIFF
+    b"MM\x00\x2a",  # big-endian TIFF
+    b"II\x2b\x00",  # little-endian BigTIFF
+    b"MM\x00\x2b",  # big-endian BigTIFF
+}
+
+
+def _is_valid_tiff(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) in _TIFF_MAGIC
+    except OSError:
+        return False
+
+
 def merge_tiles(tile_paths: list, out_path: str) -> None:
     """
     Mosaic a list of TIF tiles into a single file using rasterio.merge.
@@ -121,11 +137,16 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
     Output preserves the CRS, pixel size, and band count of the inputs.
     GEE tiles may overlap slightly at boundaries — rasterio.merge handles this.
     """
-    if Path(out_path).exists():
-        log.info("  Merged already exists: %s", Path(out_path).name)
-        return
+    out = Path(out_path)
+    if out.exists():
+        if _is_valid_tiff(out):
+            log.info("  Merged already exists: %s", out.name)
+            return
+        log.warning("  Corrupt merged file, re-merging: %s", out.name)
+        out.unlink()
 
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp.tif")
 
     srcs = [rasterio.open(p) for p in tile_paths]
     try:
@@ -140,13 +161,18 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
             blockxsize= 256,
             blockysize= 256,
         )
-        with rasterio.open(out_path, "w", **profile) as dst:
+        with rasterio.open(tmp, "w", **profile) as dst:
             dst.write(mosaic)
+        tmp.rename(out)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
     finally:
         for s in srcs:
             s.close()
 
-    log.info("  Merged → %s  (%d tiles)", Path(out_path).name, len(tile_paths))
+    log.info("  Merged → %s  (%d tiles)", out.name, len(tile_paths))
 
 
 # ── Valid-data check ────────────────────────────────────────────────────────────
