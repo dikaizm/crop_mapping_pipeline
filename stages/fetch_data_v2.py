@@ -211,6 +211,20 @@ def list_dates_by_year(folder_id: str, years: list = None) -> dict:
     return {yr: sorted(keys) for yr, keys in sorted(dates_by_year.items())}
 
 
+def list_tile_counts_by_date(folder_id: str, years: list = None) -> dict:
+    """
+    Return {date_key: tile_count} for all raw tiles in GDrive folder.
+    Used to detect incomplete local downloads (local tile count < GDrive count).
+    """
+    name_to_id = list_folder(folder_id, years=years)
+    counts: dict = {}
+    for fname in name_to_id:
+        key = _date_key_from_filename(fname)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 # ── Download ────────────────────────────────────────────────────────────────────
 
 def _download_many(name_to_id: dict, output_dir: str,

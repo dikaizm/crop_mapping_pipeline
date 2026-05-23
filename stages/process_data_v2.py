@@ -851,25 +851,45 @@ def main(
             log.info("  Skipping %d local date(s) already in processed_v3/s2/%s/",
                      n_skipped_local, yr)
 
-        # ── Step 4: Discover + download only missing raw dates from GDrive ────
+        # ── Step 4: Discover + download missing/incomplete raw dates ─────────
         try:
             from crop_mapping_pipeline.stages.fetch_data_v2 import (
-                list_dates_by_year, download_dates,
+                list_tile_counts_by_date, download_dates,
             )
-            raw_gdrive_keys = set(
-                list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
-            )
+            gdrive_counts = list_tile_counts_by_date(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr])
+
+            # Dates on GDrive not yet uploaded to processed_v3
             needed_gdrive_keys = {
-                dk for dk in raw_gdrive_keys
+                dk for dk in gdrive_counts
                 if f"{dk}_processed.tif" not in already_uploaded
             }
+
+            # Dates missing entirely from local
             to_download = needed_gdrive_keys - set(local_groups.keys())
+
+            # Dates present locally but with fewer tiles than GDrive (partial download)
+            incomplete = {
+                dk for dk, tiles in local_groups.items()
+                if dk in gdrive_counts and len(tiles) < gdrive_counts[dk]
+                and f"{dk}_processed.tif" not in already_uploaded
+            }
+            if incomplete:
+                log.warning(
+                    "  %d date(s) have incomplete local tiles (local < GDrive count) — re-downloading: %s",
+                    len(incomplete), sorted(incomplete),
+                )
+                to_download |= incomplete
+
             if to_download:
-                log.info("  Downloading %d missing raw date(s) from GDrive...", len(to_download))
+                log.info("  Downloading %d date(s) from GDrive (missing=%d, incomplete=%d)...",
+                         len(to_download),
+                         len(to_download - incomplete),
+                         len(to_download & incomplete))
                 download_dates(
                     folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
                     output_dir = str(s2_raw_dir.parent),
                     date_keys  = list(to_download),
+                    overwrite  = True,   # replace partial tiles
                     workers    = download_workers,
                 )
                 local_groups = group_tiles_by_date(str(s2_raw_dir), yr)
