@@ -12,3 +12,4 @@ results/
 logs/
 documents/
 .vscode/
+.hf_cache/
