@@ -136,6 +136,10 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
     """
     Mosaic tiles via gdal.BuildVRT + gdal.Translate — streams block-by-block,
     never loads full mosaic into RAM. Produces clean libtiff-compatible GeoTIFF.
+
+    Explicitly computes the union of all tile bounds and passes outputBounds +
+    xRes/yRes to BuildVRT so GDAL never truncates the mosaic due to tile
+    alignment differences (replicates rasterio.merge extent behaviour).
     """
     from osgeo import gdal
     gdal.UseExceptions()
@@ -152,8 +156,31 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
     tmp      = out.with_suffix(".tmp.tif")
     vrt_path = str(out.with_suffix(".vrt"))
 
+    # Compute union of all tile bounds (read metadata only — no pixel data loaded)
+    left = right = top = bottom = None
+    xres = yres = None
+    for p in tile_paths:
+        with rasterio.open(p) as src:
+            b = src.bounds
+            left   = b.left   if left   is None else min(left,   b.left)
+            bottom = b.bottom if bottom is None else min(bottom, b.bottom)
+            right  = b.right  if right  is None else max(right,  b.right)
+            top    = b.top    if top    is None else max(top,    b.top)
+            if xres is None:
+                xres, yres = src.res
+
+    log.info("  Tile union bounds: (%.6f, %.6f, %.6f, %.6f)  res=(%.8f, %.8f)",
+             left, bottom, right, top, xres, yres)
+
     try:
-        vrt = gdal.BuildVRT(vrt_path, [str(p) for p in tile_paths])
+        vrt = gdal.BuildVRT(
+            vrt_path,
+            [str(p) for p in tile_paths],
+            outputBounds = (left, bottom, right, top),
+            xRes         = xres,
+            yRes         = yres,
+            resampleAlg  = "nearest",
+        )
         if vrt is None:
             raise RuntimeError(f"gdal.BuildVRT failed for {out.name}")
         vrt.FlushCache()
