@@ -36,9 +36,12 @@ import argparse
 import pathlib
 import subprocess
 import tempfile
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 from pathlib import Path
+from queue import Queue
 
 import numpy as np
 import rasterio
@@ -532,6 +535,140 @@ def process_date_batch(
     return raw_tile_paths, processed_paths, s2_ref_path
 
 
+_SENTINEL = object()  # end-of-queue signal
+
+
+def _pipeline_year(
+    date_groups   : dict,
+    yr            : str,
+    s2_out_dir    : Path,
+    merge_tmp_dir : Path,
+    skip_upload   : bool = False,
+    skip_delete   : bool = False,
+    overwrite     : bool = False,
+    process_workers: int = 2,
+    upload_workers : int = 1,
+    s2_folder_ids  : dict = None,
+    cdl_folder_id  : str  = None,
+) -> tuple:
+    """
+    3-stage concurrent pipeline per date:
+      Stage 1 (process_workers threads): merge_tiles + assign_nodata
+      Stage 2 (upload_workers threads):  upload to GDrive
+      Stage 3 (in upload thread):        delete raw tiles
+
+    Returns (processed_paths, s2_ref_path).
+    """
+    s2_out_dir.mkdir(parents=True, exist_ok=True)
+    merge_tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    upload_q: Queue = Queue(maxsize=process_workers + 2)
+
+    processed_paths: list[str] = []
+    s2_ref_path: list[str | None] = [None]
+    lock = threading.Lock()
+    errors: list[str] = []
+
+    # ── Stage 1: process one date (runs in thread pool) ──────────────────────
+    def _process_date(date_key: str, tiles: list) -> None:
+        tile_paths     = [t[2] for t in tiles]
+        merged_path    = merge_tmp_dir / f"{date_key}_merged.tif"
+        processed_path = s2_out_dir   / f"{date_key}_processed.tif"
+
+        try:
+            merge_tiles(tile_paths, str(merged_path))
+
+            if not _has_valid_data(str(merged_path)):
+                log.warning("[%s] No valid data — skipped", date_key)
+                merged_path.unlink(missing_ok=True)
+                return
+
+            assign_nodata(str(merged_path), str(processed_path), overwrite=overwrite)
+            merged_path.unlink(missing_ok=True)
+
+            with lock:
+                processed_paths.append(str(processed_path))
+                if s2_ref_path[0] is None:
+                    s2_ref_path[0] = str(processed_path)
+
+            upload_q.put((date_key, tile_paths, str(processed_path)))
+
+        except Exception as exc:
+            log.error("[%s] Process error: %s", date_key, exc)
+            errors.append(f"{date_key}: {exc}")
+            merged_path.unlink(missing_ok=True)
+
+    # ── Stage 2+3: upload then delete (runs in upload thread) ────────────────
+    def _upload_worker() -> None:
+        service = None
+        if not skip_upload and s2_folder_ids:
+            try:
+                service = _build_drive_service()
+            except Exception as exc:
+                log.error("GDrive auth failed: %s", exc)
+
+        s2_folder = (s2_folder_ids or {}).get(yr, "")
+
+        while True:
+            item = upload_q.get()
+            if item is _SENTINEL:
+                upload_q.task_done()
+                break
+
+            date_key, tile_paths, processed_path = item
+            try:
+                if service and s2_folder:
+                    upload_file(processed_path, s2_folder, service)
+                elif not skip_upload:
+                    log.warning("[%s] No GDrive folder ID — upload skipped", date_key)
+
+                if not skip_delete:
+                    delete_files(tile_paths, label="tile")
+            except Exception as exc:
+                log.error("[%s] Upload/cleanup error: %s", date_key, exc)
+                errors.append(f"{date_key} upload: {exc}")
+            finally:
+                upload_q.task_done()
+
+    # ── Launch upload thread(s) ───────────────────────────────────────────────
+    upload_threads = [
+        threading.Thread(target=_upload_worker, daemon=True, name=f"upload-{i}")
+        for i in range(upload_workers)
+    ]
+    for t in upload_threads:
+        t.start()
+
+    # ── Launch process pool ───────────────────────────────────────────────────
+    log.info("[%s] Pipeline start — %d dates, %d process workers, %d upload workers",
+             yr, len(date_groups), process_workers, upload_workers)
+
+    with ThreadPoolExecutor(max_workers=process_workers, thread_name_prefix="proc") as pool:
+        futures = {
+            pool.submit(_process_date, dk, tiles): dk
+            for dk, tiles in date_groups.items()
+        }
+        for fut in as_completed(futures):
+            dk = futures[fut]
+            exc = fut.exception()
+            if exc:
+                log.error("[%s] Uncaught exception: %s", dk, exc)
+
+    # ── Signal upload threads to stop ─────────────────────────────────────────
+    for _ in upload_threads:
+        upload_q.put(_SENTINEL)
+    for t in upload_threads:
+        t.join()
+
+    if errors:
+        log.warning("[%s] Pipeline finished with %d error(s):", yr, len(errors))
+        for e in errors:
+            log.warning("  %s", e)
+    else:
+        log.info("[%s] Pipeline done — %d date(s) processed", yr, len(processed_paths))
+
+    return processed_paths, s2_ref_path[0]
+
+
 def test_merge(raw_dir: str, year: str, out_dir: str) -> None:
     """
     Merge + inspect only — no CDL, no upload, no delete.
@@ -580,6 +717,8 @@ def main(
     flat_dir           : bool = False,  # raw_s2_dir has no year subdir
     shutdown           : bool = False,
     overwrite          : bool = False,
+    process_workers    : int  = 2,
+    upload_workers     : int  = 1,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
 
@@ -613,24 +752,31 @@ def main(
             log.warning("  No tile groups for year %s — skipping", yr)
             continue
 
-        # Temp dir for merged (pre-nodata) files; cleaned up unless --keep-merged
         merge_tmp_dir = _ROOT / "data" / "raw" / "s2" / yr / "_merged"
-        merge_tmp_dir.mkdir(parents=True, exist_ok=True)
+        s2_out_dir    = S2_PROCESSED_DIR / yr
 
-        s2_out_dir   = S2_PROCESSED_DIR / yr
-        s2_out_dir.mkdir(parents=True, exist_ok=True)
+        from crop_mapping_pipeline.config import (
+            GDRIVE_PROCESSED_S2_FOLDER_IDS, GDRIVE_PROCESSED_CDL_FOLDER_ID,
+        )
+        _s2_ids = s2_folder_ids or GDRIVE_PROCESSED_S2_FOLDER_IDS
+        _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
 
-        all_raw_tiles, all_processed, s2_ref_path = process_date_batch(
-            date_groups   = groups,
-            yr            = yr,
-            s2_out_dir    = s2_out_dir,
-            merge_tmp_dir = merge_tmp_dir,
-            keep_merged   = keep_merged,
-            overwrite     = overwrite,
+        all_processed, s2_ref_path = _pipeline_year(
+            date_groups    = groups,
+            yr             = yr,
+            s2_out_dir     = s2_out_dir,
+            merge_tmp_dir  = merge_tmp_dir,
+            skip_upload    = skip_upload,
+            skip_delete    = skip_delete,
+            overwrite      = overwrite,
+            process_workers= process_workers,
+            upload_workers = upload_workers,
+            s2_folder_ids  = _s2_ids,
+            cdl_folder_id  = _cdl_id,
         )
         log.info("  Processed %d date(s) for year %s", len(all_processed), yr)
 
-        # ── CDL processing ─────────────────────────────────────────────────────
+        # ── CDL processing (after pipeline — needs s2_ref_path) ───────────────
         cdl_dir  = (pathlib.Path(raw_cdl_dir) if raw_cdl_dir
                     else _ROOT / "data" / "raw" / "cdl")
         cdl_raw  = next(
@@ -648,37 +794,10 @@ def main(
             cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
             process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
 
-        # ── Upload ─────────────────────────────────────────────────────────────
-        if not skip_upload:
-            from crop_mapping_pipeline.config import (
-                GDRIVE_PROCESSED_S2_FOLDER_IDS, GDRIVE_PROCESSED_CDL_FOLDER_ID,
-            )
-            _s2_ids  = s2_folder_ids  or GDRIVE_PROCESSED_S2_FOLDER_IDS
-            _cdl_id  = cdl_folder_id  or GDRIVE_PROCESSED_CDL_FOLDER_ID
-            if _s2_ids and _cdl_id:
-                log.info("  Uploading to Google Drive...")
-                upload_year(
-                    s2_processed_paths = all_processed,
-                    cdl_filtered_path  = cdl_filtered or "",
-                    year               = yr,
-                    s2_folder_ids      = _s2_ids,
-                    cdl_folder_id      = _cdl_id,
-                    overwrite          = overwrite,
-                )
-            else:
-                log.warning(
-                    "  --skip-upload not set but no GDrive folder IDs provided — "
-                    "pass --s2-folder-ids / --cdl-folder-id or use --skip-upload"
-                )
-        else:
-            log.info("  Upload skipped (--skip-upload)")
-
-        # ── Delete raw tiles ───────────────────────────────────────────────────
-        if not skip_delete:
-            log.info("  Deleting raw tiles...")
-            delete_files(all_raw_tiles, label="tile")
-        else:
-            log.info("  Raw tiles kept (--skip-delete)")
+        # ── Upload CDL (S2 files uploaded per-date inside pipeline) ───────────
+        if not skip_upload and cdl_filtered and _s2_ids and _cdl_id:
+            service = _build_drive_service()
+            upload_file(cdl_filtered, _cdl_id, service)
 
         log.info("Year %s done.\n", yr)
 
@@ -777,6 +896,14 @@ if __name__ == "__main__":
         help="Stop the VPS 8 minutes after processing (Linux / RunPod).",
     )
     parser.add_argument(
+        "--process-workers", type=int, default=2,
+        help="Parallel merge+nodata workers (default: 2; limited by RAM — each holds ~1 GB mosaic)",
+    )
+    parser.add_argument(
+        "--upload-workers", type=int, default=1,
+        help="Parallel GDrive upload workers (default: 1; GDrive throttles concurrent uploads)",
+    )
+    parser.add_argument(
         "--auth", action="store_true",
         help="Generate OAuth token via browser (run locally once).",
     )
@@ -823,16 +950,18 @@ if __name__ == "__main__":
         sys.exit(0)
 
     main(
-        years         = args.years,
-        raw_s2_dir    = args.raw_s2_dir,
-        raw_cdl_dir   = args.raw_cdl_dir,
-        data_dir      = args.data_dir,
-        s2_folder_ids = s2_folder_ids,
-        cdl_folder_id = args.cdl_folder_id,
-        skip_upload   = args.skip_upload,
-        skip_delete   = args.skip_delete,
-        keep_merged   = args.keep_merged,
-        flat_dir      = args.flat_dir,
-        shutdown      = args.shutdown,
-        overwrite     = args.overwrite,
+        years           = args.years,
+        raw_s2_dir      = args.raw_s2_dir,
+        raw_cdl_dir     = args.raw_cdl_dir,
+        data_dir        = args.data_dir,
+        s2_folder_ids   = s2_folder_ids,
+        cdl_folder_id   = args.cdl_folder_id,
+        skip_upload     = args.skip_upload,
+        skip_delete     = args.skip_delete,
+        keep_merged     = args.keep_merged,
+        flat_dir        = args.flat_dir,
+        shutdown        = args.shutdown,
+        overwrite       = args.overwrite,
+        process_workers = args.process_workers,
+        upload_workers  = args.upload_workers,
     )
