@@ -719,6 +719,7 @@ def main(
     overwrite          : bool = False,
     process_workers    : int  = 2,
     upload_workers     : int  = 1,
+    download_workers   : int  = 2,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
 
@@ -757,7 +758,7 @@ def main(
                     folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
                     output_dir = str(s2_raw_dir.parent),
                     years      = [yr],
-                    workers    = upload_workers,  # reuse upload_workers for download
+                    workers    = download_workers,
                 )
                 groups = group_tiles_by_date(str(s2_raw_dir), yr)
             except Exception as exc:
@@ -919,6 +920,10 @@ if __name__ == "__main__":
         help="Parallel GDrive upload workers (default: 1; GDrive throttles concurrent uploads)",
     )
     parser.add_argument(
+        "--download-workers", type=int, default=2,
+        help="Parallel GDrive download workers for auto-download (default: 2)",
+    )
+    parser.add_argument(
         "--auth", action="store_true",
         help="Generate OAuth token via browser (run locally once).",
     )
@@ -977,6 +982,7 @@ if __name__ == "__main__":
         flat_dir        = args.flat_dir,
         shutdown        = args.shutdown,
         overwrite       = args.overwrite,
-        process_workers = args.process_workers,
-        upload_workers  = args.upload_workers,
+        process_workers  = args.process_workers,
+        upload_workers   = args.upload_workers,
+        download_workers = args.download_workers,
     )
