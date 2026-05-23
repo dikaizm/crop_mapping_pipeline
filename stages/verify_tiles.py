@@ -113,7 +113,7 @@ def main():
             path, ok, err, tiles, elapsed = future.result()
             results[(yr, f)] = (ok, err, tiles, elapsed)
             done += 1
-            date = f.stem.replace("S2H_", "").replace("_processed", "").replace("_", "-")
+            date = f.stem.replace("_processed", "")
             status = "OK  " if ok else "FAIL"
             print(
                 f"[{done:>3}/{total}  {done/total*100:5.1f}%]  "
