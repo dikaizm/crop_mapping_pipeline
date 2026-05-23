@@ -45,7 +45,7 @@ from queue import Queue
 
 import numpy as np
 import rasterio
-from rasterio.merge import merge as rio_merge
+import rasterio.windows
 from rasterio.warp import reproject, Resampling
 from dotenv import load_dotenv
 
@@ -134,12 +134,14 @@ def _is_valid_tiff(path: Path) -> bool:
 
 def merge_tiles(tile_paths: list, out_path: str) -> None:
     """
-    Mosaic a list of TIF tiles into a single file using rasterio.merge.
+    Mosaic tiles via GDAL VRT + streaming translate — never loads full mosaic into RAM.
 
-    Strategy: first valid pixel wins (method="first").
-    Output preserves the CRS, pixel size, and band count of the inputs.
-    GEE tiles may overlap slightly at boundaries — rasterio.merge handles this.
+    Strategy: first valid pixel wins (GDAL default for overlapping tiles in VRT).
+    Output: tiled LZW GeoTIFF written block-by-block.
     """
+    from osgeo import gdal
+    gdal.UseExceptions()
+
     out = Path(out_path)
     if out.exists():
         if _is_valid_tiff(out):
@@ -149,48 +151,64 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
         out.unlink()
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".tmp.tif")
+    tmp     = out.with_suffix(".tmp.tif")
+    vrt_path = out.with_suffix(".vrt")
 
-    srcs = [rasterio.open(p) for p in tile_paths]
     try:
-        mosaic, transform = rio_merge(srcs, method="first")
-        profile = srcs[0].profile.copy()
-        profile.update(
-            width     = mosaic.shape[2],
-            height    = mosaic.shape[1],
-            transform = transform,
-            compress  = "lzw",
-            tiled     = True,
-            blockxsize= 256,
-            blockysize= 256,
+        # Build in-memory VRT — no RAM for pixel data
+        vrt = gdal.BuildVRT(str(vrt_path), [str(p) for p in tile_paths])
+        if vrt is None:
+            raise RuntimeError(f"gdal.BuildVRT failed for {out.name}")
+        vrt.FlushCache()
+        vrt = None  # close VRT dataset before translate
+
+        # Stream VRT → compressed tiled GeoTIFF block-by-block
+        ds = gdal.Translate(
+            str(tmp),
+            str(vrt_path),
+            format        = "GTiff",
+            creationOptions = [
+                "COMPRESS=LZW",
+                "TILED=YES",
+                "BLOCKXSIZE=256",
+                "BLOCKYSIZE=256",
+                "BIGTIFF=IF_SAFER",
+            ],
         )
-        with rasterio.open(tmp, "w", **profile) as dst:
-            dst.write(mosaic)
+        if ds is None:
+            raise RuntimeError(f"gdal.Translate failed for {out.name}")
+        ds.FlushCache()
+        ds = None
+
         tmp.rename(out)
     except Exception:
-        if tmp.exists():
-            tmp.unlink()
+        tmp.unlink(missing_ok=True)
+        vrt_path.unlink(missing_ok=True)
         raise
     finally:
-        for s in srcs:
-            s.close()
+        vrt_path.unlink(missing_ok=True)
 
     log.info("  Merged → %s  (%d tiles)", out.name, len(tile_paths))
 
 
 # ── Valid-data check ────────────────────────────────────────────────────────────
 
-def _has_valid_data(path: str, min_valid_frac: float = 0.01) -> bool:
+def _has_valid_data(path: str, min_valid_frac: float = 0.01,
+                    sample_size: int = 1024) -> bool:
     """
-    Return True if the merged TIF has at least min_valid_frac valid pixels.
+    Sample a centre window to check valid pixel fraction — avoids loading full raster.
     Valid = positive, finite, non-zero across all bands.
-    Dates where GEE captured nothing useful will have near-0% valid pixels.
     """
     with rasterio.open(path) as src:
-        data = src.read().astype(np.float32)   # (bands, H, W)
-    valid = np.all((data > 0) & np.isfinite(data), axis=0)  # pixel valid iff ALL bands positive
+        h, w = src.height, src.width
+        row  = max(0, (h - sample_size) // 2)
+        col  = max(0, (w - sample_size) // 2)
+        ph   = min(sample_size, h)
+        pw   = min(sample_size, w)
+        data = src.read(window=rasterio.windows.Window(col, row, pw, ph)).astype(np.float32)
+    valid = np.all((data > 0) & np.isfinite(data), axis=0)
     frac  = valid.sum() / valid.size
-    log.info("  Valid pixel fraction: %.2f%%", frac * 100)
+    log.info("  Valid pixel fraction (sample): %.2f%%", frac * 100)
     return frac >= min_valid_frac
 
 
@@ -199,36 +217,43 @@ def _has_valid_data(path: str, min_valid_frac: float = 0.01) -> bool:
 def assign_nodata(in_path: str, out_path: str, overwrite: bool = False) -> str:
     """
     Assign NoData (negative / NaN / Inf → S2_NODATA) and cast to float32.
+    Processes band-by-band to avoid loading full raster into RAM.
     Skips if out_path already exists (unless overwrite=True).
     Returns out_path.
     """
-    if Path(out_path).exists() and not overwrite:
-        log.info("  Already processed: %s", Path(out_path).name)
+    out = Path(out_path)
+    if out.exists() and not overwrite:
+        log.info("  Already processed: %s", out.name)
         return out_path
 
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp.tif")
 
-    with rasterio.open(in_path) as src:
-        profile = src.profile.copy()
-        profile.update(dtype="float32", nodata=S2_NODATA,
-                       compress="deflate", predictor=3,
-                       tiled=True, blockxsize=256, blockysize=256)
-        data = src.read().astype(np.float32)
+    try:
+        with rasterio.open(in_path) as src:
+            profile = src.profile.copy()
+            profile.update(dtype="float32", nodata=S2_NODATA,
+                           compress="deflate", predictor=3,
+                           tiled=True, blockxsize=256, blockysize=256)
+            total_invalid = 0
+            with rasterio.open(tmp, "w", **profile) as dst:
+                for band in range(1, src.count + 1):
+                    data                     = src.read(band).astype(np.float32)
+                    invalid                  = (data < 0) | np.isnan(data) | np.isinf(data)
+                    data[invalid]            = S2_NODATA
+                    total_invalid           += int(invalid.sum())
+                    dst.write(data, band)
 
-    invalid       = (data < 0) | np.isnan(data) | np.isinf(data)
-    data[invalid] = S2_NODATA
+        with rasterio.open(tmp, "r+") as dst:
+            dst.build_overviews([4, 8, 16, 32], Resampling.average)
+            dst.update_tags(ns="rio_overview", resampling="average")
 
-    with rasterio.open(out_path, "w", **profile) as dst:
-        dst.write(data)
+        tmp.rename(out)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
-    # Build internal overview pyramids for fast QGIS rendering at any zoom level.
-    # Skip level 2 (too large, adds ~33% file size with minimal benefit).
-    with rasterio.open(out_path, "r+") as dst:
-        dst.build_overviews([4, 8, 16, 32], Resampling.average)
-        dst.update_tags(ns="rio_overview", resampling="average")
-
-    log.info("  Processed: %s  (invalid_px=%s)",
-             Path(out_path).name, f"{invalid.sum():,}")
+    log.info("  Processed: %s  (invalid_px=%s)", out.name, f"{total_invalid:,}")
     return out_path
 
 
