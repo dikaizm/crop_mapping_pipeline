@@ -134,11 +134,12 @@ def _is_valid_tiff(path: Path) -> bool:
 
 def merge_tiles(tile_paths: list, out_path: str) -> None:
     """
-    Mosaic same-CRS same-resolution GEE tiles by pixel offset — one band at a time.
-
-    RAM usage: one band of one tile (~src.width * src.height * 4 bytes) at a time.
-    Strategy: last tile written wins for overlapping pixels (GEE tiles rarely overlap).
+    Mosaic tiles via gdal.BuildVRT + gdal.Translate — streams block-by-block,
+    never loads full mosaic into RAM. Produces clean libtiff-compatible GeoTIFF.
     """
+    from osgeo import gdal
+    gdal.UseExceptions()
+
     out = Path(out_path)
     if out.exists():
         if _is_valid_tiff(out):
@@ -148,44 +149,40 @@ def merge_tiles(tile_paths: list, out_path: str) -> None:
         out.unlink()
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".tmp.tif")
+    tmp      = out.with_suffix(".tmp.tif")
+    vrt_path = str(out.with_suffix(".vrt"))
 
-    srcs = [rasterio.open(p) for p in tile_paths]
     try:
-        ref   = srcs[0]
-        res_x = ref.transform.a        # pixel width  (positive)
-        res_y = abs(ref.transform.e)   # pixel height (positive)
+        vrt = gdal.BuildVRT(vrt_path, [str(p) for p in tile_paths])
+        if vrt is None:
+            raise RuntimeError(f"gdal.BuildVRT failed for {out.name}")
+        vrt.FlushCache()
+        vrt = None
 
-        left   = min(s.bounds.left   for s in srcs)
-        bottom = min(s.bounds.bottom for s in srcs)
-        right  = max(s.bounds.right  for s in srcs)
-        top    = max(s.bounds.top    for s in srcs)
-
-        out_w   = round((right - left) / res_x)
-        out_h   = round((top - bottom) / res_y)
-        out_tf  = rasterio.transform.from_origin(left, top, res_x, res_y)
-
-        profile = ref.profile.copy()
-        profile.update(
-            width=out_w, height=out_h, transform=out_tf,
-            compress="lzw", tiled=True, blockxsize=256, blockysize=256,
+        ds = gdal.Translate(
+            str(tmp),
+            vrt_path,
+            format          = "GTiff",
+            creationOptions = [
+                "COMPRESS=LZW",
+                "TILED=YES",
+                "BLOCKXSIZE=256",
+                "BLOCKYSIZE=256",
+                "BIGTIFF=IF_SAFER",
+            ],
         )
-
-        with rasterio.open(tmp, "w", **profile) as dst:
-            for src in srcs:
-                col_off = round((src.bounds.left - left) / res_x)
-                row_off = round((top - src.bounds.top)   / res_y)
-                win     = rasterio.windows.Window(col_off, row_off, src.width, src.height)
-                for band in range(1, src.count + 1):
-                    dst.write(src.read(band), band, window=win)
+        if ds is None:
+            raise RuntimeError(f"gdal.Translate failed for {out.name}")
+        ds.FlushCache()
+        ds = None
 
         tmp.rename(out)
     except Exception:
         tmp.unlink(missing_ok=True)
+        Path(vrt_path).unlink(missing_ok=True)
         raise
     finally:
-        for s in srcs:
-            s.close()
+        Path(vrt_path).unlink(missing_ok=True)
 
     log.info("  Merged → %s  (%d tiles)", out.name, len(tile_paths))
 
