@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -19,20 +20,28 @@ TILE = 256
 DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
 
 
-def scan_file(path: Path, tile_size: int = TILE) -> tuple[Path, bool, str]:
-    """Read every tile of every band. Return (path, ok, error_msg)."""
+def scan_file(path: Path, tile_size: int = TILE) -> tuple[Path, bool, str, int, float]:
+    """Read every tile of every band. Return (path, ok, error_msg, tiles_read, elapsed_s)."""
+    t0 = time.monotonic()
+    tiles_read = 0
     try:
         with rasterio.open(path) as src:
             h, w, nb = src.height, src.width, src.count
+            cols = (w + tile_size - 1) // tile_size
+            rows = (h + tile_size - 1) // tile_size
+            total_tiles = nb * rows * cols
             for band in range(1, nb + 1):
                 for y in range(0, h, tile_size):
                     for x in range(0, w, tile_size):
                         ph = min(tile_size, h - y)
                         pw = min(tile_size, w - x)
                         src.read(band, window=rasterio.windows.Window(x, y, pw, ph))
-        return path, True, ""
+                        tiles_read += 1
+        elapsed = time.monotonic() - t0
+        return path, True, "", tiles_read, elapsed
     except Exception as e:
-        return path, False, str(e)
+        elapsed = time.monotonic() - t0
+        return path, False, str(e), tiles_read, elapsed
 
 
 def main():
@@ -83,37 +92,51 @@ def main():
         print("No files found.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Scanning {len(files)} files with tile={args.tile_size}px, workers={args.workers}...")
+    total = len(files)
+    print(f"Scanning {total} files  tile={args.tile_size}px  workers={args.workers}")
     print()
 
     failed = []
     ok_count = 0
+    total_tiles = 0
+    wall_t0 = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         future_map = {
             pool.submit(scan_file, f, args.tile_size): (yr, f)
             for yr, f in files
         }
-        # preserve order for display
         results = {}
+        done = 0
         for future in as_completed(future_map):
             yr, f = future_map[future]
-            path, ok, err = future.result()
-            results[(yr, f)] = (ok, err)
+            path, ok, err, tiles, elapsed = future.result()
+            results[(yr, f)] = (ok, err, tiles, elapsed)
+            done += 1
+            date = f.stem.replace("S2H_", "").replace("_processed", "").replace("_", "-")
+            status = "OK  " if ok else "FAIL"
+            print(
+                f"[{done:>3}/{total}  {done/total*100:5.1f}%]  "
+                f"{status}  {yr}/{date}  "
+                f"{tiles:>6} tiles  {elapsed:5.1f}s"
+                + (f"  — {err}" if not ok else "")
+            )
 
-    for yr, f in files:
-        ok, err = results[(yr, f)]
-        date = f.stem.replace("S2H_", "").replace("_processed", "").replace("_", "-")
-        if ok:
-            print(f"OK    {yr}/{date}")
-            ok_count += 1
-        else:
-            print(f"FAIL  {yr}/{date}  —  {err}")
-            failed.append((yr, f, err))
+    wall_elapsed = time.monotonic() - wall_t0
 
     print()
-    print(f"{'='*50}")
-    print(f"Result: {ok_count}/{len(files)} files OK")
+    print("=" * 60)
+    for yr, f in files:
+        ok, err, tiles, _ = results[(yr, f)]
+        if ok:
+            ok_count += 1
+            total_tiles += tiles
+        else:
+            failed.append((yr, f, err))
+
+    print(f"Result : {ok_count}/{total} files OK")
+    print(f"Tiles  : {total_tiles:,} total tiles read")
+    print(f"Time   : {wall_elapsed:.1f}s wall  ({wall_elapsed/total:.1f}s avg/file)")
 
     if failed:
         print(f"\nFAILED ({len(failed)}):")
