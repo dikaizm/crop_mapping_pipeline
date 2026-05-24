@@ -1171,7 +1171,7 @@ def main(
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)
-    log.info(f"Registered experiments: {list(registry.keys())}")
+    log.info(f"Selected experiments: {expanded_exps}")
 
     plan = []
     for exp_key in expanded_exps:
