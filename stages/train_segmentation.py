@@ -118,7 +118,11 @@ def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_
         for local in range(n_bands_per_file):
             new_idx_map[fi * n_bands_per_file + local] = stacked
             stacked += 1
-    remapped = [new_idx_map[gi] for gi in band_indices]
+    skipped = [gi for gi in band_indices if gi not in new_idx_map]
+    if skipped:
+        log.warning("  Dropping %d channel(s) from excluded/empty S2 files: %s",
+                    len(skipped), skipped)
+    remapped = [new_idx_map[gi] for gi in band_indices if gi in new_idx_map]
     return filtered_paths, remapped
 
 
