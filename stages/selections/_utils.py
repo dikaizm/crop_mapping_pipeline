@@ -18,8 +18,8 @@ def build_channel_names(s2_paths: list[str]) -> tuple[list[str], list[str], dict
     dates_seen: list[str] = []
     for path in s2_paths:
         fname = os.path.basename(path)
-        m = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", fname)
-        date_str = f"{m.group(1)}{m.group(2)}{m.group(3)}" if m else fname[:8]
+        m = re.search(r"_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$", fname)
+        date_str = m.group(1).replace("_", "") if m else fname[:8]
         if date_str not in dates_seen:
             dates_seen.append(date_str)
         all_bandnames.extend([f"{band}_{date_str}" for band in S2_BAND_NAMES])

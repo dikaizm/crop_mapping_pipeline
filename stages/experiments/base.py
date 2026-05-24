@@ -14,8 +14,10 @@ log = logging.getLogger(__name__)
 
 
 def parse_date(path):
-    m = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", Path(path).name)
-    return f"{m.group(1)}{m.group(2)}{m.group(3)}" if m else None
+    m = re.search(r"_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$", Path(path).name)
+    if not m:
+        return None
+    return m.group(1).replace("_", "")
 
 
 def build_local_band_map(s2_processed):
