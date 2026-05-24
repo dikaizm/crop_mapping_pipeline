@@ -517,12 +517,10 @@ def main(
         log.info("Year: %s", yr)
         log.info("=" * 60)
 
-        if raw_s2_dir:
-            _p = pathlib.Path(raw_s2_dir)
-            # support both flat dir (all years together) and year-subdir layout
-            s2_raw_dir = _p if (_p / f"S2H_{yr}_{yr}_01_01.tif").exists() or not (_p / yr).exists() else _p / yr
-        else:
-            s2_raw_dir = _ROOT / "data" / "raw" / "s2" / yr
+        _base_raw = pathlib.Path(raw_s2_dir) if raw_s2_dir else _ROOT / "data" / "raw" / "s2"
+        _yr_sub   = _base_raw / yr
+        # use year-subdir if it exists and has files, otherwise fall back to flat base dir
+        s2_raw_dir = _yr_sub if _yr_sub.exists() and any(_yr_sub.glob(f"S2H_{yr}_*.tif")) else _base_raw
 
         _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V5_FOLDER_ID for yr in ALL_YEARS}
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
@@ -574,9 +572,10 @@ def main(
                 to_download = needed_gdrive - set(local_files.keys())
                 if to_download:
                     log.info("  Downloading %d missing date(s) from GDrive raw...", len(to_download))
+                    s2_raw_dir.mkdir(parents=True, exist_ok=True)
                     download_date_keys(
                         folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
-                        output_dir = str(s2_raw_dir.parent),
+                        output_dir = str(s2_raw_dir),
                         date_keys  = list(to_download),
                         workers    = download_workers,
                     )
