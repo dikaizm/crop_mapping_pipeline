@@ -3,8 +3,12 @@ Pipeline configuration — edit GDrive folder IDs and paths before running.
 All path settings can be overridden via --data-dir in pipeline.py.
 """
 
+import os
 import numpy as np
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 
 # ── Project root ───────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent   # crop_mapping_pipeline/
@@ -13,6 +17,10 @@ PROJECT_ROOT = Path(__file__).parent   # crop_mapping_pipeline/
 PROCESSED_DIR    = PROJECT_ROOT / "data" / "processed"
 S2_PROCESSED_DIR = PROCESSED_DIR / "s2"
 CDL_DIR          = PROCESSED_DIR / "cdl"
+
+# ── V5 local overrides (set in .env) ──────────────────────────────────────────
+RAW_S2_V5_DIR       = Path(os.environ["RAW_S2_V5_DIR"])       if "RAW_S2_V5_DIR"       in os.environ else None
+PROCESSED_V5_DIR    = Path(os.environ["PROCESSED_V5_DIR"])    if "PROCESSED_V5_DIR"    in os.environ else None
 MODELS_DIR       = PROJECT_ROOT / "ml_models"
 FIGURES_DIR      = PROJECT_ROOT / "documents" / "thesis" / "figures"
 LOGS_DIR         = PROJECT_ROOT / "logs"

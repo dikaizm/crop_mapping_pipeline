@@ -46,6 +46,7 @@ from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR,
     S2_NODATA, KEEP_CLASSES,
     GDRIVE_OAUTH_TOKEN,
+    RAW_S2_V5_DIR, PROCESSED_V5_DIR,
 )
 from crop_mapping_pipeline.utils.constants import USDA_CDL_NAMES
 from crop_mapping_pipeline.utils.label import label_filtering
@@ -473,6 +474,7 @@ def main(
     cdl_folder_id   : str  = None,
     skip_upload     : bool = False,
     skip_delete     : bool = False,
+    skip_download   : bool = False,
     shutdown        : bool = False,
     overwrite       : bool = False,
     process_workers : int  = 2,
@@ -480,6 +482,21 @@ def main(
     download_workers: int  = 2,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
+
+    # CLI arg > env var > default
+    _local_mode = False
+    if not data_dir and PROCESSED_V5_DIR:
+        data_dir = str(PROCESSED_V5_DIR)
+        _local_mode = True
+    if not raw_s2_dir and RAW_S2_V5_DIR:
+        raw_s2_dir = str(RAW_S2_V5_DIR)
+        _local_mode = True
+
+    # Local dirs set → skip all GDrive I/O and deletion
+    if _local_mode:
+        skip_upload   = True
+        skip_download = True
+        skip_delete   = True
 
     if data_dir:
         processed        = pathlib.Path(data_dir)
@@ -502,10 +519,11 @@ def main(
         log.info("Year: %s", yr)
         log.info("=" * 60)
 
-        s2_raw_dir = (
-            pathlib.Path(raw_s2_dir) / yr if raw_s2_dir
-            else _ROOT / "data" / "raw" / "s2" / yr
-        )
+        if raw_s2_dir:
+            _base = pathlib.Path(raw_s2_dir)
+            s2_raw_dir = _base / yr if (_base / yr).exists() else _base
+        else:
+            s2_raw_dir = _ROOT / "data" / "raw" / "s2" / yr
 
         _s2_ids = s2_folder_ids or {yr: GDRIVE_PROCESSED_V5_FOLDER_ID for yr in ALL_YEARS}
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
@@ -534,33 +552,36 @@ def main(
                      n_skipped, yr)
 
         # ── Step 4: Download missing dates from GDrive raw ────────────────────
-        try:
-            from crop_mapping_pipeline.stages.fetch_data_v5 import (
-                list_dates_by_year, download_date_keys,
-            )
-            gdrive_date_keys = set(
-                list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
-            )
-            needed_gdrive = {
-                dk for dk in gdrive_date_keys
-                if f"{dk}_processed.tif" not in already_uploaded
-            }
-            to_download = needed_gdrive - set(local_files.keys())
-            if to_download:
-                log.info("  Downloading %d missing date(s) from GDrive raw...", len(to_download))
-                download_date_keys(
-                    folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
-                    output_dir = str(s2_raw_dir.parent),
-                    date_keys  = list(to_download),
-                    workers    = download_workers,
+        if skip_download:
+            log.info("  GDrive download skipped (--skip-download)")
+        else:
+            try:
+                from crop_mapping_pipeline.stages.fetch_data_v5 import (
+                    list_dates_by_year, download_date_keys,
                 )
-                local_files  = list_raw_files(s2_raw_dir, yr)
-                needed_local = {
-                    dk: path for dk, path in local_files.items()
+                gdrive_date_keys = set(
+                    list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
+                )
+                needed_gdrive = {
+                    dk for dk in gdrive_date_keys
                     if f"{dk}_processed.tif" not in already_uploaded
                 }
-        except Exception as exc:
-            log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
+                to_download = needed_gdrive - set(local_files.keys())
+                if to_download:
+                    log.info("  Downloading %d missing date(s) from GDrive raw...", len(to_download))
+                    download_date_keys(
+                        folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
+                        output_dir = str(s2_raw_dir.parent),
+                        date_keys  = list(to_download),
+                        workers    = download_workers,
+                    )
+                    local_files  = list_raw_files(s2_raw_dir, yr)
+                    needed_local = {
+                        dk: path for dk, path in local_files.items()
+                        if f"{dk}_processed.tif" not in already_uploaded
+                    }
+            except Exception as exc:
+                log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
 
         if not needed_local:
             log.info("  All dates for year %s already in processed_v3 — skipping", yr)
@@ -640,6 +661,7 @@ if __name__ == "__main__":
                         help="Override processed output directory.")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-upload", action="store_true")
+    parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--skip-delete", action="store_true")
     parser.add_argument("--shutdown", action="store_true")
     parser.add_argument("--process-workers", type=int, default=2)
@@ -664,6 +686,7 @@ if __name__ == "__main__":
         raw_cdl_dir      = args.raw_cdl_dir,
         data_dir         = args.data_dir,
         skip_upload      = args.skip_upload,
+        skip_download    = args.skip_download,
         skip_delete      = args.skip_delete,
         shutdown         = args.shutdown,
         overwrite        = args.overwrite,
