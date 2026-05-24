@@ -651,6 +651,7 @@ def main(
                 log.warning("  No download URL configured for CDL year %s", yr)
 
         cdl_filtered = None
+        cdl_reprojected = None
         if not cdl_raw:
             log.warning("  Raw CDL for %s not found — skipping CDL processing", yr)
         elif s2_ref_path is None:
@@ -666,11 +667,14 @@ def main(
                 pathlib.Path(cdl_raw).unlink()
                 log.info("  Deleted raw CDL TIF (freed %.1f GB)", freed / 1e9)
 
-        if not skip_upload and cdl_filtered and _s2_ids:
+        if not skip_upload and _s2_ids:
             service    = _build_drive_service()
             v3_parent  = next(iter(_s2_ids.values()))
             cdl_folder = get_or_create_subfolder(v3_parent, "cdl", service)
-            upload_file(cdl_filtered, cdl_folder, service)
+            if cdl_reprojected and pathlib.Path(cdl_reprojected).exists():
+                upload_file(cdl_reprojected, cdl_folder, service)
+            if cdl_filtered and pathlib.Path(cdl_filtered).exists():
+                upload_file(cdl_filtered, cdl_folder, service)
 
         log.info("Year %s done.\n", yr)
 
