@@ -579,6 +579,9 @@ def main(
                         date_keys  = list(to_download),
                         workers    = download_workers,
                     )
+                    # download_date_keys may create year subdir — re-resolve
+                    if any(_yr_sub.glob(f"S2H_{yr}_*.tif")):
+                        s2_raw_dir = _yr_sub
                     local_files  = list_raw_files(s2_raw_dir, yr)
                     needed_local = {
                         dk: path for dk, path in local_files.items()
