@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 ALL_YEARS = ["2022", "2023", "2024"]
 
 # S2H_{year}_{YYYY_MM_DD}.tif  (no tile offsets)
-_FILE_RE = re.compile(r"^S2H_(\d{4})_(\d{4}_\d{2}_\d{2})\.tif$")
+_FILE_RE = re.compile(r"^S2H_(\d{4})_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$")
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────────
