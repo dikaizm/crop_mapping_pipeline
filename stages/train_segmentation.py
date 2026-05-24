@@ -1400,8 +1400,8 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--top-k", type=int, default=None, metavar="K",
-        help="Top-K per crop used during feature selection (loads select_gsi/rf_direct_k{K}.json). Default: SELECT_TOP_K_PER_CROP from config.",
+        "--top-k", type=int, nargs="+", default=None, metavar="K",
+        help="Top-K value(s) to sweep (loads select_gsi/rf_direct_k{K}.json per k). E.g. --top-k 5 10 15 20 30",
     )
     args = parser.parse_args()
 
@@ -1437,20 +1437,26 @@ if __name__ == "__main__":
         _upload_existing_models(filter_exps=args.exp, filter_archs=args.arch)
         sys.exit(0)
 
-    main(
-        exps=args.exp,
-        archs=args.arch,
-        loss_version=args.loss_version,
-        force=args.force,
-        data_dir=args.data_dir,
-        skip_viz=args.skip_viz,
-        stage2_run_id=args.stage2_run_id,
-        project_run_id=args.project_run_id,
-        v3_phases=args.v3_phase,
-        v3_ks=args.v3_k,
-        stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
-        top_k=args.top_k,
-    )
+    top_k_list = args.top_k or [None]
+    for k in top_k_list:
+        if k is not None:
+            log.info(f"{'='*65}")
+            log.info(f"  Top-K sweep: k={k}")
+            log.info(f"{'='*65}")
+        main(
+            exps=args.exp,
+            archs=args.arch,
+            loss_version=args.loss_version,
+            force=args.force,
+            data_dir=args.data_dir,
+            skip_viz=args.skip_viz,
+            stage2_run_id=args.stage2_run_id,
+            project_run_id=args.project_run_id,
+            v3_phases=args.v3_phase,
+            v3_ks=args.v3_k,
+            stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
+            top_k=k,
+        )
 
     if args.shutdown:
         import urllib.request, urllib.error, json as _json, time as _time
