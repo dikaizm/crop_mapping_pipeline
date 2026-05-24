@@ -44,7 +44,7 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split, ConcatDataset
+from torch.utils.data import DataLoader, random_split, ConcatDataset, WeightedRandomSampler
 import rasterio
 
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
@@ -329,6 +329,53 @@ def _plot_confusion_matrix(preds, labels, save_path):
     log.info(f"  Saved: {save_path}")
 
 
+# ── Class-weighted patch sampler ──────────────────────────────────────────────
+
+def _patch_weights(datasets: list) -> np.ndarray:
+    """
+    Compute a weight per patch across a list of RasterPatchDataset objects.
+    Weight = sum over classes of (patch_pixel_count[c] / global_pixel_count[c]).
+    Rare-class patches get higher weight → balanced mini-batches.
+    Uses the in-memory _cdl array — no S2 I/O.
+    """
+    ps = datasets[0].patch_size
+
+    # Pass 1: global class pixel counts
+    global_counts: dict[int, int] = {}
+    for ds in datasets:
+        cdl = ds._cdl
+        remap = ds._remap_lut
+        for r, c in ds.patches:
+            patch_cdl = cdl[r:r + ps, c:c + ps]
+            remapped  = remap[np.clip(patch_cdl, 0, 255)]
+            for cls_id in np.unique(remapped):
+                if cls_id == 0:
+                    continue
+                global_counts[int(cls_id)] = global_counts.get(int(cls_id), 0) + int((remapped == cls_id).sum())
+
+    if not global_counts:
+        # Fallback: uniform weights
+        return np.ones(sum(len(ds.patches) for ds in datasets), dtype=np.float32)
+
+    # Pass 2: per-patch weight
+    weights = []
+    for ds in datasets:
+        cdl   = ds._cdl
+        remap = ds._remap_lut
+        for r, c in ds.patches:
+            patch_cdl = cdl[r:r + ps, c:c + ps]
+            remapped  = remap[np.clip(patch_cdl, 0, 255)]
+            w = 0.0
+            for cls_id in np.unique(remapped):
+                if cls_id == 0:
+                    continue
+                cnt = int((remapped == cls_id).sum())
+                w  += cnt / global_counts[int(cls_id)]
+            weights.append(w if w > 0 else 1e-6)
+
+    return np.array(weights, dtype=np.float64)
+
+
 # ── Main experiment runner ────────────────────────────────────────────────────
 
 def run_experiment(
@@ -450,9 +497,18 @@ def run_experiment(
         min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
     )
 
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True, drop_last=True)
-    val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    # Class-weighted sampler: rare-class patches sampled more frequently
+    log.info("  Computing patch weights for class-balanced sampling...")
+    all_weights = _patch_weights(train_year_datasets)
+    train_weights = all_weights[train_ds.indices]
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(train_weights).double(),
+        num_samples=n_train,
+        replacement=True,
+    )
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
+    val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
+    test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
     log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {len(test_ds):,} test ({TEST_YEAR})")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
