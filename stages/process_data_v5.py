@@ -600,39 +600,37 @@ def main(
         cdl_subdir = cdl_dir / f"{yr}_30m_cdls"
         cdl_raw = next((_glob(str(cdl_subdir / "*.tif")).__iter__()), None)
 
-        # Auto-download from USDA NASS if missing
+        # Auto-download bbox-clipped CDL from USDA CropScape WCS (few MB, not full CONUS)
         if not cdl_raw:
-            from crop_mapping_pipeline.config import CDL_DOWNLOAD_URLS
-            url = CDL_DOWNLOAD_URLS.get(yr)
-            if url:
-                log.info("  Raw CDL for %s not found — downloading from USDA NASS...", yr)
-                try:
-                    import urllib.request, zipfile
-                    cdl_subdir.mkdir(parents=True, exist_ok=True)
-                    zip_dest = cdl_subdir / f"{yr}_30m_cdls.zip"
-                    if not zip_dest.exists():
-                        def _report(count, block, total):
-                            if total > 0 and count % 100 == 0:
-                                pct = min(100, count * block * 100 // total)
-                                log.info("    CDL download: %d%%", pct)
-                        urllib.request.urlretrieve(url, zip_dest, reporthook=_report)
-                        log.info("  Downloaded: %s  (%.0f MB)",
-                                 zip_dest.name, zip_dest.stat().st_size / 1e6)
-                    else:
-                        log.info("  ZIP already present: %s", zip_dest.name)
-                    log.info("  Extracting %s ...", zip_dest.name)
-                    with zipfile.ZipFile(zip_dest) as zf:
-                        zf.extractall(cdl_subdir)
-                    zip_dest.unlink(missing_ok=True)
-                    cdl_raw = next((_glob(str(cdl_subdir / "*.tif")).__iter__()), None)
-                    if cdl_raw:
-                        log.info("  CDL raw ready: %s", pathlib.Path(cdl_raw).name)
-                    else:
-                        log.warning("  Extraction done but no TIF found in %s", cdl_subdir)
-                except Exception as exc:
-                    log.error("  CDL download failed: %s", exc)
-            else:
-                log.warning("  No download URL for CDL year %s", yr)
+            log.info("  Raw CDL for %s not found — downloading bbox clip from CropScape WCS...", yr)
+            try:
+                import urllib.request, urllib.parse
+                cdl_subdir.mkdir(parents=True, exist_ok=True)
+                tif_dest = cdl_subdir / f"{yr}_30m_cdls.tif"
+                if not tif_dest.exists():
+                    # Sacramento Valley bbox with buffer (EPSG:4326)
+                    params = {
+                        "service": "WCS", "version": "1.0.0", "request": "GetCoverage",
+                        "coverage": f"cdl_{yr}",
+                        "CRS": "EPSG:4326",
+                        "BBOX": "-123.0,38.0,-120.5,40.5",
+                        "RESX": "0.00027", "RESY": "0.00027",
+                        "FORMAT": "GeoTIFF",
+                    }
+                    wcs_url = ("https://nassgeodata.gmu.edu/CropScapeService/wcsaccess?"
+                               + urllib.parse.urlencode(params))
+                    def _report(count, block, total):
+                        if total > 0 and count % 50 == 0:
+                            log.info("    CDL download: %d%%",
+                                     min(100, count * block * 100 // total))
+                    urllib.request.urlretrieve(wcs_url, tif_dest, reporthook=_report)
+                    log.info("  CDL bbox clip downloaded: %.1f MB",
+                             tif_dest.stat().st_size / 1e6)
+                else:
+                    log.info("  CDL bbox clip already present: %s", tif_dest.name)
+                cdl_raw = str(tif_dest) if tif_dest.exists() else None
+            except Exception as exc:
+                log.error("  CDL WCS download failed: %s", exc)
 
         cdl_filtered = None
         if not cdl_raw:
