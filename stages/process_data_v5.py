@@ -494,7 +494,7 @@ def main(
 
     from crop_mapping_pipeline.config import (
         GDRIVE_PROCESSED_V5_FOLDER_ID, GDRIVE_PROCESSED_CDL_FOLDER_ID,
-        GDRIVE_RAW_S2_V2_FOLDER_ID,
+        GDRIVE_RAW_S2_V5_FOLDER_ID as GDRIVE_RAW_S2_V2_FOLDER_ID,
     )
 
     for yr in years:
