@@ -600,37 +600,55 @@ def main(
         cdl_subdir = cdl_dir / f"{yr}_30m_cdls"
         cdl_raw = next((_glob(str(cdl_subdir / "*.tif")).__iter__()), None)
 
-        # Auto-download bbox-clipped CDL from USDA CropScape WCS (few MB, not full CONUS)
+        # Auto-download CDL from USDA NASS — stream-extract to avoid storing zip on disk
         if not cdl_raw:
-            log.info("  Raw CDL for %s not found — downloading bbox clip from CropScape WCS...", yr)
-            try:
-                import urllib.request, urllib.parse
-                cdl_subdir.mkdir(parents=True, exist_ok=True)
-                tif_dest = cdl_subdir / f"{yr}_30m_cdls.tif"
-                if not tif_dest.exists():
-                    # Sacramento Valley bbox with buffer (EPSG:4326)
-                    params = {
-                        "service": "WCS", "version": "1.0.0", "request": "GetCoverage",
-                        "coverage": f"cdl_{yr}",
-                        "CRS": "EPSG:4326",
-                        "BBOX": "-123.0,38.0,-120.5,40.5",
-                        "RESX": "0.00027", "RESY": "0.00027",
-                        "FORMAT": "GeoTIFF",
-                    }
-                    wcs_url = ("https://nassgeodata.gmu.edu/CropScapeService/wcsaccess?"
-                               + urllib.parse.urlencode(params))
-                    def _report(count, block, total):
-                        if total > 0 and count % 50 == 0:
-                            log.info("    CDL download: %d%%",
-                                     min(100, count * block * 100 // total))
-                    urllib.request.urlretrieve(wcs_url, tif_dest, reporthook=_report)
-                    log.info("  CDL bbox clip downloaded: %.1f MB",
-                             tif_dest.stat().st_size / 1e6)
-                else:
-                    log.info("  CDL bbox clip already present: %s", tif_dest.name)
-                cdl_raw = str(tif_dest) if tif_dest.exists() else None
-            except Exception as exc:
-                log.error("  CDL WCS download failed: %s", exc)
+            from crop_mapping_pipeline.config import CDL_DOWNLOAD_URLS
+            url = CDL_DOWNLOAD_URLS.get(yr)
+            if url:
+                log.info("  Raw CDL for %s not found — stream-downloading from USDA NASS...", yr)
+                try:
+                    import urllib.request, zipfile, io
+                    cdl_subdir.mkdir(parents=True, exist_ok=True)
+                    tif_dest = cdl_subdir / f"{yr}_30m_cdls.tif"
+                    if not tif_dest.exists():
+                        log.info("  Streaming %s (no temp zip — direct extract)...", url)
+                        with urllib.request.urlopen(url) as resp:
+                            total = int(resp.headers.get("Content-Length", 0))
+                            buf = io.BytesIO()
+                            downloaded = 0
+                            chunk = 8 * 1024 * 1024  # 8 MB chunks
+                            while True:
+                                data = resp.read(chunk)
+                                if not data:
+                                    break
+                                buf.write(data)
+                                downloaded += len(data)
+                                if total:
+                                    log.info("    CDL buffer: %d%%",
+                                             downloaded * 100 // total)
+                        log.info("  Extracting from buffer (%.0f MB)...",
+                                 buf.tell() / 1e6)
+                        buf.seek(0)
+                        with zipfile.ZipFile(buf) as zf:
+                            tif_members = [m for m in zf.namelist()
+                                           if m.endswith(".tif")]
+                            if not tif_members:
+                                raise RuntimeError("No TIF in ZIP")
+                            for member in tif_members:
+                                log.info("  Extracting: %s", member)
+                                src = zf.open(member)
+                                with open(tif_dest, "wb") as dst:
+                                    import shutil
+                                    shutil.copyfileobj(src, dst)
+                        log.info("  CDL extracted: %.0f MB",
+                                 tif_dest.stat().st_size / 1e6)
+                    else:
+                        log.info("  CDL TIF already present: %s", tif_dest.name)
+                    cdl_raw = str(tif_dest) if tif_dest.exists() else None
+                except Exception as exc:
+                    log.error("  CDL download/extract failed: %s", exc)
+            else:
+                log.warning("  No download URL configured for CDL year %s", yr)
 
         cdl_filtered = None
         if not cdl_raw:
@@ -642,6 +660,11 @@ def main(
             cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
             cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
             process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
+            # Delete raw CDL after processing — full CONUS TIF is large (~8 GB)
+            if not skip_delete and pathlib.Path(cdl_raw).exists():
+                freed = pathlib.Path(cdl_raw).stat().st_size
+                pathlib.Path(cdl_raw).unlink()
+                log.info("  Deleted raw CDL TIF (freed %.1f GB)", freed / 1e9)
 
         if not skip_upload and cdl_filtered and _s2_ids:
             service    = _build_drive_service()
