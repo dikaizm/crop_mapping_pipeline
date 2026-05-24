@@ -1192,12 +1192,10 @@ def main(
     # ── MLflow setup ────────────────────────────────────────────────────────
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-    # ── Run experiments — one MLflow experiment per (exp_key, arch) ─────────
-    # Each run is top-level (no nested parent) in its own arch-scoped experiment.
+    # ── Run experiments — one top-level MLflow run per (exp_key, arch) ──────
     all_results = []
     for exp_key, arch, band_idx, band_names, description, extra_kw in plan:
-        base_exp = registry[exp_key].mlflow_experiment
-        mlflow.set_experiment(f"{base_exp}_{arch}")
+        mlflow.set_experiment(registry[exp_key].mlflow_experiment)
         exp_name = f"exp_{exp_key}_{arch}"
         result = run_experiment(
             exp_name=exp_name,
