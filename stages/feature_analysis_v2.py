@@ -157,12 +157,20 @@ def get_stage2_output_path(selector: str) -> pathlib.Path:
     return STAGE3_EXP_C_V2_RF_BANDS if selector == "rf" else STAGE3_EXP_C_V2_BANDS
 
 
+def _glob_s2_year(yr: str) -> list[str]:
+    """Glob S2 files for a year — matches both raw and _processed filenames."""
+    d = S2_PROCESSED_DIR / yr
+    files = sorted(glob(str(d / "*_processed.tif")) + glob(str(d / "S2H_*.tif")))
+    seen = set()
+    return [p for p in files if not (p in seen or seen.add(p))]
+
+
 def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, int]]:
     all_bandnames = []
     for s2_path in s2_files:
         fname = os.path.basename(s2_path)
-        match = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", fname)
-        date_str = f"{match.group(1)}{match.group(2)}{match.group(3)}" if match else fname[:8]
+        match = re.search(r"_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$", fname)
+        date_str = match.group(1).replace("_", "") if match else fname[:8]
         all_bandnames.extend([f"{band}_{date_str}" for band in S2_BAND_NAMES])
     return all_bandnames, {name: idx for idx, name in enumerate(all_bandnames)}
 
@@ -170,7 +178,7 @@ def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, in
 def get_train_year_inputs() -> tuple[str, list[str], str]:
     """Primary training year (2022) — used by Stage 2 and Stage 2v3."""
     s2_year = TRAIN_YEARS[0]
-    s2_files = sorted(glob(str(S2_PROCESSED_DIR / s2_year / "*_processed.tif")))
+    s2_files = _glob_s2_year(s2_year)
     assert s2_files, f"No S2 files for year {s2_year} in {S2_PROCESSED_DIR}"
     cdl_path = str(CDL_BY_YEAR[s2_year])
     assert os.path.exists(cdl_path), f"CDL not found: {cdl_path}"
@@ -184,7 +192,7 @@ def get_stage1_inputs() -> list[tuple[str, list[str], str]]:
     """
     result = []
     for yr in TRAIN_YEARS:
-        s2_files = sorted(glob(str(S2_PROCESSED_DIR / yr / "*_processed.tif")))
+        s2_files = _glob_s2_year(yr)
         cdl_path = str(CDL_BY_YEAR[yr])
         if not s2_files:
             log.warning(f"Stage 1: no S2 files for year {yr} — skipping")
@@ -666,15 +674,15 @@ def run_project_v2() -> None:
 
     projected = {}
     for year in list(dict.fromkeys(list(TRAIN_YEARS) + [TEST_YEAR])):
-        year_files = sorted(glob(str(S2_PROCESSED_DIR / year / "*_processed.tif")))
+        year_files = _glob_s2_year(year)
         if not year_files:
             log.warning(f"  {year}: no S2 files found — skipping")
             continue
         year_dates = []
         for path in year_files:
-            match = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", pathlib.Path(path).name)
+            match = re.search(r"_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$", pathlib.Path(path).name)
             if match:
-                year_dates.append(f"{match.group(1)}{match.group(2)}{match.group(3)}")
+                year_dates.append(match.group(1).replace("_", ""))
         year_dates = sorted(set(year_dates))
 
         year_bands = []
