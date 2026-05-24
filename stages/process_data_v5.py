@@ -512,58 +512,7 @@ def main(
         _cdl_id = cdl_folder_id or GDRIVE_PROCESSED_CDL_FOLDER_ID
         _v3     = GDRIVE_PROCESSED_V5_FOLDER_ID
 
-        # ── Step 1: Check processed_v3 — what's already uploaded ─────────────
-        already_uploaded: set = set()
-        if not overwrite and not skip_upload:
-            try:
-                _svc = _build_drive_service()
-                already_uploaded = list_gdrive_processed(_v3, yr, _svc)
-            except Exception as exc:
-                log.warning("  GDrive pre-check failed (%s) — processing all local dates", exc)
-
-        # ── Step 2: Scan local raw files ──────────────────────────────────────
-        local_files = list_raw_files(s2_raw_dir, yr)
-
-        # ── Step 3: Filter to dates still needed ─────────────────────────────
-        needed_local = {
-            dk: path for dk, path in local_files.items()
-            if f"{dk}_processed.tif" not in already_uploaded
-        }
-        n_skipped = len(local_files) - len(needed_local)
-        if n_skipped:
-            log.info("  Skipping %d local date(s) already in processed_v3/s2/%s/",
-                     n_skipped, yr)
-
-        # ── Step 4: Download missing dates from GDrive raw ────────────────────
-        try:
-            from crop_mapping_pipeline.stages.fetch_data_v5 import (
-                list_dates_by_year, download_date_keys,
-            )
-            gdrive_date_keys = set(
-                list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
-            )
-            needed_gdrive = {
-                dk for dk in gdrive_date_keys
-                if f"{dk}_processed.tif" not in already_uploaded
-            }
-            to_download = needed_gdrive - set(local_files.keys())
-            if to_download:
-                log.info("  Downloading %d missing date(s) from GDrive raw...", len(to_download))
-                download_date_keys(
-                    folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
-                    output_dir = str(s2_raw_dir.parent),
-                    date_keys  = list(to_download),
-                    workers    = download_workers,
-                )
-                local_files  = list_raw_files(s2_raw_dir, yr)
-                needed_local = {
-                    dk: path for dk, path in local_files.items()
-                    if f"{dk}_processed.tif" not in already_uploaded
-                }
-        except Exception as exc:
-            log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
-
-        # ── CDL-only mode: skip S2, use existing processed S2 as grid ref ────
+        # ── CDL-only mode: skip all S2 steps, use existing processed S2 as grid ref ──
         if cdl_only:
             existing = sorted((S2_PROCESSED_DIR / yr).glob("*_processed.tif"))
             if not existing:
@@ -572,6 +521,57 @@ def main(
             s2_ref_path = str(existing[0])
             log.info("  --cdl-only: grid ref = %s", pathlib.Path(s2_ref_path).name)
         else:
+            # ── Step 1: Check processed_v3 — what's already uploaded ─────────
+            already_uploaded: set = set()
+            if not overwrite and not skip_upload:
+                try:
+                    _svc = _build_drive_service()
+                    already_uploaded = list_gdrive_processed(_v3, yr, _svc)
+                except Exception as exc:
+                    log.warning("  GDrive pre-check failed (%s) — processing all local dates", exc)
+
+            # ── Step 2: Scan local raw files ──────────────────────────────────
+            local_files = list_raw_files(s2_raw_dir, yr)
+
+            # ── Step 3: Filter to dates still needed ─────────────────────────
+            needed_local = {
+                dk: path for dk, path in local_files.items()
+                if f"{dk}_processed.tif" not in already_uploaded
+            }
+            n_skipped = len(local_files) - len(needed_local)
+            if n_skipped:
+                log.info("  Skipping %d local date(s) already in processed_v3/s2/%s/",
+                         n_skipped, yr)
+
+            # ── Step 4: Download missing dates from GDrive raw ────────────────
+            try:
+                from crop_mapping_pipeline.stages.fetch_data_v5 import (
+                    list_dates_by_year, download_date_keys,
+                )
+                gdrive_date_keys = set(
+                    list_dates_by_year(GDRIVE_RAW_S2_V2_FOLDER_ID, years=[yr]).get(yr, [])
+                )
+                needed_gdrive = {
+                    dk for dk in gdrive_date_keys
+                    if f"{dk}_processed.tif" not in already_uploaded
+                }
+                to_download = needed_gdrive - set(local_files.keys())
+                if to_download:
+                    log.info("  Downloading %d missing date(s) from GDrive raw...", len(to_download))
+                    download_date_keys(
+                        folder_id  = GDRIVE_RAW_S2_V2_FOLDER_ID,
+                        output_dir = str(s2_raw_dir.parent),
+                        date_keys  = list(to_download),
+                        workers    = download_workers,
+                    )
+                    local_files  = list_raw_files(s2_raw_dir, yr)
+                    needed_local = {
+                        dk: path for dk, path in local_files.items()
+                        if f"{dk}_processed.tif" not in already_uploaded
+                    }
+            except Exception as exc:
+                log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
+
             if not needed_local:
                 log.info("  All dates for year %s already in processed_v3 — skipping", yr)
                 continue
@@ -594,11 +594,46 @@ def main(
 
         # ── CDL processing ────────────────────────────────────────────────────
         from glob import glob as _glob
+        from crop_mapping_pipeline.config import GDRIVE_RAW_CDL_FOLDER_ID
         cdl_dir = (pathlib.Path(raw_cdl_dir) if raw_cdl_dir
                    else _ROOT / "data" / "raw" / "cdl")
-        cdl_raw = next(
-            (p for p in _glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
-        )
+        cdl_subdir = cdl_dir / f"{yr}_30m_cdls"
+        cdl_raw = next((_glob(str(cdl_subdir / "*.tif")).__iter__()), None)
+
+        # Auto-download from USDA NASS if missing
+        if not cdl_raw:
+            from crop_mapping_pipeline.config import CDL_DOWNLOAD_URLS
+            url = CDL_DOWNLOAD_URLS.get(yr)
+            if url:
+                log.info("  Raw CDL for %s not found — downloading from USDA NASS...", yr)
+                try:
+                    import urllib.request, zipfile
+                    cdl_subdir.mkdir(parents=True, exist_ok=True)
+                    zip_dest = cdl_subdir / f"{yr}_30m_cdls.zip"
+                    if not zip_dest.exists():
+                        def _report(count, block, total):
+                            if total > 0 and count % 100 == 0:
+                                pct = min(100, count * block * 100 // total)
+                                log.info("    CDL download: %d%%", pct)
+                        urllib.request.urlretrieve(url, zip_dest, reporthook=_report)
+                        log.info("  Downloaded: %s  (%.0f MB)",
+                                 zip_dest.name, zip_dest.stat().st_size / 1e6)
+                    else:
+                        log.info("  ZIP already present: %s", zip_dest.name)
+                    log.info("  Extracting %s ...", zip_dest.name)
+                    with zipfile.ZipFile(zip_dest) as zf:
+                        zf.extractall(cdl_subdir)
+                    zip_dest.unlink(missing_ok=True)
+                    cdl_raw = next((_glob(str(cdl_subdir / "*.tif")).__iter__()), None)
+                    if cdl_raw:
+                        log.info("  CDL raw ready: %s", pathlib.Path(cdl_raw).name)
+                    else:
+                        log.warning("  Extraction done but no TIF found in %s", cdl_subdir)
+                except Exception as exc:
+                    log.error("  CDL download failed: %s", exc)
+            else:
+                log.warning("  No download URL for CDL year %s", yr)
+
         cdl_filtered = None
         if not cdl_raw:
             log.warning("  Raw CDL for %s not found — skipping CDL processing", yr)

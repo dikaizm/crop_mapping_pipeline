@@ -72,6 +72,12 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2023": "1FdPm-sAS1dWCM4DJCMsmFPBiohLt8P3-",
     "2024": "1tvV87h8kCqk81BD8EOMBjvLhTOzMfEyY",
 }
+GDRIVE_RAW_CDL_FOLDER_ID           = ""   # optional GDrive fallback; USDA NASS used by default
+CDL_DOWNLOAD_URLS = {
+    "2022": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2022_30m_cdls.zip",
+    "2023": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2023_30m_cdls.zip",
+    "2024": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2024_30m_cdls.zip",
+}
 GDRIVE_PROCESSED_CDL_FOLDER_ID    = "1limegK5Eu3NpNOKHG9xDPe8RoW1B7qMQ"
 # V2 study area processed data — single parent folder; year subfolders created automatically
 GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
