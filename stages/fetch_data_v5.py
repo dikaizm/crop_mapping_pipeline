@@ -380,34 +380,66 @@ if __name__ == "__main__":
         handlers=[logging.StreamHandler()],
     )
 
-    folder_id = args.folder_id
-    if not folder_id:
-        try:
-            from crop_mapping_pipeline.config import GDRIVE_RAW_S2_V2_FOLDER_ID
-            folder_id = GDRIVE_RAW_S2_V2_FOLDER_ID
-        except ImportError:
-            parser.error("--folder-id required")
+    from crop_mapping_pipeline.config import (
+        GDRIVE_PROCESSED_S2_FOLDER_IDS,
+        GDRIVE_PROCESSED_CDL_FOLDER_ID_V5,
+    )
 
-    output_dir = args.output_dir or str(_ROOT / "data" / "raw" / "s2")
-
-    if args.list_files:
-        name_to_id = list_folder(folder_id, years=args.years)
-        print(f"\n{len(name_to_id)} file(s):")
-        for name in sorted(name_to_id):
-            print(f"  {name}")
-        sys.exit(0)
+    output_dir = args.output_dir or str(_ROOT / "data" / "processed")
+    s2_output_dir = str(Path(output_dir) / "s2")
+    years = args.years or ALL_YEARS
 
     if args.verify_only:
-        ok = verify(output_dir, years=args.years)
+        ok = verify(s2_output_dir, years=years)
         sys.exit(0 if ok else 1)
 
-    # S2 → {output_dir}/s2/{year}/  to match processed folder structure
-    s2_output_dir = str(Path(output_dir) / "s2")
-    download_folder_by_year(folder_id, s2_output_dir,
-                            years=args.years, overwrite=args.overwrite,
-                            workers=args.workers)
+    # S2 — download each year from its own folder → {output_dir}/s2/{year}/
+    for yr in years:
+        fid = args.folder_id or GDRIVE_PROCESSED_S2_FOLDER_IDS.get(yr)
+        if not fid:
+            log.warning("  No folder ID for year %s — skipping", yr)
+            continue
+        log.info("  Fetching S2 year=%s from folder %s", yr, fid)
+        name_to_id = list_folder(fid, years=[yr])
+        if args.list_files:
+            for name in sorted(name_to_id):
+                print(f"  {name}")
+            continue
+        _download_many(name_to_id, s2_output_dir,
+                       overwrite=args.overwrite, workers=args.workers)
+
+    if args.list_files:
+        sys.exit(0)
+
+    # CDL — flat folder → {output_dir}/cdl/
     if args.include_cdl:
-        # CDL → {output_dir}/cdl/
-        download_cdl(folder_id, output_dir, overwrite=args.overwrite,
-                     workers=args.workers)
-    verify(s2_output_dir, years=args.years)
+        cdl_fid = GDRIVE_PROCESSED_CDL_FOLDER_ID_V5
+        log.info("  Fetching CDL from folder %s", cdl_fid)
+        service = _build_drive_service()
+        tifs, _ = _list_children(service, cdl_fid)
+        if tifs:
+            cdl_dir = Path(output_dir) / "cdl"
+            cdl_dir.mkdir(parents=True, exist_ok=True)
+            from googleapiclient.http import MediaIoBaseDownload
+            for fname, fid in sorted(tifs.items()):
+                out_path = cdl_dir / fname
+                if not args.overwrite and out_path.exists() and out_path.stat().st_size > 0:
+                    log.info("  Skip (exists): cdl/%s", fname)
+                    continue
+                tmp = out_path.with_suffix(".tmp.tif")
+                try:
+                    req = service.files().get_media(fileId=fid)
+                    with open(tmp, "wb") as fh:
+                        dl = MediaIoBaseDownload(fh, req, chunksize=50*1024*1024)
+                        done = False
+                        while not done:
+                            _, done = dl.next_chunk()
+                    tmp.rename(out_path)
+                    log.info("  Done: cdl/%s  (%.0f MB)", fname, out_path.stat().st_size/1e6)
+                except Exception as exc:
+                    tmp.unlink(missing_ok=True)
+                    log.error("  Failed: cdl/%s (%s)", fname, exc)
+        else:
+            log.warning("  No CDL files found in folder %s", cdl_fid)
+
+    verify(s2_output_dir, years=years)
