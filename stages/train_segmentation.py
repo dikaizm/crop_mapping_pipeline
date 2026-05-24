@@ -945,7 +945,13 @@ def main(
         FIGURES_DIR = data_dir / "figures"
         log.info(f"Data dir overridden to {data_dir}")
 
-    s2_processed = sorted(glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")))
+    s2_processed = sorted(
+        glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")) +
+        glob(str(S2_PROCESSED_DIR / "*" / "S2H_*.tif"))
+    )
+    # deduplicate (a file matching both patterns would appear twice)
+    seen = set()
+    s2_processed = [p for p in s2_processed if not (p in seen or seen.add(p))]
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 
