@@ -7,6 +7,7 @@ mechanism used by exp_c_v2 but without the dates×bands cross-product assumption
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from crop_mapping_pipeline.config import S2_BAND_NAMES
@@ -64,9 +65,15 @@ def build_direct_indices(
         mmdd = date_yyyymmdd[4:]  # MMDD portion
         local_date = mmdd_to_date.get(mmdd)
         if local_date is None:
-            log.debug(f"  {selector_name}: MMDD={mmdd} not in current year files — skipped")
-            skipped += 1
-            continue
+            # fall back to nearest available date by calendar distance (day-of-year)
+            if mmdd_to_date:
+                def _doy(m): return datetime.strptime(f"2000{m}", "%Y%m%d").timetuple().tm_yday
+                nearest = min(mmdd_to_date.keys(), key=lambda m: abs(_doy(m) - _doy(mmdd)))
+                local_date = mmdd_to_date[nearest]
+                log.debug(f"  {selector_name}: MMDD={mmdd} → nearest {nearest} ({local_date})")
+            else:
+                skipped += 1
+                continue
 
         local_name = f"{band}_{local_date}"
         idx = local_band_to_idx.get(local_name)
