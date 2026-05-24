@@ -401,10 +401,13 @@ if __name__ == "__main__":
         ok = verify(output_dir, years=args.years)
         sys.exit(0 if ok else 1)
 
-    download_folder_by_year(folder_id, output_dir,
+    # S2 → {output_dir}/s2/{year}/  to match processed folder structure
+    s2_output_dir = str(Path(output_dir) / "s2")
+    download_folder_by_year(folder_id, s2_output_dir,
                             years=args.years, overwrite=args.overwrite,
                             workers=args.workers)
     if args.include_cdl:
+        # CDL → {output_dir}/cdl/
         download_cdl(folder_id, output_dir, overwrite=args.overwrite,
                      workers=args.workers)
-    verify(output_dir, years=args.years)
+    verify(s2_output_dir, years=args.years)
