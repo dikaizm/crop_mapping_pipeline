@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 ALL_YEARS = ["2022", "2023", "2024"]
 
-# S2H_{year}_{YYYY_MM_DD}.tif  (no tile offsets)
+# S2H_{year}_{YYYY_MM_DD}.tif  (raw) or S2H_{year}_{YYYY_MM_DD}_processed.tif
 _FILE_RE = re.compile(r"^S2H_(\d{4})_(\d{4}_\d{2}_\d{2})(_processed)?\.tif$")
 
 
@@ -366,6 +366,8 @@ if __name__ == "__main__":
     parser.add_argument("--list-files", action="store_true")
     parser.add_argument("--include-cdl", action="store_true",
                         help="Also download CDL files from cdl/ subfolder")
+    parser.add_argument("--raw", action="store_true",
+                        help="Download raw S2 files (no _processed suffix) from raw GDrive folders")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--auth", action="store_true")
     args = parser.parse_args()
@@ -382,20 +384,28 @@ if __name__ == "__main__":
 
     from crop_mapping_pipeline.config import (
         GDRIVE_PROCESSED_S2_FOLDER_IDS,
+        GDRIVE_RAW_S2_V5_FOLDER_IDS,
         GDRIVE_PROCESSED_CDL_FOLDER_ID_V5,
     )
 
-    output_dir = args.output_dir or str(_ROOT / "data" / "processed")
-    s2_output_dir = str(Path(output_dir) / "s2")
+    if args.raw:
+        output_dir    = args.output_dir or str(_ROOT / "data" / "raw")
+        s2_output_dir = str(Path(output_dir) / "s2")
+        folder_ids    = GDRIVE_RAW_S2_V5_FOLDER_IDS
+    else:
+        output_dir    = args.output_dir or str(_ROOT / "data" / "processed")
+        s2_output_dir = str(Path(output_dir) / "s2")
+        folder_ids    = GDRIVE_PROCESSED_S2_FOLDER_IDS
+
     years = args.years or ALL_YEARS
 
     if args.verify_only:
         ok = verify(s2_output_dir, years=years)
         sys.exit(0 if ok else 1)
 
-    # S2 — download each year from its own folder → {output_dir}/s2/{year}/
+    # S2 — download each year from its own folder → {s2_output_dir}/{year}/
     for yr in years:
-        fid = args.folder_id or GDRIVE_PROCESSED_S2_FOLDER_IDS.get(yr)
+        fid = args.folder_id or folder_ids.get(yr)
         if not fid:
             log.warning("  No folder ID for year %s — skipping", yr)
             continue
@@ -407,6 +417,9 @@ if __name__ == "__main__":
             continue
         _download_many(name_to_id, s2_output_dir,
                        overwrite=args.overwrite, workers=args.workers)
+
+    if args.raw:
+        globals()["_FILE_RE"] = _orig_file_re
 
     if args.list_files:
         sys.exit(0)
