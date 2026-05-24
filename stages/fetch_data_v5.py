@@ -86,8 +86,8 @@ def _date_key_from_filename(fname: str) -> str:
 
 # ── Folder listing ──────────────────────────────────────────────────────────────
 
-def _list_folder_direct(service, folder_id: str) -> dict:
-    """List direct children of a GDrive folder, return {name: id} for S2 TIFs and {name: id} for subfolders."""
+def _list_children(service, folder_id: str):
+    """Return (tifs, subfolders) as {name: id} dicts for direct children."""
     tifs, subfolders = {}, {}
     page_token = None
     while True:
@@ -100,7 +100,7 @@ def _list_folder_direct(service, folder_id: str) -> dict:
         for f in resp.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
                 subfolders[f["name"]] = f["id"]
-            elif _FILE_RE.match(f["name"]):
+            else:
                 tifs[f["name"]] = f["id"]
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -108,19 +108,34 @@ def _list_folder_direct(service, folder_id: str) -> dict:
     return tifs, subfolders
 
 
+def _find_subfolder(service, folder_id: str, name: str):
+    """Return folder ID of a named subfolder, or None."""
+    _, subs = _list_children(service, folder_id)
+    return subs.get(name)
+
+
 def list_folder(folder_id: str, years: list = None) -> dict:
-    """Return {filename: file_id} for all S2 files in the GDrive folder.
-    Recurses one level into year subfolders (2022/2023/2024) if root has no TIFs.
+    """Return {filename: file_id} for all S2 TIFs reachable from folder_id.
+
+    Handles three layouts automatically:
+      - Flat:            folder/S2H_*.tif
+      - Year-subdir:     folder/2022/S2H_*.tif
+      - s2/year-subdir:  folder/s2/2022/S2H_*.tif  (GDrive processed layout)
     """
     service    = _build_drive_service()
-    tifs, subfolders = _list_folder_direct(service, folder_id)
-    name_to_id = dict(tifs)
+    name_to_id = {}
 
-    # if root has no TIFs but has year subfolders, recurse into them
-    if not name_to_id and subfolders:
-        for sub_name, sub_id in subfolders.items():
-            sub_tifs, _ = _list_folder_direct(service, sub_id)
-            name_to_id.update(sub_tifs)
+    def _collect_s2(fid):
+        tifs, subs = _list_children(service, fid)
+        for name, tid in tifs.items():
+            if _FILE_RE.match(name):
+                name_to_id[name] = tid
+        for sub_name, sub_id in subs.items():
+            _collect_s2(sub_id)   # recurse into any subfolders (year dirs, etc.)
+
+    # check if there's an s2/ subfolder — if so, only recurse into that
+    s2_sub = _find_subfolder(service, folder_id, "s2")
+    _collect_s2(s2_sub if s2_sub else folder_id)
 
     log.info("  %d S2 file(s) found in folder", len(name_to_id))
 
@@ -236,6 +251,54 @@ def download_folder_by_year(folder_id: str, output_dir: str,
     return _download_many(name_to_id, output_dir, overwrite, workers)
 
 
+def download_cdl(folder_id: str, output_dir: str,
+                 overwrite: bool = False, workers: int = 2) -> list:
+    """Download CDL TIFs from folder/cdl/ into {output_dir}/cdl/."""
+    service = _build_drive_service()
+    cdl_fid = _find_subfolder(service, folder_id, "cdl")
+    if not cdl_fid:
+        log.warning("  No 'cdl' subfolder found in folder %s", folder_id)
+        return []
+    tifs, _ = _list_children(service, cdl_fid)
+    if not tifs:
+        log.warning("  No CDL files found in cdl/ subfolder")
+        return []
+
+    from googleapiclient.http import MediaIoBaseDownload
+    cdl_dir = Path(output_dir) / "cdl"
+    cdl_dir.mkdir(parents=True, exist_ok=True)
+    results, new_count, skipped, errors = [], 0, 0, 0
+
+    log.info("  Downloading %d CDL file(s) → %s", len(tifs), cdl_dir)
+    for fname, fid in sorted(tifs.items()):
+        out_path = cdl_dir / fname
+        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
+            log.info("  Skip (exists): cdl/%s", fname)
+            skipped += 1
+            results.append(str(out_path))
+            continue
+        tmp = out_path.with_suffix(".tmp.tif")
+        try:
+            svc     = _build_drive_service()
+            request = svc.files().get_media(fileId=fid)
+            with open(tmp, "wb") as fh:
+                dl   = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+            tmp.rename(out_path)
+            log.info("  Done: cdl/%s  (%.0f MB)", fname, out_path.stat().st_size / 1e6)
+            new_count += 1
+            results.append(str(out_path))
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            log.error("  Failed: cdl/%s (%s)", fname, exc)
+            errors += 1
+
+    log.info("  CDL done: %d new, %d skipped, %d errors", new_count, skipped, errors)
+    return results
+
+
 def download_date_keys(folder_id: str, output_dir: str,
                        date_keys: list, overwrite: bool = False,
                        workers: int = 2) -> list:
@@ -301,6 +364,8 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--list-files", action="store_true")
+    parser.add_argument("--include-cdl", action="store_true",
+                        help="Also download CDL files from cdl/ subfolder")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--auth", action="store_true")
     args = parser.parse_args()
@@ -339,4 +404,7 @@ if __name__ == "__main__":
     download_folder_by_year(folder_id, output_dir,
                             years=args.years, overwrite=args.overwrite,
                             workers=args.workers)
+    if args.include_cdl:
+        download_cdl(folder_id, output_dir, overwrite=args.overwrite,
+                     workers=args.workers)
     verify(output_dir, years=args.years)
