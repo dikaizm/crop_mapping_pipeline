@@ -97,6 +97,19 @@ def _s2_for_year(s2_processed, yr):
     return sorted([p for p in s2_processed if Path(p).name.split("_")[1] == yr])
 
 
+def _valid_global_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_PER_DATE):
+    """Return the subset of band_indices that are in range for s2_paths."""
+    if band_indices is None:
+        return set()
+    needed = sorted({gi // n_bands_per_file for gi in band_indices
+                     if gi // n_bands_per_file < len(s2_paths)})
+    new_idx_map = set()
+    for fi in needed:
+        for local in range(n_bands_per_file):
+            new_idx_map.add(fi * n_bands_per_file + local)
+    return set(gi for gi in band_indices if gi in new_idx_map)
+
+
 def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_PER_DATE):
     """Return (filtered_paths, remapped_indices) keeping only TIF files that
     contribute at least one channel in band_indices, with indices remapped to
@@ -369,6 +382,26 @@ def run_experiment(
             )
             return band_indices[fallback_yr]
         return band_indices, band_names_list
+
+    # Pre-pass: find globally consistent band indices available in ALL years.
+    # Prevents channel-count mismatch when some years lack a file (e.g. excluded empty date).
+    if not per_year:
+        base_idx = band_indices  # same list applied to every year
+        all_years = list(TRAIN_YEARS) + [TEST_YEAR]
+        valid_sets = []
+        for yr in all_years:
+            yr_s2_all = _s2_for_year(s2_processed, yr)
+            valid_sets.append(_valid_global_indices(yr_s2_all, base_idx))
+        consistent = sorted(set.intersection(*valid_sets))
+        dropped = len(base_idx) - len(consistent)
+        if dropped:
+            log.warning(
+                f"  Dropping {dropped} channel(s) not available in all years "
+                f"({', '.join(all_years)}) — keeping {len(consistent)} consistent channels"
+            )
+        consistent_set  = set(consistent)
+        band_names_list = [name for gi, name in zip(base_idx, band_names_list) if gi in consistent_set]
+        band_indices    = consistent
 
     in_channels = len(_yr_idx(TRAIN_YEARS[0])[0])
     log.info(f"\n{'='*65}")
