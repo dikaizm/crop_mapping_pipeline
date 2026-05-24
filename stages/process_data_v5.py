@@ -156,8 +156,9 @@ def assign_nodata(in_path: str, out_path: str, overwrite: bool = False) -> str:
 # ── CDL processing ───────────────────────────────────────────────────────────────
 
 def process_cdl(cdl_raw_path: str, s2_ref_path: str,
-                out_reprojected: str, out_filtered: str) -> None:
-    if Path(out_reprojected).exists():
+                out_reprojected: str, out_filtered: str,
+                overwrite: bool = False) -> None:
+    if Path(out_reprojected).exists() and not overwrite:
         log.info("  CDL reprojected already exists: %s", Path(out_reprojected).name)
     else:
         log.info("  Reprojecting CDL → %s", Path(out_reprojected).name)
@@ -187,7 +188,7 @@ def process_cdl(cdl_raw_path: str, s2_ref_path: str,
         with rasterio.open(out_reprojected, "w", **profile) as dst:
             dst.write(dst_data)
 
-    if Path(out_filtered).exists():
+    if Path(out_filtered).exists() and not overwrite:
         log.info("  CDL filtered already exists: %s", Path(out_filtered).name)
     else:
         log.info("  Filtering CDL → %d classes", len(KEEP_CLASSES))
@@ -660,7 +661,8 @@ def main(
             cdl_out_dir     = S2_PROCESSED_DIR.parent / "cdl"
             cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
             cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
-            process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered)
+            process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered,
+                        overwrite=overwrite)
             # Delete raw CDL after processing — full CONUS TIF is large (~8 GB)
             if not skip_delete and pathlib.Path(cdl_raw).exists():
                 freed = pathlib.Path(cdl_raw).stat().st_size
@@ -672,9 +674,9 @@ def main(
             v3_parent  = next(iter(_s2_ids.values()))
             cdl_folder = get_or_create_subfolder(v3_parent, "cdl", service)
             if cdl_reprojected and pathlib.Path(cdl_reprojected).exists():
-                upload_file(cdl_reprojected, cdl_folder, service)
+                upload_file(cdl_reprojected, cdl_folder, service, overwrite=overwrite)
             if cdl_filtered and pathlib.Path(cdl_filtered).exists():
-                upload_file(cdl_filtered, cdl_folder, service)
+                upload_file(cdl_filtered, cdl_folder, service, overwrite=overwrite)
 
         log.info("Year %s done.\n", yr)
 

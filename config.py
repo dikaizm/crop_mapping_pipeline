@@ -37,7 +37,7 @@ VEGE_BANDS       = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B11", "B12"]
 
 # ── CDL classes ────────────────────────────────────────────────────────────────
 # Fallow/Idle Cropland (61) → background (class 0); not in KEEP_CLASSES
-KEEP_CLASSES = [3, 6, 24, 36, 37, 54, 69, 75, 76, 210]
+KEEP_CLASSES = [3, 6, 24, 36, 37, 54, 69, 75, 76, 204]  # v5: 204=Pistachios (replaces 210=Prunes)
 CLASS_REMAP  = {cls_id: i + 1 for i, cls_id in enumerate(KEEP_CLASSES)}
 NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 11: 0=bg + 1–10=crops
 
@@ -45,7 +45,7 @@ CDL_CLASS_NAMES = {
     3:   "Rice",         6:   "Sunflower",    24:  "Winter Wheat",
     36:  "Alfalfa",      37:  "Other Hay",    54:  "Tomatoes",
     69:  "Grapes",       75:  "Almonds",      76:  "Walnuts",
-    210: "Prunes",
+    204: "Pistachios",
 }
 
 REMAP_LUT = np.zeros(256, dtype=np.int64)
