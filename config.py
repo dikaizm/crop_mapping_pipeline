@@ -82,7 +82,7 @@ GDRIVE_PROCESSED_CDL_FOLDER_ID    = "1limegK5Eu3NpNOKHG9xDPe8RoW1B7qMQ"
 # V2 study area processed data — single parent folder; year subfolders created automatically
 GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
 GDRIVE_PROCESSED_V3_FOLDER_ID     = "1WyMw6j1jRdTeIMrG0rkbRv712RBw5rz_"
-GDRIVE_PROCESSED_V5_FOLDER_ID     = "1MNL5ut3_00VNXBVuKOtQ2lF2QQ8OZw5V"
+GDRIVE_PROCESSED_V5_FOLDER_ID     = "1uIYK2dgfmAKyiw1E-wt0qYvIx0OJhLwy"
 GDRIVE_MODELS_FOLDER_ID        = "1Xj8i32ndkc_9wa7LCwBO8LhrpxsZ3jot"
 
 # ── MLflow ─────────────────────────────────────────────────────────────────────
