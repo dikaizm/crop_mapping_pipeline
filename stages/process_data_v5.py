@@ -478,6 +478,7 @@ def main(
     process_workers : int  = 2,
     upload_workers  : int  = 1,
     download_workers: int  = 2,
+    cdl_only        : bool = False,
 ) -> None:
     global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR
 
@@ -562,32 +563,41 @@ def main(
         except Exception as exc:
             log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
 
-        if not needed_local:
-            log.info("  All dates for year %s already in processed_v3 — skipping", yr)
-            continue
+        # ── CDL-only mode: skip S2, use existing processed S2 as grid ref ────
+        if cdl_only:
+            existing = sorted((S2_PROCESSED_DIR / yr).glob("*_processed.tif"))
+            if not existing:
+                log.error("  --cdl-only: no processed S2 in %s — cannot determine grid", S2_PROCESSED_DIR / yr)
+                continue
+            s2_ref_path = str(existing[0])
+            log.info("  --cdl-only: grid ref = %s", pathlib.Path(s2_ref_path).name)
+        else:
+            if not needed_local:
+                log.info("  All dates for year %s already in processed_v3 — skipping", yr)
+                continue
 
-        s2_out_dir = S2_PROCESSED_DIR / yr
+            s2_out_dir = S2_PROCESSED_DIR / yr
 
-        all_processed, s2_ref_path = _pipeline_year(
-            raw_files       = needed_local,
-            yr              = yr,
-            s2_out_dir      = s2_out_dir,
-            skip_upload     = skip_upload,
-            skip_delete     = skip_delete,
-            overwrite       = overwrite,
-            process_workers = process_workers,
-            upload_workers  = upload_workers,
-            s2_folder_ids   = _s2_ids,
-            cdl_folder_id   = _cdl_id,
-        )
-        log.info("  Processed %d date(s) for year %s", len(all_processed), yr)
+            all_processed, s2_ref_path = _pipeline_year(
+                raw_files       = needed_local,
+                yr              = yr,
+                s2_out_dir      = s2_out_dir,
+                skip_upload     = skip_upload,
+                skip_delete     = skip_delete,
+                overwrite       = overwrite,
+                process_workers = process_workers,
+                upload_workers  = upload_workers,
+                s2_folder_ids   = _s2_ids,
+                cdl_folder_id   = _cdl_id,
+            )
+            log.info("  Processed %d date(s) for year %s", len(all_processed), yr)
 
         # ── CDL processing ────────────────────────────────────────────────────
-        from glob import glob
+        from glob import glob as _glob
         cdl_dir = (pathlib.Path(raw_cdl_dir) if raw_cdl_dir
                    else _ROOT / "data" / "raw" / "cdl")
         cdl_raw = next(
-            (p for p in glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
+            (p for p in _glob(str(cdl_dir / f"{yr}_30m_cdls" / "*.tif"))), None
         )
         cdl_filtered = None
         if not cdl_raw:
@@ -641,6 +651,8 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-upload", action="store_true")
     parser.add_argument("--skip-delete", action="store_true")
+    parser.add_argument("--cdl-only", action="store_true",
+                        help="Skip S2 processing; reproject+filter CDL only, using existing processed S2 as grid ref")
     parser.add_argument("--shutdown", action="store_true")
     parser.add_argument("--process-workers", type=int, default=2)
     parser.add_argument("--upload-workers", type=int, default=1)
@@ -665,6 +677,7 @@ if __name__ == "__main__":
         data_dir         = args.data_dir,
         skip_upload      = args.skip_upload,
         skip_delete      = args.skip_delete,
+        cdl_only         = args.cdl_only,
         shutdown         = args.shutdown,
         overwrite        = args.overwrite,
         process_workers  = args.process_workers,
