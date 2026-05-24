@@ -32,6 +32,7 @@ def run_rf_direct(
     years_data: list[tuple[str, list[str], str]],
     top_k: int = SELECT_TOP_K_PER_CROP,
     data_dir: str | None = None,
+    out_stem: str | None = None,
 ) -> list[str]:
     """
     years_data: [(year, s2_paths, cdl_path), ...]
@@ -150,8 +151,10 @@ def run_rf_direct(
         log.info(f"  {crop_name:20s}: top-3 = {top_channels[:3]}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    json_path = Path(data_dir) / "select_rf_direct.json" if data_dir else SELECT_RF_DIRECT_JSON
-    txt_path  = Path(data_dir) / "select_rf_direct_bands.txt" if data_dir else SELECT_RF_DIRECT_BANDS
+    stem      = out_stem or f"select_rf_direct_k{top_k}"
+    base_dir  = Path(data_dir) if data_dir else SELECT_RF_DIRECT_JSON.parent
+    json_path = base_dir / f"{stem}.json"
+    txt_path  = base_dir / f"{stem}_bands.txt"
 
     union = save_selection(
         per_crop, json_path, txt_path,

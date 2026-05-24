@@ -963,6 +963,7 @@ def main(
     v3_phases=("band",),
     v3_ks=(3,),
     stage2v3_sweep_run_id=None,
+    top_k=None,
 ):
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
@@ -1156,22 +1157,24 @@ def main(
     # GSI-direct: single-stage all-channel GSI ranking
     exp_gsi_direct_idx = exp_gsi_direct_names = None
     if exps and "gsi_direct" in exps:
-        gsi_json = SELECT_GSI_DIRECT_JSON if not data_dir else \
-            Path(data_dir) / SELECT_GSI_DIRECT_JSON.name
+        _k = top_k or SELECT_TOP_K_PER_CROP
+        _stem = f"select_gsi_direct_k{_k}.json"
+        gsi_json = (Path(data_dir) / _stem) if data_dir else (SELECT_GSI_DIRECT_JSON.parent / _stem)
         exp_gsi_direct_idx, exp_gsi_direct_names = build_direct_indices(
             gsi_json, mmdd_to_date, local_band_to_idx, selector_name="gsi_direct"
         )
-        log.info(f"Exp gsi_direct: {len(exp_gsi_direct_idx)} channels")
+        log.info(f"Exp gsi_direct (k={_k}): {len(exp_gsi_direct_idx)} channels")
 
     # RF-direct: single-stage all-channel RF importance ranking
     exp_rf_direct_idx = exp_rf_direct_names = None
     if exps and "rf_direct" in exps:
-        rf_json = SELECT_RF_DIRECT_JSON if not data_dir else \
-            Path(data_dir) / SELECT_RF_DIRECT_JSON.name
+        _k = top_k or SELECT_TOP_K_PER_CROP
+        _stem = f"select_rf_direct_k{_k}.json"
+        rf_json = (Path(data_dir) / _stem) if data_dir else (SELECT_RF_DIRECT_JSON.parent / _stem)
         exp_rf_direct_idx, exp_rf_direct_names = build_direct_indices(
             rf_json, mmdd_to_date, local_band_to_idx, selector_name="rf_direct"
         )
-        log.info(f"Exp rf_direct: {len(exp_rf_direct_idx)} channels")
+        log.info(f"Exp rf_direct (k={_k}): {len(exp_rf_direct_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
@@ -1396,6 +1399,10 @@ if __name__ == "__main__":
             "Used to download band files if absent locally."
         ),
     )
+    parser.add_argument(
+        "--top-k", type=int, default=None, metavar="K",
+        help="Top-K per crop used during feature selection (loads select_gsi/rf_direct_k{K}.json). Default: SELECT_TOP_K_PER_CROP from config.",
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1442,6 +1449,7 @@ if __name__ == "__main__":
         v3_phases=args.v3_phase,
         v3_ks=args.v3_k,
         stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
+        top_k=args.top_k,
     )
 
     if args.shutdown:

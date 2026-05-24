@@ -732,7 +732,7 @@ _DIRECT_OUTPUT_MAP = {
 
 
 def main(force: bool = False, data_dir: str = None, stage: str = "all", selector: str = "cnn",
-         mlflow_exp: str | None = None) -> None:
+         mlflow_exp: str | None = None, top_k_values: list[int] | None = None) -> None:
     global _MLFLOW_EXPERIMENT_OVERRIDE, KEEP_CLASSES, CDL_CLASS_NAMES
     if mlflow_exp == "v3":
         _MLFLOW_EXPERIMENT_OVERRIDE = MLFLOW_EXPERIMENT_TRAIN_V3
@@ -815,19 +815,20 @@ def main(force: bool = False, data_dir: str = None, stage: str = "all", selector
             raise ValueError(
                 f"--selector must be 'gsi_direct' or 'rf_direct' for --stage select, got {selector!r}"
             )
-        json_out, txt_out = _DIRECT_OUTPUT_MAP[selector]
-        if data_dir:
-            from pathlib import Path as _Path
-            json_out = _Path(data_dir) / json_out.name
-            txt_out  = _Path(data_dir) / txt_out.name
-        if not force and json_out.exists():
-            log.info(f"Direct selection output already exists: {json_out}")
-            log.info("Use --force to re-run.")
-            return
-        years_data = get_stage1_inputs()
+        ks = top_k_values or [SELECT_TOP_K_PER_CROP]
         fn = run_gsi_direct if selector == "gsi_direct" else run_rf_direct
-        fn(years_data, top_k=SELECT_TOP_K_PER_CROP, data_dir=data_dir)
-        log.info(f"Direct selection ({selector}) complete.")
+        years_data = get_stage1_inputs()
+        for k in ks:
+            stem     = f"select_{selector}_k{k}"
+            base_dir = Path(data_dir) if data_dir else _DIRECT_OUTPUT_MAP[selector][0].parent
+            json_out = base_dir / f"{stem}.json"
+            if not force and json_out.exists():
+                log.info(f"  k={k}: output exists ({json_out.name}) — skipping (--force to re-run)")
+                continue
+            log.info(f"  Running {selector} top_k={k} ...")
+            fn(years_data, top_k=k, data_dir=data_dir, out_stem=stem)
+            log.info(f"  k={k} complete → {json_out}")
+        log.info(f"Direct selection ({selector}) sweep complete: k={ks}")
         return
 
     log.info("Feature analysis v2 complete.")
@@ -848,6 +849,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Selector: cnn/rf for Stage 2v2; gsi_direct/rf_direct for --stage select.",
     )
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
+    parser.add_argument("--top-k", type=int, nargs="+", default=None, metavar="K",
+                        help="Top-K per crop for --stage select sweep (e.g. --top-k 5 10 15 20 30)")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory")
     parser.add_argument("--mlflow-exp", choices=["v3"], default=None,
                         help="Route MLflow runs to a specific experiment. 'v3' → cropmap_segmentation_s2_v3.")
@@ -870,7 +873,7 @@ def cli(argv=None) -> None:
     args = build_parser().parse_args(argv)
     configure_logging()
     main(force=args.force, data_dir=args.data_dir, stage=args.stage, selector=args.selector,
-         mlflow_exp=args.mlflow_exp)
+         mlflow_exp=args.mlflow_exp, top_k_values=args.top_k)
 
 
 if __name__ == "__main__":
