@@ -86,24 +86,41 @@ def _date_key_from_filename(fname: str) -> str:
 
 # ── Folder listing ──────────────────────────────────────────────────────────────
 
-def list_folder(folder_id: str, years: list = None) -> dict:
-    """Return {filename: file_id} for all S2 files in the GDrive folder."""
-    service    = _build_drive_service()
-    name_to_id = {}
+def _list_folder_direct(service, folder_id: str) -> dict:
+    """List direct children of a GDrive folder, return {name: id} for S2 TIFs and {name: id} for subfolders."""
+    tifs, subfolders = {}, {}
     page_token = None
     while True:
         resp = service.files().list(
             q         = f"'{folder_id}' in parents and trashed = false",
-            fields    = "nextPageToken, files(id, name)",
+            fields    = "nextPageToken, files(id, name, mimeType)",
             pageSize  = 1000,
             pageToken = page_token,
         ).execute()
         for f in resp.get("files", []):
-            if _FILE_RE.match(f["name"]):
-                name_to_id[f["name"]] = f["id"]
+            if f["mimeType"] == "application/vnd.google-apps.folder":
+                subfolders[f["name"]] = f["id"]
+            elif _FILE_RE.match(f["name"]):
+                tifs[f["name"]] = f["id"]
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    return tifs, subfolders
+
+
+def list_folder(folder_id: str, years: list = None) -> dict:
+    """Return {filename: file_id} for all S2 files in the GDrive folder.
+    Recurses one level into year subfolders (2022/2023/2024) if root has no TIFs.
+    """
+    service    = _build_drive_service()
+    tifs, subfolders = _list_folder_direct(service, folder_id)
+    name_to_id = dict(tifs)
+
+    # if root has no TIFs but has year subfolders, recurse into them
+    if not name_to_id and subfolders:
+        for sub_name, sub_id in subfolders.items():
+            sub_tifs, _ = _list_folder_direct(service, sub_id)
+            name_to_id.update(sub_tifs)
 
     log.info("  %d S2 file(s) found in folder", len(name_to_id))
 
