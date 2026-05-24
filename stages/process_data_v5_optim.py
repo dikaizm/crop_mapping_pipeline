@@ -7,11 +7,11 @@ Pipeline per date:
         → assign NoData (-9999, float32)
         → DEFLATE+predictor=3 compression
         → overviews/pyramids
-        → upload to processed_v3/s2/{year}/
+        → upload to processed_v5/s2/{year}/
         → delete raw
 
-Checks processed_v3 on GDrive before downloading raw files — only downloads
-and processes dates that are missing from processed_v3.
+Checks processed_v5 on GDrive before downloading raw files — only downloads
+and processes dates that are missing from processed_v5.
 
 Usage:
     python stages/process_data_v5.py --years 2022 2023
@@ -248,7 +248,7 @@ def get_or_create_subfolder(parent_id: str, name: str, service) -> str:
 
 
 def list_gdrive_processed(v3_folder_id: str, yr: str, service) -> set:
-    """Return filenames already in processed_v3/s2/{yr}/."""
+    """Return filenames already in processed_v5/s2/{yr}/."""
     try:
         s2_sub = get_or_create_subfolder(v3_folder_id, "s2", service)
         yr_sub = get_or_create_subfolder(s2_sub, yr, service)
@@ -266,10 +266,10 @@ def list_gdrive_processed(v3_folder_id: str, yr: str, service) -> set:
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
-        log.info("  GDrive processed_v3/s2/%s/ has %d file(s)", yr, len(names))
+        log.info("  GDrive processed_v5/s2/%s/ has %d file(s)", yr, len(names))
         return names
     except Exception as exc:
-        log.warning("  Could not list processed_v3/s2/%s: %s", yr, exc)
+        log.warning("  Could not list processed_v5/s2/%s: %s", yr, exc)
         return set()
 
 
@@ -535,7 +535,7 @@ def main(
             s2_ref_path = str(existing[0])
             log.info("  --cdl-only: grid ref = %s", pathlib.Path(s2_ref_path).name)
         else:
-            # ── Step 1: Check processed_v3 — what's already uploaded ─────────
+            # ── Step 1: Check processed_v5 — what's already uploaded ─────────
             already_uploaded: set = set()
             if not overwrite and not skip_upload:
                 try:
@@ -554,7 +554,7 @@ def main(
             }
             n_skipped = len(local_files) - len(needed_local)
             if n_skipped:
-                log.info("  Skipping %d local date(s) already in processed_v3/s2/%s/",
+                log.info("  Skipping %d local date(s) already in processed_v5/s2/%s/",
                          n_skipped, yr)
 
             # ── Step 4: Download missing dates from GDrive raw ────────────────
@@ -588,7 +588,7 @@ def main(
                 log.warning("  GDrive raw listing/download failed (%s) — using local files only", exc)
 
             if not needed_local:
-                log.info("  All dates for year %s already in processed_v3 — skipping", yr)
+                log.info("  All dates for year %s already in processed_v5 — skipping", yr)
                 continue
 
             s2_out_dir = S2_PROCESSED_DIR / yr
