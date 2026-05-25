@@ -405,6 +405,38 @@ class AugmentedSubset(torch.utils.data.Dataset):
         return img, mask
 
 
+# ── In-memory dataset cache ───────────────────────────────────────────────────
+
+class PreloadedDataset(torch.utils.data.Dataset):
+    """Eagerly loads all patches from a RasterPatchDataset into RAM tensors.
+
+    Eliminates per-batch TIF disk reads (the primary I/O bottleneck).
+    Memory cost: N_patches × C × H × W × 4 bytes. For 498 patches × 98ch ×
+    256² ≈ 3.2 GB — fits comfortably in server RAM.
+    """
+
+    def __init__(self, dataset, desc="preloading"):
+        n = len(dataset)
+        log.info(f"  [{desc}] Preloading {n} patches into RAM …")
+        t0 = time.time()
+        imgs, masks = [], []
+        for i in range(n):
+            img, mask = dataset[i]
+            imgs.append(img)
+            masks.append(mask)
+        self._imgs  = torch.stack(imgs)   # (N, C, H, W)
+        self._masks = torch.stack(masks)  # (N, H, W)
+        elapsed = time.time() - t0
+        gb = self._imgs.element_size() * self._imgs.nelement() / 1e9
+        log.info(f"  [{desc}] Done in {elapsed:.1f}s — {gb:.2f} GB in RAM")
+
+    def __len__(self):
+        return len(self._imgs)
+
+    def __getitem__(self, idx):
+        return self._imgs[idx], self._masks[idx]
+
+
 # ── Main experiment runner ────────────────────────────────────────────────────
 
 def run_experiment(
@@ -487,7 +519,8 @@ def run_experiment(
     log.info(f"{'='*65}\n")
 
     # ── Year-based dataset split ──────────────────────────────────────────────
-    train_year_datasets = []
+    train_year_datasets_raw = []   # RasterPatchDataset — for _patch_weights (needs _cdl etc.)
+    train_year_datasets     = []   # PreloadedDataset  — for DataLoader
     for yr in TRAIN_YEARS:
         yr_s2  = _s2_for_year(s2_processed, yr)
         yr_cdl = CDL_BY_YEAR[yr]
@@ -496,14 +529,15 @@ def run_experiment(
             continue
         yr_idx, _ = _yr_idx(yr)
         yr_s2_filtered, yr_idx_local = _filter_s2_by_band_indices(yr_s2, yr_idx)
-        ds = RasterPatchDataset(
+        ds_raw = RasterPatchDataset(
             s2_paths=yr_s2_filtered, cdl_path=str(yr_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
             keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
             min_valid_frac=MIN_VALID_FRAC, band_indices=yr_idx_local,
         )
-        train_year_datasets.append(ds)
-        log.info(f"  [{yr}] {len(ds):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
+        log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
+        train_year_datasets_raw.append(ds_raw)
+        train_year_datasets.append(PreloadedDataset(ds_raw, desc=yr))
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)
@@ -534,16 +568,17 @@ def run_experiment(
         assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
         test_idx, _ = _yr_idx(TEST_YEAR)
         test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
-        test_ds = RasterPatchDataset(
+        _test_ds_raw = RasterPatchDataset(
             s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
             keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
             min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
         )
+        test_ds = PreloadedDataset(_test_ds_raw, desc=TEST_YEAR + "_test")
 
     # Class-weighted sampler: rare-class patches sampled more frequently
     log.info("  Computing patch weights for class-balanced sampling...")
-    all_weights = _patch_weights(train_year_datasets)
+    all_weights = _patch_weights(train_year_datasets_raw)
     train_weights = all_weights[train_ds.indices]
     sampler = WeightedRandomSampler(
         weights=torch.from_numpy(train_weights).double(),
