@@ -1325,7 +1325,7 @@ def main(
         cfg_entry = registry[exp_key]
         mlflow.set_experiment(cfg_entry.mlflow_experiment)
         n_ch = len(arch_runs[0][1]) if arch_runs[0][1] else 0
-        parent_run_name = f"exp_{exp_key}_{timestamp}"
+        parent_run_name = f"exp_{exp_key}_k{top_k}_{timestamp}" if top_k else f"exp_{exp_key}_{timestamp}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
             mlflow.log_params({
                 "experiment":   f"exp_{exp_key}",
@@ -1334,10 +1334,11 @@ def main(
                 "test_year":    TEST_YEAR,
                 "description":  cfg_entry.description,
                 "loss_version": loss_version,
+                **({"top_k": top_k} if top_k else {}),
             })
             log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
             for arch, band_idx, band_names, description, extra_kw in arch_runs:
-                exp_name = f"exp_{exp_key}_{arch}"
+                exp_name = f"exp_{exp_key}_k{top_k}_{arch}" if top_k else f"exp_{exp_key}_{arch}"
                 result = run_experiment(
                     exp_name=exp_name,
                     arch=arch,
