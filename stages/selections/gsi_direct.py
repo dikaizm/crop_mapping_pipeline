@@ -9,6 +9,7 @@ Band-level GSI is averaged across all training years for robustness.
 
 import logging
 import tempfile
+from datetime import datetime as _dt
 from pathlib import Path
 
 import mlflow
@@ -70,53 +71,61 @@ def run_gsi_direct(
     df_primary = sample_pixels(primary_s2, primary_cdl, primary_bandnames)
     gsi_primary = _gsi_per_crop(df_primary, primary_bandnames)
 
-    # Extra years: band-level GSI only (date strings differ, can't mix channel names)
-    band_gsi_extra: list[dict[int, pd.Series]] = []  # each entry: {crop → Series(index=S2_BAND_NAMES)}
+    def _doy(mmdd: str) -> int:
+        return _dt.strptime(f"2000{mmdd}", "%Y%m%d").timetuple().tm_yday
+
+    def _mmdd_level_gsi(si_series: pd.Series, bandnames: list[str]) -> dict[str, float]:
+        """Collapse channel GSI to {band_MMDD: mean_SI}."""
+        result: dict[str, list[float]] = {}
+        for ch in bandnames:
+            parts = ch.rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            band, date8 = parts[0], parts[1]
+            mmdd = date8[4:]
+            key  = f"{band}_{mmdd}"
+            result.setdefault(key, []).append(float(si_series[ch]))
+        return {k: float(np.mean(v)) for k, v in result.items()}
+
+    # Extra years: full channel GSI (date strings differ — stored with bandnames for MMDD matching)
+    extra_gsi: list[tuple[str, list[str], dict[int, pd.Series]]] = []
     for year, s2_paths, cdl_path in years_data[1:]:
-        log.info(f"  Sampling extra year {year} ({len(s2_paths)} files) for band GSI...")
+        log.info(f"  Sampling extra year {year} ({len(s2_paths)} files) for MMDD GSI...")
         bandnames_yr, _, _ = build_channel_names(s2_paths)
         df_yr = sample_pixels(s2_paths, cdl_path, bandnames_yr)
         gsi_yr = _gsi_per_crop(df_yr, bandnames_yr)
-
-        # collapse to band level
-        band_level: dict[int, pd.Series] = {}
-        for crop_id, si_series in gsi_yr.items():
-            band_si = {}
-            for band in S2_BAND_NAMES:
-                keys = [k for k in bandnames_yr if k.startswith(f"{band}_")]
-                band_si[band] = float(si_series[keys].mean()) if keys else 0.0
-            band_level[crop_id] = pd.Series(band_si)
-        band_gsi_extra.append(band_level)
-
-    # Primary year band-level (for averaging)
-    band_gsi_primary: dict[int, pd.Series] = {}
-    for crop_id, si_series in gsi_primary.items():
-        band_si = {}
-        for band in S2_BAND_NAMES:
-            keys = [k for k in primary_bandnames if k.startswith(f"{band}_")]
-            band_si[band] = float(si_series[keys].mean()) if keys else 0.0
-        band_gsi_primary[crop_id] = pd.Series(band_si)
+        extra_gsi.append((year, bandnames_yr, gsi_yr))
 
     # ── Select top-K per crop ─────────────────────────────────────────────────
     per_crop: dict[int, list[str]] = {}
 
     for crop_id in KEEP_CLASSES:
-        si_primary = gsi_primary[crop_id]  # all primary-year channels
+        si_primary = gsi_primary[crop_id]
 
-        # Adjust band scores using multi-year average (scale primary channel SI by band ratio)
-        if band_gsi_extra:
-            all_band_gsi = [band_gsi_primary[crop_id]] + [bg[crop_id] for bg in band_gsi_extra]
-            avg_band_si = pd.concat(all_band_gsi, axis=1).mean(axis=1)  # Series(index=S2_BAND_NAMES)
-            primary_band_si = band_gsi_primary[crop_id]
+        if extra_gsi:
+            # Primary year MMDD-level GSI
+            primary_mmdd = _mmdd_level_gsi(si_primary, primary_bandnames)
 
-            # Rescale each channel's SI by (avg_band / primary_band) to incorporate cross-year info
+            # For each primary channel, average SI across years using nearest-MMDD match
             adjusted = si_primary.copy()
-            for band in S2_BAND_NAMES:
-                p = float(primary_band_si.get(band, 1e-9))
-                a = float(avg_band_si.get(band, p))
-                scale = a / (p + 1e-9)
-                keys = [k for k in primary_bandnames if k.startswith(f"{band}_")]
-                adjusted[keys] = adjusted[keys] * scale
+            for ch in primary_bandnames:
+                parts = ch.rsplit("_", 1)
+                if len(parts) != 2:
+                    continue
+                band, date8 = parts[0], parts[1]
+                mmdd_p = date8[4:]
+                doy_p  = _doy(mmdd_p)
+
+                imps = [primary_mmdd.get(f"{band}_{mmdd_p}", float(si_primary[ch]))]
+                for _yr, bandnames_yr, gsi_yr in extra_gsi:
+                    yr_mmdd = _mmdd_level_gsi(gsi_yr[crop_id], bandnames_yr)
+                    cands = [k for k in yr_mmdd if k.startswith(f"{band}_")]
+                    if not cands:
+                        continue
+                    nearest = min(cands, key=lambda k: abs(_doy(k.split("_")[1]) - doy_p))
+                    imps.append(yr_mmdd[nearest])
+
+                adjusted[ch] = float(np.mean(imps))
         else:
             adjusted = si_primary
 

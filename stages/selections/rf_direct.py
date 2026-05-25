@@ -8,6 +8,7 @@ Pixel samples pooled from all training years for robust importance estimates.
 
 import logging
 import tempfile
+from datetime import datetime as _dt
 from pathlib import Path
 
 import mlflow
@@ -98,19 +99,31 @@ def run_rf_direct(
         rf.fit(x, y)
         importance_primary = pd.Series(rf.feature_importances_, index=primary_bandnames)
 
-        # --- Extra years: band-level importance, average with primary ---
+        # --- Extra years: MMDD-level importance averaging with primary ---
         if extra_band_importance:
             from crop_mapping_pipeline.config import S2_BAND_NAMES
 
-            def _band_level(importance: pd.Series, bandnames: list[str]) -> pd.Series:
-                band_imp = {}
-                for band in S2_BAND_NAMES:
-                    keys = [k for k in bandnames if k.startswith(f"{band}_")]
-                    band_imp[band] = float(importance[keys].mean()) if keys else 0.0
-                return pd.Series(band_imp)
+            def _doy(mmdd: str) -> int:
+                return _dt.strptime(f"2000{mmdd}", "%Y%m%d").timetuple().tm_yday
 
-            all_band_imps = [_band_level(importance_primary, primary_bandnames)]
+            def _mmdd_level(importance: pd.Series, bandnames: list[str]) -> dict[str, float]:
+                """Collapse channel importances to {band_MMDD: mean_importance}."""
+                result = {}
+                for ch in bandnames:
+                    parts = ch.rsplit("_", 1)
+                    if len(parts) != 2:
+                        continue
+                    band, date8 = parts[0], parts[1]   # e.g. B12, 20220814
+                    mmdd = date8[4:]                    # 0814
+                    key  = f"{band}_{mmdd}"
+                    result.setdefault(key, []).append(float(importance[ch]))
+                return {k: float(np.mean(v)) for k, v in result.items()}
 
+            # Primary year MMDD-level importance
+            primary_mmdd_imp = _mmdd_level(importance_primary, primary_bandnames)
+
+            # Extra years: run RF, collapse to MMDD-level
+            extra_mmdd_imps: list[dict[str, float]] = []
             for _yr, bandnames_yr, df_yr in extra_band_importance:
                 y_yr = (df_yr["class_label"].values == crop_id).astype(int)
                 x_yr = df_yr[bandnames_yr].values
@@ -130,19 +143,29 @@ def run_rf_direct(
                 )
                 rf_yr.fit(x_yr, y_yr)
                 imp_yr = pd.Series(rf_yr.feature_importances_, index=bandnames_yr)
-                all_band_imps.append(_band_level(imp_yr, bandnames_yr))
+                extra_mmdd_imps.append(_mmdd_level(imp_yr, bandnames_yr))
 
-            avg_band_imp = pd.concat(all_band_imps, axis=1).mean(axis=1)
-            primary_band_imp = _band_level(importance_primary, primary_bandnames)
-
-            # Rescale primary channel importances by (avg_band / primary_band)
+            # For each primary channel, find nearest-MMDD match in each extra year
+            # and average importances across all years at that (band, MMDD) level
             adjusted = importance_primary.copy()
-            for band in S2_BAND_NAMES:
-                p = float(primary_band_imp.get(band, 1e-9))
-                a = float(avg_band_imp.get(band, p))
-                scale = a / (p + 1e-9)
-                keys = [k for k in primary_bandnames if k.startswith(f"{band}_")]
-                adjusted[keys] = adjusted[keys] * scale
+            for ch in primary_bandnames:
+                parts = ch.rsplit("_", 1)
+                if len(parts) != 2:
+                    continue
+                band, date8 = parts[0], parts[1]
+                mmdd_p = date8[4:]
+                doy_p  = _doy(mmdd_p)
+
+                imps = [primary_mmdd_imp.get(f"{band}_{mmdd_p}", float(importance_primary[ch]))]
+                for yr_mmdd_imp in extra_mmdd_imps:
+                    # Find nearest MMDD key for same band in this extra year
+                    cands = [k for k in yr_mmdd_imp if k.startswith(f"{band}_")]
+                    if not cands:
+                        continue
+                    nearest = min(cands, key=lambda k: abs(_doy(k.split("_")[1]) - doy_p))
+                    imps.append(yr_mmdd_imp[nearest])
+
+                adjusted[ch] = float(np.mean(imps))
         else:
             adjusted = importance_primary
 
