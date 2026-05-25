@@ -508,23 +508,34 @@ def run_experiment(
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)
 
-    n_total = len(train_val_ds)
-    n_val   = max(1, int(VAL_FRAC * n_total))
-    n_train = n_total - n_val
-    gen     = torch.Generator().manual_seed(SEED)
-    train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
+    gen = torch.Generator().manual_seed(SEED)
 
-    test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
-    test_cdl = CDL_BY_YEAR[TEST_YEAR]
-    assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
-    test_idx, _ = _yr_idx(TEST_YEAR)
-    test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
-    test_ds = RasterPatchDataset(
-        s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
-        patch_size=PATCH_SIZE, stride=STRIDE,
-        keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-        min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
-    )
+    single_year_mode = len(TRAIN_YEARS) == 1 and TRAIN_YEARS[0] == TEST_YEAR
+    if single_year_mode:
+        # 3-way spatial split from same-year dataset: 70/15/15
+        n_total = len(train_val_ds)
+        n_test  = max(1, int(VAL_FRAC * n_total))
+        n_val   = max(1, int(VAL_FRAC * n_total))
+        n_train = n_total - n_val - n_test
+        train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
+        log.info(f"  Single-year mode: 3-way split from {TEST_YEAR} patches")
+    else:
+        n_total = len(train_val_ds)
+        n_val   = max(1, int(VAL_FRAC * n_total))
+        n_train = n_total - n_val
+        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
+
+        test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
+        test_cdl = CDL_BY_YEAR[TEST_YEAR]
+        assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
+        test_idx, _ = _yr_idx(TEST_YEAR)
+        test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
+        test_ds = RasterPatchDataset(
+            s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
+            patch_size=PATCH_SIZE, stride=STRIDE,
+            keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
+            min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
+        )
 
     # Class-weighted sampler: rare-class patches sampled more frequently
     log.info("  Computing patch weights for class-balanced sampling...")

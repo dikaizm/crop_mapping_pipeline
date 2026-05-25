@@ -119,7 +119,7 @@ S2_MAX_BANDS  = 20         # max bands selected per crop
 S2_BATCH_SIZE = 8
 
 # ── Stage 3 hyperparameters ────────────────────────────────────────────────────
-TRAIN_YEARS    = ["2022", "2023"]
+TRAIN_YEARS    = ["2024"]
 TEST_YEAR      = "2024"
 PATCH_SIZE     = 256
 STRIDE         = 256
