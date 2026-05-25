@@ -652,12 +652,20 @@ def run_experiment(
             scheduler.step()
 
             ep_t = time.time() - t_ep
+            per_cls_metrics = {}
+            for cls_id, iou in val_m["per_class_iou"].items():
+                if not np.isnan(iou):
+                    cdl_id = KEEP_CLASSES[cls_id - 1]
+                    name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                    key    = f"val_iou_{name.lower().replace('/', '_').replace(' ', '_')}"
+                    per_cls_metrics[key] = iou
             mlflow.log_metrics({
                 "train_loss": train_loss,
                 "val_loss":   val_m["loss"],
                 "val_miou":   val_m["miou"],
                 "val_oa":     val_m["oa"],
                 "lr":         scheduler.get_last_lr()[0],
+                **per_cls_metrics,
             }, step=epoch)
 
             history.append({
