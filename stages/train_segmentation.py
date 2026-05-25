@@ -518,6 +518,10 @@ def run_experiment(
         n_val   = max(1, int(VAL_FRAC * n_total))
         n_train = n_total - n_val - n_test
         train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
+        # Full-image inference vars not applicable in single-year patch-split mode
+        test_cdl         = CDL_BY_YEAR[TEST_YEAR]
+        test_s2_filtered = None
+        test_idx_local   = None
         log.info(f"  Single-year mode: 3-way split from {TEST_YEAR} patches")
     else:
         n_total = len(train_val_ds)
@@ -794,9 +798,9 @@ def run_experiment(
         cm_path = exp_dir / "confusion_matrix.png"
         _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
 
-        # Segmentation map PNG (full-tile inference)
+        # Segmentation map PNG (full-tile inference — skipped in single-year patch-split mode)
         seg_path = None
-        if not skip_viz:
+        if not skip_viz and test_s2_filtered is not None:
             log.info(f"  Running full-image inference for {exp_name}...")
             gt_map, _    = load_gt_remap(str(test_cdl))
             pred_map, _  = run_full_inference(
