@@ -376,6 +376,35 @@ def _patch_weights(datasets: list) -> np.ndarray:
     return np.array(weights, dtype=np.float64)
 
 
+# ── Augmentation wrapper ───────────────────────────────────────────────────────
+
+class AugmentedSubset(torch.utils.data.Dataset):
+    """Wraps a Subset and applies random H/V flips + 90° rotations to (img, mask)."""
+
+    def __init__(self, subset):
+        self.subset = subset
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        img, mask = self.subset[idx]   # img: (C,H,W) float, mask: (H,W) long
+        # Random horizontal flip
+        if torch.rand(1).item() > 0.5:
+            img  = torch.flip(img,  [-1])
+            mask = torch.flip(mask, [-1])
+        # Random vertical flip
+        if torch.rand(1).item() > 0.5:
+            img  = torch.flip(img,  [-2])
+            mask = torch.flip(mask, [-2])
+        # Random 90° rotation (k ∈ {0,1,2,3})
+        k = torch.randint(0, 4, (1,)).item()
+        if k:
+            img  = torch.rot90(img,  k, [-2, -1])
+            mask = torch.rot90(mask, k, [-2, -1])
+        return img, mask
+
+
 # ── Main experiment runner ────────────────────────────────────────────────────
 
 def run_experiment(
@@ -506,10 +535,11 @@ def run_experiment(
         num_samples=n_train,
         replacement=True,
     )
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
-    val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {len(test_ds):,} test ({TEST_YEAR})")
+    aug_train_ds = AugmentedSubset(train_ds)
+    train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
+    val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
+    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
+    log.info(f"  Patches: {n_train:,} train (augmented) / {n_val:,} val / {len(test_ds):,} test ({TEST_YEAR})")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
     model     = build_model(arch, in_channels, NUM_CLASSES)
