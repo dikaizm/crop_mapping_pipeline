@@ -101,6 +101,7 @@ MLFLOW_EXPERIMENT_TRAIN        = "cropmap_segmentation_s2"
 MLFLOW_EXPERIMENT_TRAIN_V2     = "cropmap_segmentation_s2_v2"
 MLFLOW_EXPERIMENT_TRAIN_V3     = "cropmap_segmentation_s2_v3"
 MLFLOW_EXPERIMENT_TRAIN_DIRECT = "cropmap_segmentation_s2_direct"
+MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR = "cropmap_segmentation_s2_single_year"
 
 # ── Stage 1 hyperparameters ────────────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5 % of labeled crop pixels for GSI computation

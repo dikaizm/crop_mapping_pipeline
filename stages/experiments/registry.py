@@ -27,6 +27,7 @@ from crop_mapping_pipeline.config import (
     MLFLOW_EXPERIMENT_TRAIN_V2,
     MLFLOW_EXPERIMENT_TRAIN_V3,
     MLFLOW_EXPERIMENT_TRAIN_DIRECT,
+    MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR,
 )
 
 
@@ -202,7 +203,7 @@ def build_registry(
             band_indices= exp_gsi_direct_idx,
             band_names  = exp_gsi_direct_names,
             default_loss= "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_DIRECT,
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR,
         )
 
     if exp_rf_direct_idx is not None:
@@ -212,7 +213,7 @@ def build_registry(
             band_indices= exp_rf_direct_idx,
             band_names  = exp_rf_direct_names,
             default_loss= "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_DIRECT,
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR,
         )
 
     # ── C_v3 sweep: one entry per (phase, k) — V2 experiment (legacy) ─────────
