@@ -1240,27 +1240,39 @@ def main(
         )
         log.info(f"Exp C_v3: RF forward-selection, {len(exp_C_v3_rf_idx)} channels")
 
+    def _find_direct_json(selector: str) -> Path:
+        """Find best available JSON: exact k match, or largest k available as subset base."""
+        base = Path(data_dir) if data_dir else SELECT_GSI_DIRECT_JSON.parent
+        if top_k:
+            exact = base / f"select_{selector}_k{top_k}.json"
+            if exact.exists():
+                return exact
+            # Fall back to largest available k JSON (subset_k will trim at load time)
+            candidates = sorted(base.glob(f"select_{selector}_k*.json"))
+            if candidates:
+                log.info(f"  {selector}: k={top_k} JSON not found, using {candidates[-1].name} with subset_k")
+                return candidates[-1]
+        return base / f"select_{selector}_k{SELECT_TOP_K_PER_CROP}.json"
+
     # GSI-direct: single-stage all-channel GSI ranking
     exp_gsi_direct_idx = exp_gsi_direct_names = None
     if exps and "gsi_direct" in exps:
-        _k = top_k or SELECT_TOP_K_PER_CROP
-        _stem = f"select_gsi_direct_k{_k}.json"
-        gsi_json = (Path(data_dir) / _stem) if data_dir else (SELECT_GSI_DIRECT_JSON.parent / _stem)
+        gsi_json = _find_direct_json("gsi_direct")
         exp_gsi_direct_idx, exp_gsi_direct_names = build_direct_indices(
-            gsi_json, mmdd_to_date, local_band_to_idx, selector_name="gsi_direct"
+            gsi_json, mmdd_to_date, local_band_to_idx,
+            selector_name="gsi_direct", subset_k=top_k,
         )
-        log.info(f"Exp gsi_direct (k={_k}): {len(exp_gsi_direct_idx)} channels")
+        log.info(f"Exp gsi_direct (k={top_k or 'all'}): {len(exp_gsi_direct_idx)} channels")
 
     # RF-direct: single-stage all-channel RF importance ranking
     exp_rf_direct_idx = exp_rf_direct_names = None
     if exps and "rf_direct" in exps:
-        _k = top_k or SELECT_TOP_K_PER_CROP
-        _stem = f"select_rf_direct_k{_k}.json"
-        rf_json = (Path(data_dir) / _stem) if data_dir else (SELECT_RF_DIRECT_JSON.parent / _stem)
+        rf_json = _find_direct_json("rf_direct")
         exp_rf_direct_idx, exp_rf_direct_names = build_direct_indices(
-            rf_json, mmdd_to_date, local_band_to_idx, selector_name="rf_direct"
+            rf_json, mmdd_to_date, local_band_to_idx,
+            selector_name="rf_direct", subset_k=top_k,
         )
-        log.info(f"Exp rf_direct (k={_k}): {len(exp_rf_direct_idx)} channels")
+        log.info(f"Exp rf_direct (k={top_k or 'all'}): {len(exp_rf_direct_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()

@@ -21,6 +21,7 @@ def build_direct_indices(
     mmdd_to_date: dict[str, str],
     local_band_to_idx: dict[str, int],
     selector_name: str = "direct",
+    subset_k: int | None = None,
 ) -> tuple[list[int], list[str]]:
     """
     Load union_channels from a direct-selector JSON and map to local channel indices.
@@ -28,6 +29,9 @@ def build_direct_indices(
     Each channel in union_channels has the form "{band}_{YYYYMMDD}" (e.g., "B4_20220730").
     The date is matched by MMDD (month+day) against mmdd_to_date for the current year's files,
     so the selection transfers across years (2022 selection → 2023/2024 indices).
+
+    subset_k: if set, re-derives union from per_crop ranked lists using only top-subset_k
+    per crop — allows using a k=20 JSON to get k=5/10/15 unions without re-running selection.
 
     Returns (idx_list, name_list).
     """
@@ -40,7 +44,27 @@ def build_direct_indices(
     with open(json_path) as f:
         payload = json.load(f)
 
-    union_channels: list[str] = payload.get("union_channels", [])
+    if subset_k is not None:
+        # Re-derive union from ranked per_crop lists at subset_k
+        per_crop: dict[str, list[str]] = payload.get("per_crop", {})
+        if not per_crop:
+            raise ValueError(f"{json_path.name} has no per_crop field — cannot subset")
+        stored_k = int(payload.get("top_k", 0))
+        if subset_k > stored_k:
+            raise ValueError(
+                f"subset_k={subset_k} > stored top_k={stored_k} in {json_path.name}. "
+                f"Run selection with --top-k {subset_k} or higher."
+            )
+        seen: set[str] = set()
+        union_channels: list[str] = []
+        for ranked in per_crop.values():
+            for ch in ranked[:subset_k]:
+                if ch not in seen:
+                    seen.add(ch)
+                    union_channels.append(ch)
+        log.info(f"  {selector_name}: subset_k={subset_k} from k={stored_k} JSON → {len(union_channels)} union channels")
+    else:
+        union_channels = payload.get("union_channels", [])
     if not union_channels:
         raise ValueError(f"{json_path.name} has empty union_channels")
 
