@@ -38,16 +38,16 @@ S2_NODATA        = -9999.0
 VEGE_BANDS       = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B11", "B12"]
 
 # ── CDL classes ────────────────────────────────────────────────────────────────
+# 6-class experiment: keep only major crops (IoU > 0.4, coverage > 4%).
+# Dropped to background: Sunflower(6), Other Hay(37), Grapes(69), Pistachios(204).
 # Fallow/Idle Cropland (61) → background (class 0); not in KEEP_CLASSES
-KEEP_CLASSES = [3, 6, 24, 36, 37, 54, 69, 75, 76, 204]  # v5: 204=Pistachios (replaces 210=Prunes)
+KEEP_CLASSES = [3, 24, 36, 54, 75, 76]  # Rice, Winter Wheat, Alfalfa, Tomatoes, Almonds, Walnuts
 CLASS_REMAP  = {cls_id: i + 1 for i, cls_id in enumerate(KEEP_CLASSES)}
-NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 11: 0=bg + 1–10=crops
+NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 7: 0=bg + 1–6=crops
 
 CDL_CLASS_NAMES = {
-    3:   "Rice",         6:   "Sunflower",    24:  "Winter Wheat",
-    36:  "Alfalfa",      37:  "Other Hay",    54:  "Tomatoes",
-    69:  "Grapes",       75:  "Almonds",      76:  "Walnuts",
-    204: "Pistachios",
+    3:  "Rice",    24: "Winter Wheat",  36: "Alfalfa",
+    54: "Tomatoes", 75: "Almonds",      76: "Walnuts",
 }
 
 REMAP_LUT = np.zeros(256, dtype=np.int64)
@@ -104,6 +104,7 @@ MLFLOW_EXPERIMENT_TRAIN_V2     = "cropmap_segmentation_s2_v2"
 MLFLOW_EXPERIMENT_TRAIN_V3     = "cropmap_segmentation_s2_v3"
 MLFLOW_EXPERIMENT_TRAIN_DIRECT = "cropmap_segmentation_s2_direct"
 MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR = "cropmap_segmentation_s2_single_year"
+MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
 
 # ── Stage 1 hyperparameters ────────────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5 % of labeled crop pixels for GSI computation

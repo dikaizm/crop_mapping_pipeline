@@ -511,6 +511,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
             "bands":          list(dataset.band_indices) if dataset.band_indices is not None else None,
             "stride":         getattr(dataset, "stride", None),
             "min_valid_frac": getattr(dataset, "min_valid_frac", None),
+            "n_patches":      len(dataset.patches),  # changes with KEEP_CLASSES → prevents stale cache
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         return Path(cache_dir) / f"preload_{h}.pt"
