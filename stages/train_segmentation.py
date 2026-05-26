@@ -713,6 +713,7 @@ def run_experiment(
             "in_channels":    in_channels,
             "num_classes":    NUM_CLASSES,
             "patch_size":     PATCH_SIZE,
+            "stride":         STRIDE,
             "batch_size":     BATCH_SIZE,
             "max_epochs":     MAX_EPOCHS,
             "early_stopping": EARLY_STOP,
