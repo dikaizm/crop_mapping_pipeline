@@ -1229,6 +1229,9 @@ def main(
     # deduplicate (a file matching both patterns would appear twice)
     seen = set()
     s2_processed = [p for p in s2_processed if not (p in seen or seen.add(p))]
+    # restrict to years actually used (TRAIN_YEARS + TEST_YEAR) — skip other year dirs
+    _active_years = set(TRAIN_YEARS) | {TEST_YEAR}
+    s2_processed = [p for p in s2_processed if Path(p).parent.name in _active_years]
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
 
