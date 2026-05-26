@@ -85,9 +85,9 @@ def build_registry(
 
     # ── Baselines ───────────────────────────────────────────────────────────
 
-    reg["A"] = ExperimentConfig(
-        key         = "A",
-        description = f"Single-date {july30_key}, 9ch — conventional baseline",
+    reg["single_date"] = ExperimentConfig(
+        key         = "single_date",
+        description = f"Single-date peak growing season {july30_key}, 9ch — single-date baseline",
         band_indices= exp_A_idx,
         band_names  = exp_A_names,
         default_loss= "v1",
@@ -117,9 +117,9 @@ def build_registry(
             mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
         )
 
-    reg["B"] = ExperimentConfig(
-        key         = "B",
-        description = f"4 phenological dates {list(phenol_map.values())}, {len(exp_B_idx)}ch — multi-temporal naive",
+    reg["naive_multitemporal"] = ExperimentConfig(
+        key         = "naive_multitemporal",
+        description = f"4 NDVI-based phenological dates {list(phenol_map.values())}, {len(exp_B_idx)}ch — naive multi-temporal baseline",
         band_indices= exp_B_idx,
         band_names  = exp_B_names,
         default_loss= "v1",

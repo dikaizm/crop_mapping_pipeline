@@ -19,7 +19,7 @@ Four experiment configurations × 2 architectures = up to 8 training runs.
 
 Usage:
     python scripts/train_segmentation.py                 # run all 6 experiments
-    python scripts/train_segmentation.py --exp A         # only Exp A (both archs)
+    python scripts/train_segmentation.py --exp single_date   # only single-date baseline (both archs)
     python scripts/train_segmentation.py --exp C --arch segformer
     python scripts/train_segmentation.py --force         # re-run even if ckpt exists
     python scripts/train_segmentation.py --data-dir /mnt/data
@@ -1302,14 +1302,18 @@ def main(
      local_date_to_idx, mmdd_to_date) = build_local_band_map(s2_processed)
 
     # ── Build experiment channel sets ─────────────────────────────────────
+    _ref_year_s2  = _s2_for_year(s2_processed, TRAIN_YEARS[0])
+    _ref_year_cdl = CDL_BY_YEAR[TRAIN_YEARS[0]]
     exp_A_idx, exp_A_names, july30_key = build_exp_A_indices(
-        local_date_to_idx, local_band_to_idx
+        local_date_to_idx, local_band_to_idx,
+        s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
     )
     exp_A_v2_variants = build_exp_A_v2_indices(
         local_date_to_idx, local_band_to_idx
     )
     exp_B_idx, exp_B_names, phenol_map = build_exp_B_indices(
-        local_date_to_idx, local_band_to_idx
+        local_date_to_idx, local_band_to_idx,
+        s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
     )
     # Exp C: prefer per-year projected indices; fall back to single-ref-year
     exp_C_idx = exp_C_names = exp_C_projected = resolved_project_run_id = resolved_stage2_run_id = None
@@ -1437,7 +1441,7 @@ def main(
 
     # ── Build experiment registry & plan ───────────────────────────────────
     all_archs = list(ARCH_CFG.keys())
-    run_exps  = exps  or ["A", "B", "C"]
+    run_exps  = exps  or ["single_date", "naive_multitemporal", "C"]
     run_archs = archs or all_archs
 
     registry = build_registry(
@@ -1594,10 +1598,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["A", "A_v2", "A_v3", "B", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
-        default=["A", "B", "C"],
+        choices=["single_date", "naive_multitemporal", "A_v2", "A_v3", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
+        default=["single_date", "naive_multitemporal", "C"],
         help=(
-            "Which experiments to run (default: A B C). "
+            "Which experiments to run (default: single_date naive_multitemporal C). "
+            "single_date=peak NDVI single date 9ch, naive_multitemporal=4 NDVI-based phenological dates 36ch. "
             "V3 experiments (all log to cropmap_segmentation_s2_v3): "
             "A_v3=phenological baselines, B_v3=Stage1 GSI top-k sweep, C_v3=Stage2 RF selection. "
             "A_v3/B_v3 expand to multiple variants; use --v3-phase and --v3-k for B_v3."
