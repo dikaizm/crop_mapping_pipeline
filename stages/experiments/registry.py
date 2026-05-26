@@ -68,6 +68,8 @@ def build_registry(
     exp_gsi_direct_idx = None, exp_gsi_direct_names = None,
     # ── RF-direct (single-stage, all channels ranked by RF importance) ────
     exp_rf_direct_idx  = None, exp_rf_direct_names  = None,
+    # ── all_channels (no selection — upper bound) ─────────────────────────
+    exp_all_channels_idx = None, exp_all_channels_names = None,
     # ── Exp A_v2 (per-window single-date) — V2 ─────────────────────────────
     exp_A_v2_variants = None,              # {label: (idx, names, date)}
     # ── V3 experiments ─────────────────────────────────────────────────────
@@ -216,6 +218,16 @@ def build_registry(
             band_indices= exp_rf_direct_idx,
             band_names  = exp_rf_direct_names,
             default_loss= "v1",
+            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
+        )
+
+    if exp_all_channels_idx is not None:
+        reg["all_channels"] = ExperimentConfig(
+            key               = "all_channels",
+            description       = f"All channels, no selection — {len(exp_all_channels_idx)}ch upper bound",
+            band_indices      = exp_all_channels_idx,
+            band_names        = exp_all_channels_names,
+            default_loss      = "v1",
             mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
         )
 

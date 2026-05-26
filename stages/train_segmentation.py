@@ -1438,6 +1438,13 @@ def main(
         )
         log.info(f"Exp rf_direct (k={top_k or 'all'}): {len(exp_rf_direct_idx)} channels")
 
+    # all_channels: no selection — use every available (date × band) channel
+    exp_all_channels_idx = exp_all_channels_names = None
+    if exps and "all_channels" in exps:
+        exp_all_channels_idx   = list(range(len(local_band_names)))
+        exp_all_channels_names = local_band_names
+        log.info(f"Exp all_channels: {len(exp_all_channels_idx)} channels (no selection)")
+
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
     log.info("Class weights computed")
@@ -1466,6 +1473,7 @@ def main(
         exp_C_v3_rf_idx=exp_C_v3_rf_idx, exp_C_v3_rf_names=exp_C_v3_rf_names,
         exp_gsi_direct_idx=exp_gsi_direct_idx, exp_gsi_direct_names=exp_gsi_direct_names,
         exp_rf_direct_idx=exp_rf_direct_idx,   exp_rf_direct_names=exp_rf_direct_names,
+        exp_all_channels_idx=exp_all_channels_idx, exp_all_channels_names=exp_all_channels_names,
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)
@@ -1601,7 +1609,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["single_date", "naive_multitemporal", "A_v2", "A_v3", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
+        choices=["single_date", "naive_multitemporal", "all_channels", "A_v2", "A_v3", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
         default=["single_date", "naive_multitemporal", "C"],
         help=(
             "Which experiments to run (default: single_date naive_multitemporal C). "
