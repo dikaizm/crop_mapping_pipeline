@@ -419,7 +419,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
     produce different cache files; same experiment hits the cache on rerun.
     """
 
-    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=8):
+    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None):
         cache_path = self._cache_path(dataset, cache_dir) if cache_dir else None
 
         if cache_path and cache_path.exists():
@@ -468,7 +468,9 @@ class PreloadedDataset(torch.utils.data.Dataset):
                 log.warning(f"  [{desc}] read failed file {fi}: {e}")
                 return fi, None, out_cols
 
-        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+        _n_threads = n_threads or min(len(file_extraction), os.cpu_count() or 8)
+        log.info(f"  [{desc}] Using {_n_threads} threads for {len(file_extraction)} files")
+        with ThreadPoolExecutor(max_workers=_n_threads) as pool:
             for fi, arr, out_cols in pool.map(_read_one_file, list(file_extraction.keys())):
                 if arr is None:
                     continue
