@@ -86,11 +86,12 @@ def build_registry(
     # ── Baselines ───────────────────────────────────────────────────────────
 
     reg["single_date"] = ExperimentConfig(
-        key         = "single_date",
-        description = f"Single-date peak growing season {july30_key}, 9ch — single-date baseline",
-        band_indices= exp_A_idx,
-        band_names  = exp_A_names,
-        default_loss= "v1",
+        key               = "single_date",
+        description       = f"Single-date peak growing season {july30_key}, 9ch — single-date baseline",
+        band_indices      = exp_A_idx,
+        band_names        = exp_A_names,
+        default_loss      = "v1",
+        mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
     )
 
     # ── Exp A_v2: one entry per phenological window (V2 experiment) ────────────
@@ -118,11 +119,12 @@ def build_registry(
         )
 
     reg["naive_multitemporal"] = ExperimentConfig(
-        key         = "naive_multitemporal",
-        description = f"4 NDVI-based phenological dates {list(phenol_map.values())}, {len(exp_B_idx)}ch — naive multi-temporal baseline",
-        band_indices= exp_B_idx,
-        band_names  = exp_B_names,
-        default_loss= "v1",
+        key               = "naive_multitemporal",
+        description       = f"4 NDVI-based phenological dates {list(phenol_map.values())}, {len(exp_B_idx)}ch — naive multi-temporal baseline",
+        band_indices      = exp_B_idx,
+        band_names        = exp_B_names,
+        default_loss      = "v1",
+        mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
     )
 
     # ── Proposed method ─────────────────────────────────────────────────────
