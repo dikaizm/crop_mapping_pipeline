@@ -480,11 +480,15 @@ class PreloadedDataset(torch.utils.data.Dataset):
                         buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
                 del arr
 
-        imgs = torch.from_numpy(buf); del buf
-        lo = imgs.amin(dim=(-2, -1), keepdim=True)
-        hi = imgs.amax(dim=(-2, -1), keepdim=True)
-        rng = (hi - lo).clamp(min=1e-8)
-        self._imgs = torch.where(hi > lo, (imgs - lo) / rng, torch.zeros_like(imgs))
+        # In-place normalization on numpy buf — avoids 3-4× tensor copies that
+        # torch.where would create (critical for large patch counts like stride=128).
+        lo = buf.min(axis=(-2, -1), keepdims=True)   # (N, C, 1, 1) — tiny
+        hi = buf.max(axis=(-2, -1), keepdims=True)
+        rng = np.where(hi > lo, hi - lo, 1.0)
+        buf -= lo
+        buf /= rng
+        # flat patches: (lo - lo) / 1.0 = 0 — already correct
+        self._imgs = torch.from_numpy(buf)   # zero-copy, shares buf memory
 
         masks = [
             torch.from_numpy(
