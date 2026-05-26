@@ -544,10 +544,11 @@ def run_experiment(
                               Exp C without projected file)
       - dict{yr: (idx, names)} → per-year indices from build_exp_C_indices_projected()
     """
-    cfg        = ARCH_CFG[arch]
-    exp_dir    = MODELS_DIR / exp_name
-    best_ckpt  = exp_dir / "best_model.pth"
-    last_ckpt  = exp_dir / "last_model.pth"
+    cfg           = ARCH_CFG[arch]
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    exp_dir       = MODELS_DIR / f"{exp_name}_{run_timestamp}"
+    best_ckpt     = exp_dir / "best_model.pth"
+    last_ckpt     = exp_dir / "last_model.pth"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     if not force and best_ckpt.exists():
@@ -699,7 +700,6 @@ def run_experiment(
         log.info("  Loss v1 — WeightedCrossEntropy")
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
-    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")   # used for GDrive folder
 
     with mlflow.start_run(run_name=exp_name, nested=True) as run:
         mlflow.log_params({
