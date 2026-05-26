@@ -29,11 +29,14 @@ import os
 import re
 import sys
 import time
+import json
+import hashlib
 import argparse
 import logging
 from glob import glob
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -60,7 +63,7 @@ patch_artifact_logging()
 
 from crop_mapping_pipeline.config import (
     S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
-    PROCESSED_DIR,
+    PROCESSED_DIR, PRELOAD_CACHE_DIR,
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA,
@@ -408,27 +411,107 @@ class AugmentedSubset(torch.utils.data.Dataset):
 # ── In-memory dataset cache ───────────────────────────────────────────────────
 
 class PreloadedDataset(torch.utils.data.Dataset):
-    """Eagerly loads all patches from a RasterPatchDataset into RAM tensors.
+    """Eagerly loads all patches into RAM tensors with a persistent disk cache.
 
-    Eliminates per-batch TIF disk reads (the primary I/O bottleneck).
-    Memory cost: N_patches × C × H × W × 4 bytes. For 498 patches × 98ch ×
-    256² ≈ 3.2 GB — fits comfortably in server RAM.
+    Reads each TIF file once in full (parallel threads) instead of per-patch
+    window reads → ~30–60s instead of 15+ min for 498 patches × 21 files.
+    Cache key covers s2_paths/cdl_path/bands/patch_size — different experiments
+    produce different cache files; same experiment hits the cache on rerun.
     """
 
-    def __init__(self, dataset, desc="preloading"):
-        n = len(dataset)
-        log.info(f"  [{desc}] Preloading {n} patches into RAM …")
+    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=8):
+        cache_path = self._cache_path(dataset, cache_dir) if cache_dir else None
+
+        if cache_path and cache_path.exists():
+            log.info(f"  [{desc}] Cache hit → loading {cache_path.name}")
+            t0 = time.time()
+            blob = torch.load(cache_path, map_location="cpu")
+            self._imgs, self._masks = blob["imgs"], blob["masks"]
+            gb = self._imgs.element_size() * self._imgs.nelement() / 1e9
+            log.info(f"  [{desc}] Loaded in {time.time()-t0:.1f}s ({gb:.2f} GB)")
+            return
+
+        log.info(f"  [{desc}] Cache miss → preloading from {len(dataset._s2_srcs)} TIF files …")
         t0 = time.time()
-        imgs, masks = [], []
-        for i in range(n):
-            img, mask = dataset[i]
-            imgs.append(img)
-            masks.append(mask)
-        self._imgs  = torch.stack(imgs)   # (N, C, H, W)
-        self._masks = torch.stack(masks)  # (N, H, W)
+
+        n  = len(dataset)
+        ps = dataset.patch_size
+        band_indices  = dataset.band_indices
+        n_ch_per_file = [src.count for src in dataset._s2_srcs]
+        ch_offsets    = np.cumsum([0] + n_ch_per_file).tolist()
+        n_ch          = len(band_indices) if band_indices is not None else ch_offsets[-1]
+
+        # file_extraction[fi] = [(output_col, local_band_idx_1based), ...]
+        file_extraction: dict = {}
+        targets = band_indices if band_indices is not None else list(range(ch_offsets[-1]))
+        for out_pos, gi in enumerate(targets):
+            for fi in range(len(n_ch_per_file)):
+                if ch_offsets[fi] <= gi < ch_offsets[fi + 1]:
+                    file_extraction.setdefault(fi, []).append((out_pos, gi - ch_offsets[fi] + 1))
+                    break
+
+        buf     = np.zeros((n, n_ch, ps, ps), dtype=np.float32)
+        patches = dataset.patches
+        nodata  = dataset.nodata
+
+        def _read_one_file(fi):
+            extractions = file_extraction[fi]
+            local_idxs  = [e[1] for e in extractions]
+            out_cols    = [e[0] for e in extractions]
+            try:
+                with rasterio.open(dataset.s2_paths[fi]) as src:
+                    arr = src.read(indexes=local_idxs).astype(np.float32)
+                arr[arr == nodata]      = 0.0
+                arr[~np.isfinite(arr)]  = 0.0
+                return fi, arr, out_cols
+            except Exception as e:
+                log.warning(f"  [{desc}] read failed file {fi}: {e}")
+                return fi, None, out_cols
+
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            for fi, arr, out_cols in pool.map(_read_one_file, list(file_extraction.keys())):
+                if arr is None:
+                    continue
+                for ci, out_pos in enumerate(out_cols):
+                    band_plane = arr[ci]
+                    for pi, (r, c) in enumerate(patches):
+                        buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
+                del arr
+
+        imgs = torch.from_numpy(buf); del buf
+        lo = imgs.amin(dim=(-2, -1), keepdim=True)
+        hi = imgs.amax(dim=(-2, -1), keepdim=True)
+        rng = (hi - lo).clamp(min=1e-8)
+        self._imgs = torch.where(hi > lo, (imgs - lo) / rng, torch.zeros_like(imgs))
+
+        masks = [
+            torch.from_numpy(
+                dataset._remap_lut[np.clip(dataset._cdl[r:r+ps, c:c+ps], 0, 255)].astype(np.int64)
+            )
+            for r, c in patches
+        ]
+        self._masks = torch.stack(masks)
+
         elapsed = time.time() - t0
         gb = self._imgs.element_size() * self._imgs.nelement() / 1e9
-        log.info(f"  [{desc}] Done in {elapsed:.1f}s — {gb:.2f} GB in RAM")
+        log.info(f"  [{desc}] Preloaded in {elapsed:.1f}s — {gb:.2f} GB in RAM")
+
+        if cache_path:
+            torch.save({"imgs": self._imgs, "masks": self._masks}, cache_path)
+            log.info(f"  [{desc}] Cached → {cache_path.name}")
+
+    @staticmethod
+    def _cache_path(dataset, cache_dir):
+        key = {
+            "s2":             [str(p) for p in dataset.s2_paths],
+            "cdl":            str(dataset.cdl_path),
+            "ps":             dataset.patch_size,
+            "bands":          list(dataset.band_indices) if dataset.band_indices is not None else None,
+            "stride":         getattr(dataset, "stride", None),
+            "min_valid_frac": getattr(dataset, "min_valid_frac", None),
+        }
+        h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
+        return Path(cache_dir) / f"preload_{h}.pt"
 
     def __len__(self):
         return len(self._imgs)
@@ -537,7 +620,7 @@ def run_experiment(
         )
         log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
         train_year_datasets_raw.append(ds_raw)
-        train_year_datasets.append(PreloadedDataset(ds_raw, desc=yr))
+        train_year_datasets.append(PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR))
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)

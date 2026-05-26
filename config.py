@@ -16,6 +16,8 @@ CDL_DIR          = PROCESSED_DIR / "cdl"
 MODELS_DIR       = PROJECT_ROOT / "ml_models"
 FIGURES_DIR      = PROJECT_ROOT / "documents" / "thesis" / "figures"
 LOGS_DIR         = PROJECT_ROOT / "logs"
+PRELOAD_CACHE_DIR = PROCESSED_DIR / "preload_cache"
+PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 CDL_BY_YEAR = {
     "2022": CDL_DIR / "cdl_2022_study_area_filtered.tif",
