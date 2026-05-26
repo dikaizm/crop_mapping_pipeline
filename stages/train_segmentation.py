@@ -1194,7 +1194,13 @@ def main(
     v3_ks=(3,),
     stage2v3_sweep_run_id=None,
     top_k=None,
+    batch_size=None,
 ):
+    global BATCH_SIZE
+    if batch_size:
+        BATCH_SIZE = batch_size
+        log.info(f"Batch size overridden: {BATCH_SIZE}")
+
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
@@ -1646,6 +1652,10 @@ if __name__ == "__main__":
         "--top-k", type=int, nargs="+", default=None, metavar="K",
         help="Top-K value(s) to sweep (loads select_gsi/rf_direct_k{K}.json per k). E.g. --top-k 5 10 15 20 30",
     )
+    parser.add_argument(
+        "--batch-size", type=int, default=None, metavar="N",
+        help=f"Override BATCH_SIZE from config (default: {BATCH_SIZE}).",
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1699,6 +1709,7 @@ if __name__ == "__main__":
             v3_ks=args.v3_k,
             stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
             top_k=k,
+            batch_size=args.batch_size,
         )
 
     if args.shutdown:
