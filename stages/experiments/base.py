@@ -20,17 +20,23 @@ def parse_date(path):
     return m.group(1).replace("_", "")
 
 
-def build_local_band_map(s2_processed):
+def build_local_band_map(s2_processed, ref_year=None):
     """
     Return (local_band_names, local_band_to_idx, local_date_to_idx, mmdd_to_date)
-    based on the year with the most processed files (used as reference).
+    based on ref_year if provided, otherwise the year with the most processed files.
+
+    Always use TRAIN_YEARS[0] as ref_year so band_names encode training-year dates.
+    This is required for cross-year phenological alignment to work correctly.
     """
     by_year = {}
     for p in s2_processed:
         yr = Path(p).name.split("_")[1]
         by_year.setdefault(yr, []).append(p)
 
-    ref_yr    = max(by_year, key=lambda y: len(by_year[y]))
+    if ref_year and ref_year in by_year:
+        ref_yr = ref_year
+    else:
+        ref_yr = max(by_year, key=lambda y: len(by_year[y]))
     ref_files = sorted(by_year[ref_yr])
 
     local_band_names  = []

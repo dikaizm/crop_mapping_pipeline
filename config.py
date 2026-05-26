@@ -119,13 +119,13 @@ S2_MAX_BANDS  = 20         # max bands selected per crop
 S2_BATCH_SIZE = 8
 
 # ── Stage 3 hyperparameters ────────────────────────────────────────────────────
-TRAIN_YEARS    = ["2022", "2023"]
+TRAIN_YEARS    = ["2023"]
 TEST_YEAR      = "2024"
 PATCH_SIZE     = 256
-STRIDE         = 256
+STRIDE         = 128
 MIN_VALID_FRAC = 0.1
 BATCH_SIZE     = 8
-MAX_EPOCHS     = 100
+MAX_EPOCHS     = 150
 EARLY_STOP     = 20
 EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
 VAL_FRAC       = 0.15

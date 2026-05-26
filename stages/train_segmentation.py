@@ -1142,7 +1142,7 @@ def main(
 
     # ── Build local band map (reference year) ──────────────────────────────
     (local_band_names, local_band_to_idx,
-     local_date_to_idx, mmdd_to_date) = build_local_band_map(s2_processed)
+     local_date_to_idx, mmdd_to_date) = build_local_band_map(s2_processed, ref_year=TRAIN_YEARS[0])
 
     # ── Build experiment channel sets ─────────────────────────────────────
     exp_A_idx, exp_A_names, july30_key = build_exp_A_indices(
