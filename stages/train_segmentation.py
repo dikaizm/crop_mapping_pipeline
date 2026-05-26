@@ -285,6 +285,7 @@ def build_model(arch, in_channels, num_classes):
 
     n = sum(p.numel() for p in model.parameters())
     log.info(f"  {arch} ({cfg['encoder']}): {n:,} params")
+    model._n_params = n
     return model.to(DEVICE)
 
 
@@ -729,6 +730,7 @@ def run_experiment(
             "test_patches":   len(test_ds),
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
+            "model_params":   getattr(model, "_n_params", None),
         })
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
