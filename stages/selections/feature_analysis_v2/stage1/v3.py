@@ -25,7 +25,7 @@ def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[st
     all_dates_set = []
     for s2_path in s2_paths:
         fname = os.path.basename(s2_path)
-        match = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", fname)
+        match = re.search(r"_(\d{4})_(\d{2})_(\d{2})(_processed)?\.tif$", fname)
         date_str = f"{match.group(1)}{match.group(2)}{match.group(3)}" if match else fname[:8]
         if date_str not in all_dates_set:
             all_dates_set.append(date_str)
