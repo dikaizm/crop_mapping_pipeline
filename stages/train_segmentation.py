@@ -1381,11 +1381,15 @@ def main(
     skip_viz=False,
     top_k=None,
     batch_size=None,
+    epochs=None,
 ):
-    global BATCH_SIZE
+    global BATCH_SIZE, MAX_EPOCHS
     if batch_size:
         BATCH_SIZE = batch_size
         log.info(f"Batch size overridden: {BATCH_SIZE}")
+    if epochs:
+        MAX_EPOCHS = epochs
+        log.info(f"Max epochs overridden: {MAX_EPOCHS}")
 
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
@@ -1828,6 +1832,10 @@ if __name__ == "__main__":
         help=f"Override BATCH_SIZE from config (default: {BATCH_SIZE}).",
     )
     parser.add_argument(
+        "--epochs", type=int, default=None, metavar="N",
+        help=f"Override MAX_EPOCHS from config (default: {MAX_EPOCHS}).",
+    )
+    parser.add_argument(
         "--eval-only", metavar="CKPT_PATH",
         help="Skip training — load checkpoint and run spatial test evaluation only.",
     )
@@ -1913,6 +1921,7 @@ if __name__ == "__main__":
             skip_viz=args.skip_viz,
             top_k=k,
             batch_size=args.batch_size,
+            epochs=args.epochs,
         )
 
     if args.shutdown:
