@@ -157,8 +157,21 @@ from crop_mapping_pipeline.config import (
 # ── Class weights ─────────────────────────────────────────────────────────────
 
 def compute_class_weights(cdl_path=None):
-    """Inverse-frequency weights from 2022 CDL (reference year)."""
-    ref_cdl = cdl_path or CDL_TRAIN
+    """Inverse-frequency weights from CDL (train area). Caches result alongside CDL."""
+    ref_cdl   = Path(cdl_path) if cdl_path else CDL_TRAIN
+    cache_key = {"cdl": str(ref_cdl), "keep_classes": KEEP_CLASSES, "num_classes": NUM_CLASSES}
+    cache_h   = hashlib.sha256(json.dumps(cache_key, sort_keys=True).encode()).hexdigest()[:12]
+    cache_path = ref_cdl.parent / f"class_weights_{cache_h}.json"
+
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                w = json.load(f)["weights"]
+            log.info(f"Class weights cache hit → {cache_path.name}")
+            return torch.tensor(w, dtype=torch.float32)
+        except Exception:
+            pass
+
     with rasterio.open(ref_cdl) as src:
         cdl_arr = src.read(1).astype(np.int32)
 
@@ -167,9 +180,14 @@ def compute_class_weights(cdl_path=None):
     for cdl_id, model_id in CLASS_REMAP.items():
         class_counts[model_id] += (cdl_arr == cdl_id).sum()
 
-    freq          = class_counts / (class_counts.sum() + 1e-9)
-    weights       = 1.0 / (freq + 1e-9)
-    weights      /= weights.sum()
+    freq    = class_counts / (class_counts.sum() + 1e-9)
+    weights = 1.0 / (freq + 1e-9)
+    weights /= weights.sum()
+
+    with open(cache_path, "w") as f:
+        json.dump({"weights": weights.tolist(), "class_counts": class_counts.tolist()}, f)
+    log.info(f"Class weights cached → {cache_path.name}")
+
     return torch.tensor(weights, dtype=torch.float32)
 
 
