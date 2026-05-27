@@ -725,11 +725,17 @@ from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v2_rf im
 from crop_mapping_pipeline.stages.selections.feature_analysis_v2.stage2.v3 import run_stage2v3
 from crop_mapping_pipeline.stages.selections.gsi_direct import run_gsi_direct
 from crop_mapping_pipeline.stages.selections.rf_direct import run_rf_direct
+from crop_mapping_pipeline.stages.selections.single_date_gsi import run_single_date_gsi
+from crop_mapping_pipeline.stages.selections.single_date_rf import run_single_date_rf
+from crop_mapping_pipeline.stages.selections.naive_mt_gsi import run_naive_mt_gsi
+from crop_mapping_pipeline.stages.selections.naive_mt_rf import run_naive_mt_rf
 
 _DIRECT_OUTPUT_MAP = {
     "gsi_direct": (SELECT_GSI_DIRECT_JSON, SELECT_GSI_DIRECT_BANDS),
     "rf_direct":  (SELECT_RF_DIRECT_JSON,  SELECT_RF_DIRECT_BANDS),
 }
+
+_DOMAIN_SCOPED_SELECTORS = {"single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf"}
 
 
 def main(force: bool = False, data_dir: str = None, output_dir: str = None,
@@ -813,9 +819,24 @@ def main(force: bool = False, data_dir: str = None, output_dir: str = None,
         return
 
     if stage == "select":
+        if selector in _DOMAIN_SCOPED_SELECTORS:
+            _year, s2_files, cdl_path = get_train_year_inputs()
+            _rf_dir = str(Path(data_dir) if data_dir else PROCESSED_DIR)
+            if selector == "single_date_gsi":
+                run_single_date_gsi(s2_files, cdl_path, force=force)
+            elif selector == "single_date_rf":
+                run_single_date_rf(s2_files, cdl_path, data_dir=_rf_dir, force=force)
+            elif selector == "naive_mt_gsi":
+                run_naive_mt_gsi(s2_files, cdl_path, force=force)
+            elif selector == "naive_mt_rf":
+                run_naive_mt_rf(s2_files, cdl_path, data_dir=_rf_dir, force=force)
+            log.info(f"Domain-scoped selection ({selector}) complete.")
+            return
+
         if selector not in _DIRECT_OUTPUT_MAP:
             raise ValueError(
-                f"--selector must be 'gsi_direct' or 'rf_direct' for --stage select, got {selector!r}"
+                f"--selector must be one of {sorted(_DIRECT_OUTPUT_MAP)|sorted(_DOMAIN_SCOPED_SELECTORS)} "
+                f"for --stage select, got {selector!r}"
             )
         ks = top_k_values or [SELECT_TOP_K_PER_CROP]
         fn = run_gsi_direct if selector == "gsi_direct" else run_rf_direct
@@ -844,13 +865,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         choices=["1", "2", "2v3", "all", "project", "select"],
         default="all",
-        help="'select' runs a single-stage direct selector (gsi_direct or rf_direct).",
+        help=(
+            "'select' runs a single-stage selector: gsi_direct/rf_direct (full year, all dates) "
+            "or single_date_gsi/single_date_rf/naive_mt_gsi/naive_mt_rf (domain-scoped)."
+        ),
     )
     parser.add_argument(
         "--selector",
-        choices=["cnn", "rf", "gsi_direct", "rf_direct"],
+        choices=["cnn", "rf", "gsi_direct", "rf_direct",
+                 "single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf"],
         default="cnn",
-        help="Selector: cnn/rf for Stage 2v2; gsi_direct/rf_direct for --stage select.",
+        help="Selector: cnn/rf for Stage 2v2; others for --stage select.",
     )
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--top-k", type=int, nargs="+", default=None, metavar="K",
