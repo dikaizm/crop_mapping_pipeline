@@ -945,7 +945,7 @@ def run_experiment(
             log.info(
                 f"  Ep {epoch+1:3d}/{MAX_EPOCHS} "
                 f"loss={train_loss:.4f} val={val_m['loss']:.4f} "
-                f"mIoU={val_m['miou']:.4f} best={best_miou:.4f} "
+                f"mIoU={val_m['miou']:.4f} OA={val_m['oa']:.4f} best={best_miou:.4f} "
                 f"patience={no_improve}/{EARLY_STOP} "
                 f"{ep_t:.0f}s  {total_min:.1f}min"
             )
