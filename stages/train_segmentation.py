@@ -571,12 +571,14 @@ class PreloadedDataset(torch.utils.data.Dataset):
         log.info(f"  [{desc}] Preloaded in {elapsed:.1f}s — {gb_alloc:.1f} GB float16 on disk")
 
         if imgs_path:
+            del buf  # close write-mode memmap before rename (WSL/NTFS: open handle blocks rename+reopen)
             _buf_path.rename(imgs_path)
             torch.save(self._masks, masks_path)
             log.info(f"  [{desc}] Cached → {imgs_path.name} + {masks_path.name}")
             self._imgs = np.load(str(imgs_path), mmap_mode="r")
         else:
             self._imgs = np.array(buf)   # no cache dir: load into RAM
+            del buf
             _buf_path.unlink(missing_ok=True)
 
     @staticmethod
