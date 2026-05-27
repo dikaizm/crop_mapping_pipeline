@@ -57,7 +57,7 @@ from crop_mapping_pipeline.utils.mlflow_utils import patch_artifact_logging
 patch_artifact_logging()
 
 from crop_mapping_pipeline.config import (
-    S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
+    S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
     PROCESSED_DIR, PRELOAD_CACHE_DIR,
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
@@ -88,7 +88,8 @@ def _device_label() -> str:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _s2_for_year(s2_processed, yr):
-    return sorted([p for p in s2_processed if Path(p).name.split("_")[1] == yr])
+    # Flat train/ dir — all files belong to the single training year
+    return sorted(s2_processed)
 
 
 def _valid_global_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_PER_DATE):
@@ -157,7 +158,7 @@ from crop_mapping_pipeline.config import (
 
 def compute_class_weights(cdl_path=None):
     """Inverse-frequency weights from 2022 CDL (reference year)."""
-    ref_cdl = cdl_path or CDL_BY_YEAR[TRAIN_YEARS[0]]
+    ref_cdl = cdl_path or CDL_TRAIN
     with rasterio.open(ref_cdl) as src:
         cdl_arr = src.read(1).astype(np.int32)
 
@@ -715,7 +716,7 @@ def run_experiment(
     train_year_datasets     = []   # PreloadedDataset  — for DataLoader
     for yr in TRAIN_YEARS:
         yr_s2  = _s2_for_year(s2_processed, yr)
-        yr_cdl = CDL_BY_YEAR[yr]
+        yr_cdl = CDL_TRAIN
         if not yr_s2 or not yr_cdl.exists():
             log.warning(f"Skipping train year {yr}: {'no S2' if not yr_s2 else 'CDL missing'}")
             continue
@@ -743,7 +744,7 @@ def run_experiment(
         n_val   = max(1, int(VAL_FRAC * n_total))
         n_train = n_total - n_val
         train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
-        test_cdl         = CDL_BY_YEAR[TEST_YEAR]
+        test_cdl         = CDL_TRAIN
         test_s2_filtered = None
         test_idx_local   = None
         test_ds          = val_ds   # placeholder; spatial test areas evaluated separately
@@ -755,7 +756,7 @@ def run_experiment(
         train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
 
         test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
-        test_cdl = CDL_BY_YEAR[TEST_YEAR]
+        test_cdl = CDL_TRAIN
         assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
         test_idx, _ = _yr_idx(TEST_YEAR)
         test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
@@ -1322,29 +1323,24 @@ def main(
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        global S2_PROCESSED_DIR, CDL_BY_YEAR, MODELS_DIR, FIGURES_DIR
+        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
         data_dir = Path(data_dir)
-        S2_PROCESSED_DIR = data_dir / "s2"
-        CDL_BY_YEAR      = {
-            yr: data_dir / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
-            for yr in ["2022", "2023", "2024"]
-        }
-        MODELS_DIR  = data_dir / "models"
-        FIGURES_DIR = data_dir / "figures"
+        S2_TRAIN_DIR     = data_dir / "train"
+        S2_PROCESSED_DIR = S2_TRAIN_DIR
+        CDL_TRAIN        = data_dir / "cdl" / "cdl_train.tif"
+        CDL_BY_YEAR      = {"2024": CDL_TRAIN}
+        MODELS_DIR       = data_dir / "models"
+        FIGURES_DIR      = data_dir / "figures"
         log.info(f"Data dir overridden to {data_dir}")
 
     s2_processed = sorted(
-        glob(str(S2_PROCESSED_DIR / "*" / "*_processed.tif")) +
-        glob(str(S2_PROCESSED_DIR / "*" / "S2H_*.tif"))
+        glob(str(S2_TRAIN_DIR / "*_processed.tif")) +
+        glob(str(S2_TRAIN_DIR / "S2H_*.tif"))
     )
-    # deduplicate (a file matching both patterns would appear twice)
     seen = set()
     s2_processed = [p for p in s2_processed if not (p in seen or seen.add(p))]
-    # restrict to years actually used (TRAIN_YEARS + TEST_YEAR) — skip other year dirs
-    _active_years = set(TRAIN_YEARS) | {TEST_YEAR}
-    s2_processed = [p for p in s2_processed if Path(p).parent.name in _active_years]
     if not s2_processed:
-        raise FileNotFoundError(f"No processed S2 files in {S2_PROCESSED_DIR}")
+        raise FileNotFoundError(f"No processed S2 files in {S2_TRAIN_DIR}")
 
     # ── Validate TIF files — drop corrupt and empty-data files ────────────
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1417,7 +1413,7 @@ def main(
 
     # ── Build experiment channel sets ─────────────────────────────────────
     _ref_year_s2  = _s2_for_year(s2_processed, TRAIN_YEARS[0])
-    _ref_year_cdl = CDL_BY_YEAR[TRAIN_YEARS[0]]
+    _ref_year_cdl = CDL_TRAIN
 
     _base_dir = Path(data_dir) if data_dir else PROCESSED_DIR
 

@@ -43,6 +43,7 @@ patch_artifact_logging()
 
 from crop_mapping_pipeline.config import (
     CDL_BY_YEAR as _CDL_BY_YEAR,
+    CDL_TRAIN as _CDL_TRAIN,
     CDL_CLASS_NAMES,
     FIGURES_DIR as _FIGURES_DIR,
     GSI_CANDIDATES_JSON as _GSI_CANDIDATES_JSON,
@@ -59,7 +60,7 @@ from crop_mapping_pipeline.config import (
     RF_N_ESTIMATORS,
     S2_BAND_NAMES,
     S2_NODATA,
-    S2_PROCESSED_DIR as _S2_PROCESSED_DIR,
+    S2_TRAIN_DIR as _S2_TRAIN_DIR,
     SAMPLE_FRACTION,
     SELECT_GSI_DIRECT_JSON,
     SELECT_GSI_DIRECT_BANDS,
@@ -75,35 +76,35 @@ from crop_mapping_pipeline.config import (
 
 log = logging.getLogger(__name__)
 
-S2_PROCESSED_DIR = _S2_PROCESSED_DIR
-CDL_BY_YEAR = dict(_CDL_BY_YEAR)
-PROCESSED_DIR = _PROCESSED_DIR
-FIGURES_DIR = _FIGURES_DIR
-LOGS_DIR = _LOGS_DIR
+S2_TRAIN_DIR     = _S2_TRAIN_DIR
+S2_PROCESSED_DIR = S2_TRAIN_DIR   # backwards-compat alias
+CDL_TRAIN        = _CDL_TRAIN
+CDL_BY_YEAR      = dict(_CDL_BY_YEAR)
+PROCESSED_DIR    = _PROCESSED_DIR
+FIGURES_DIR      = _FIGURES_DIR
+LOGS_DIR         = _LOGS_DIR
 GSI_CANDIDATES_JSON = _GSI_CANDIDATES_JSON
 
 
 def configure_data_dir(data_dir: str | None) -> None:
-    global S2_PROCESSED_DIR, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, GSI_CANDIDATES_JSON
+    global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, CDL_BY_YEAR, PROCESSED_DIR, FIGURES_DIR, GSI_CANDIDATES_JSON
 
     if not data_dir:
         return
 
     processed = pathlib.Path(data_dir)
-    PROCESSED_DIR = processed
-    S2_PROCESSED_DIR = processed / "s2"
-    CDL_BY_YEAR = {
-        yr: processed / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
-        for yr in ["2022", "2023", "2024"]
-    }
-    GSI_CANDIDATES_JSON = processed / "s2" / "2022" / "gsi_candidates.json"
+    PROCESSED_DIR    = processed
+    S2_TRAIN_DIR     = processed / "train"
+    S2_PROCESSED_DIR = S2_TRAIN_DIR
+    CDL_TRAIN        = processed / "cdl" / "cdl_train.tif"
+    CDL_BY_YEAR      = {"2024": CDL_TRAIN}
+    GSI_CANDIDATES_JSON = processed / "train" / "gsi_candidates.json"
     log.info(f"Data dir overridden to {processed}")
 
 
-def _glob_s2_year(yr: str) -> list[str]:
-    """Glob S2 files for a year — matches both raw and _processed filenames."""
-    d = S2_PROCESSED_DIR / yr
-    files = sorted(glob(str(d / "*_processed.tif")) + glob(str(d / "S2H_*.tif")))
+def _glob_s2_train() -> list[str]:
+    """Glob S2 files from flat train/ dir."""
+    files = sorted(glob(str(S2_TRAIN_DIR / "*_processed.tif")) + glob(str(S2_TRAIN_DIR / "S2H_*.tif")))
     seen = set()
     return [p for p in files if not (p in seen or seen.add(p))]
 
@@ -119,33 +120,25 @@ def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, in
 
 
 def get_train_year_inputs() -> tuple[str, list[str], str]:
-    """Primary training year (2022) — used by Stage 2 and Stage 2v3."""
-    s2_year = TRAIN_YEARS[0]
-    s2_files = _glob_s2_year(s2_year)
-    assert s2_files, f"No S2 files for year {s2_year} in {S2_PROCESSED_DIR}"
-    cdl_path = str(CDL_BY_YEAR[s2_year])
+    """Training data from flat train/ dir."""
+    s2_files = _glob_s2_train()
+    assert s2_files, f"No S2 files in {S2_TRAIN_DIR}"
+    cdl_path = str(CDL_TRAIN)
     assert os.path.exists(cdl_path), f"CDL not found: {cdl_path}"
-    return s2_year, s2_files, cdl_path
+    return TRAIN_YEARS[0], s2_files, cdl_path
 
 
 def get_stage1_inputs() -> list[tuple[str, list[str], str]]:
-    """All training years — used by Stage 1 for more robust GSI band ranking.
-    Date candidates always come from TRAIN_YEARS[0] (2022) to stay compatible with Stage 2.
-    Returns [(year, s2_files, cdl_path), ...] for each year that has data on disk.
+    """Training data for GSI band scoring — flat train/ dir.
+    Returns [(year, s2_files, cdl_path)].
     """
-    result = []
-    for yr in TRAIN_YEARS:
-        s2_files = _glob_s2_year(yr)
-        cdl_path = str(CDL_BY_YEAR[yr])
-        if not s2_files:
-            log.warning(f"Stage 1: no S2 files for year {yr} — skipping")
-            continue
-        if not os.path.exists(cdl_path):
-            log.warning(f"Stage 1: CDL not found for year {yr} ({cdl_path}) — skipping")
-            continue
-        result.append((yr, s2_files, cdl_path))
-    assert result, f"No S2 files found for any training year in {S2_PROCESSED_DIR}"
-    return result
+    s2_files = _glob_s2_train()
+    cdl_path = str(CDL_TRAIN)
+    if not s2_files:
+        raise FileNotFoundError(f"No S2 files in {S2_TRAIN_DIR}")
+    if not os.path.exists(cdl_path):
+        raise FileNotFoundError(f"CDL not found: {cdl_path}")
+    return [(TRAIN_YEARS[0], s2_files, cdl_path)]
 
 
 def _get_device() -> str:
