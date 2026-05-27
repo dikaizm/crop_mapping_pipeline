@@ -47,6 +47,8 @@ def _parse_date(path: Path) -> str | None:
 def find_matching_file(s2_dir: Path, date: str) -> Path | None:
     """Find S2 file in dir matching given date string (YYYYMMDD)."""
     for f in sorted(s2_dir.glob("*.tif")):
+        if f.name.startswith("._"):
+            continue
         if _parse_date(f) == date:
             return f
     return None
@@ -54,7 +56,7 @@ def find_matching_file(s2_dir: Path, date: str) -> Path | None:
 
 def pick_reference_date(s2_dir: Path) -> str | None:
     """Pick date with most files across all areas; falls back to July dates."""
-    dates = [_parse_date(f) for f in sorted(s2_dir.glob("*.tif"))]
+    dates = [_parse_date(f) for f in sorted(s2_dir.glob("*.tif")) if not f.name.startswith("._")]
     dates = [d for d in dates if d]
     if not dates:
         return None

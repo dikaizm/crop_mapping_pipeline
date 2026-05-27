@@ -400,24 +400,27 @@ class AugmentedSubset(torch.utils.data.Dataset):
 # ── In-memory dataset cache ───────────────────────────────────────────────────
 
 class PreloadedDataset(torch.utils.data.Dataset):
-    """Eagerly loads all patches into RAM tensors with a persistent disk cache.
+    """Builds a persistent disk cache of all patches; loads imgs via memory-map.
 
     Reads each TIF file once in full (parallel threads) instead of per-patch
-    window reads → ~30–60s instead of 15+ min for 498 patches × 21 files.
-    Cache key covers s2_paths/cdl_path/bands/patch_size — different experiments
-    produce different cache files; same experiment hits the cache on rerun.
+    window reads → ~30–60s instead of 15+ min for large datasets.
+    Cache key covers s2_paths/cdl_path/bands/patch_size.
+
+    Imgs stored as float16 .npy → loaded with mmap_mode='r' so the OS pages in
+    only what each minibatch needs.  Peak RAM = model + batch, not full dataset.
+    Masks stored as int64 .pt (typically <1 GB, always in RAM).
     """
 
     def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None):
-        cache_path = self._cache_path(dataset, cache_dir) if cache_dir else None
+        imgs_path, masks_path = self._cache_paths(dataset, cache_dir) if cache_dir else (None, None)
 
-        if cache_path and cache_path.exists():
-            log.info(f"  [{desc}] Cache hit → loading {cache_path.name}")
+        if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
+            log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
             t0 = time.time()
-            blob = torch.load(cache_path, map_location="cpu")
-            self._imgs, self._masks = blob["imgs"], blob["masks"]
-            gb = self._imgs.element_size() * self._imgs.nelement() / 1e9
-            log.info(f"  [{desc}] Loaded in {time.time()-t0:.1f}s ({gb:.2f} GB)")
+            self._imgs  = np.load(str(imgs_path), mmap_mode="r")   # memory-mapped, not in RAM
+            self._masks = torch.load(masks_path, map_location="cpu", weights_only=True)
+            gb_disk = imgs_path.stat().st_size / 1e9
+            log.info(f"  [{desc}] mmap ready in {time.time()-t0:.1f}s ({gb_disk:.2f} GB on disk)")
             return
 
         log.info(f"  [{desc}] Cache miss → preloading from {len(dataset._s2_srcs)} TIF files …")
@@ -439,9 +442,20 @@ class PreloadedDataset(torch.utils.data.Dataset):
                     file_extraction.setdefault(fi, []).append((out_pos, gi - ch_offsets[fi] + 1))
                     break
 
-        buf     = np.zeros((n, n_ch, ps, ps), dtype=np.float32)
         patches = dataset.patches
         nodata  = dataset.nodata
+
+        # Allocate buf as a disk-backed float16 memmap — never occupies RAM regardless
+        # of channel count. 70ch × 1800 patches × 256² × float32 ≈ 33 GB; float16
+        # memmap keeps peak RAM to ~O(one TIF file) during the fill loop.
+        _buf_path = (imgs_path.with_suffix(".tmp.npy") if imgs_path
+                     else Path(PRELOAD_CACHE_DIR) / f"_tmp_{os.getpid()}.npy")
+        _buf_path.parent.mkdir(parents=True, exist_ok=True)
+        buf = np.lib.format.open_memmap(
+            str(_buf_path), mode="w+", dtype=np.float16, shape=(n, n_ch, ps, ps)
+        )
+        gb_alloc = buf.nbytes / 1e9
+        log.info(f"  [{desc}] Buf: {n}×{n_ch}×{ps}×{ps} float16 = {gb_alloc:.1f} GB on disk")
 
         def _read_one_file(fi):
             extractions = file_extraction[fi]
@@ -457,8 +471,10 @@ class PreloadedDataset(torch.utils.data.Dataset):
                 log.warning(f"  [{desc}] read failed file {fi}: {e}")
                 return fi, None, out_cols
 
+        # Single-threaded write to memmap — concurrent writes to overlapping patches
+        # cause data races; read threads are fine, write serialised via main thread.
         _n_threads = n_threads or min(len(file_extraction), os.cpu_count() or 8)
-        log.info(f"  [{desc}] Using {_n_threads} threads for {len(file_extraction)} files")
+        log.info(f"  [{desc}] Using {_n_threads} read threads for {len(file_extraction)} files")
         with ThreadPoolExecutor(max_workers=_n_threads) as pool:
             for fi, arr, out_cols in pool.map(_read_one_file, list(file_extraction.keys())):
                 if arr is None:
@@ -469,15 +485,19 @@ class PreloadedDataset(torch.utils.data.Dataset):
                         buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
                 del arr
 
-        # In-place normalization on numpy buf — avoids 3-4× tensor copies that
-        # torch.where would create (critical for large patch counts like stride=128).
-        lo = buf.min(axis=(-2, -1), keepdims=True)   # (N, C, 1, 1) — tiny
-        hi = buf.max(axis=(-2, -1), keepdims=True)
-        rng = np.where(hi > lo, hi - lo, 1.0)
-        buf -= lo
-        buf /= rng
-        # flat patches: (lo - lo) / 1.0 = 0 — already correct
-        self._imgs = torch.from_numpy(buf)   # zero-copy, shares buf memory
+        # Per-patch normalisation in float32 chunks to avoid float16 precision loss
+        # on raw DN values (0–10000 range). Process CHUNK_PATCHES at a time → bounded RAM.
+        CHUNK = 128
+        for start in range(0, n, CHUNK):
+            end   = min(start + CHUNK, n)
+            chunk = buf[start:end].astype(np.float32)          # (chunk, C, H, W) in RAM
+            lo    = chunk.min(axis=(-2, -1), keepdims=True)
+            hi    = chunk.max(axis=(-2, -1), keepdims=True)
+            rng   = np.where(hi > lo, hi - lo, 1.0)
+            chunk -= lo
+            chunk /= rng
+            buf[start:end] = chunk.astype(np.float16)          # write back to disk
+        buf.flush()
 
         masks = [
             torch.from_numpy(
@@ -488,15 +508,19 @@ class PreloadedDataset(torch.utils.data.Dataset):
         self._masks = torch.stack(masks)
 
         elapsed = time.time() - t0
-        gb = self._imgs.element_size() * self._imgs.nelement() / 1e9
-        log.info(f"  [{desc}] Preloaded in {elapsed:.1f}s — {gb:.2f} GB in RAM")
+        log.info(f"  [{desc}] Preloaded in {elapsed:.1f}s — {gb_alloc:.1f} GB float16 on disk")
 
-        if cache_path:
-            torch.save({"imgs": self._imgs, "masks": self._masks}, cache_path)
-            log.info(f"  [{desc}] Cached → {cache_path.name}")
+        if imgs_path:
+            _buf_path.rename(imgs_path)
+            torch.save(self._masks, masks_path)
+            log.info(f"  [{desc}] Cached → {imgs_path.name} + {masks_path.name}")
+            self._imgs = np.load(str(imgs_path), mmap_mode="r")
+        else:
+            self._imgs = np.array(buf)   # no cache dir: load into RAM
+            _buf_path.unlink(missing_ok=True)
 
     @staticmethod
-    def _cache_path(dataset, cache_dir):
+    def _cache_paths(dataset, cache_dir):
         key = {
             "s2":             [str(p) for p in dataset.s2_paths],
             "cdl":            str(dataset.cdl_path),
@@ -507,13 +531,16 @@ class PreloadedDataset(torch.utils.data.Dataset):
             "n_patches":      len(dataset.patches),  # changes with KEEP_CLASSES → prevents stale cache
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
-        return Path(cache_dir) / f"preload_{h}.pt"
+        base = Path(cache_dir) / f"preload_{h}"
+        return base.with_suffix(".npy"), base.with_name(base.name + "_masks.pt")
 
     def __len__(self):
-        return len(self._imgs)
+        return len(self._masks)
 
     def __getitem__(self, idx):
-        return self._imgs[idx], self._masks[idx]
+        # np array (memmap or plain) → float32 tensor; .copy() required for mmap slices
+        img = torch.tensor(self._imgs[idx], dtype=torch.float32)
+        return img, self._masks[idx]
 
 
 # ── Spatial test area evaluation ─────────────────────────────────────────────
@@ -538,7 +565,7 @@ def _evaluate_spatial_area(
     s2_dir    = Path(area["s2_dir"])
     cdl_path  = Path(area["cdl"])
 
-    area_s2 = sorted(_glob.glob(str(s2_dir / "*.tif")))
+    area_s2 = sorted(f for f in _glob.glob(str(s2_dir / "*.tif")) if not Path(f).name.startswith("._"))
     if not area_s2:
         log.warning(f"  Spatial test {area_name}: no S2 files in {s2_dir} — skipping")
         return None
@@ -573,7 +600,7 @@ def _evaluate_spatial_area(
         keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
-    area_dl = DataLoader(area_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    area_dl = DataLoader(area_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
     log.info(f"  [{area_name}] mIoU={area_r['miou']:.4f}  OA={area_r['oa']:.4f}")
@@ -1006,9 +1033,10 @@ def run_experiment(
         iou_csv = exp_dir / "test_per_class_iou.csv"
         pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
 
-        # Confusion matrix PNG
+        # Confusion matrix PNG (skipped when no patch-level test set)
         cm_path = exp_dir / "confusion_matrix.png"
-        _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
+        if "preds" in test_r and "labels" in test_r:
+            _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
 
         # Segmentation map PNG (full-tile inference — skipped in single-year patch-split mode)
         seg_path = None
@@ -1045,7 +1073,8 @@ def run_experiment(
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
         mlflow.log_artifact(str(iou_csv))
-        mlflow.log_artifact(str(cm_path))
+        if cm_path.exists():
+            mlflow.log_artifact(str(cm_path))
         if seg_path is not None:
             mlflow.log_artifact(str(seg_path))
 
@@ -1296,7 +1325,7 @@ def main(
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
+        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
         data_dir = Path(data_dir)
         S2_TRAIN_DIR     = data_dir / "s2" / "train"
         S2_PROCESSED_DIR = S2_TRAIN_DIR
@@ -1304,6 +1333,10 @@ def main(
         CDL_BY_YEAR      = {"2024": CDL_TRAIN}
         MODELS_DIR       = data_dir / "models"
         FIGURES_DIR      = data_dir / "figures"
+        SPATIAL_TEST_AREAS = [
+            {"name": "test_a", "s2_dir": data_dir / "s2" / "test_a", "cdl": data_dir / "cdl" / "cdl_test_a.tif"},
+            {"name": "test_b", "s2_dir": data_dir / "s2" / "test_b", "cdl": data_dir / "cdl" / "cdl_test_b.tif"},
+        ]
         log.info(f"Data dir overridden to {data_dir}")
 
     s2_processed = sorted(
@@ -1311,7 +1344,8 @@ def main(
         glob(str(S2_TRAIN_DIR / "S2H_*.tif"))
     )
     seen = set()
-    s2_processed = [p for p in s2_processed if not (p in seen or seen.add(p))]
+    s2_processed = [p for p in s2_processed if not (p in seen or seen.add(p))
+                    and not Path(p).name.startswith("._")]
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_TRAIN_DIR}")
 
@@ -1417,7 +1451,7 @@ def main(
         single_date_idx, single_date_names, single_date_key = build_single_date_selected_indices(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            force=force,
+            top_k=top_k, force=force,
         )
 
     # ── single_date (RF — scoped to peak date only) ───────────────────────
@@ -1436,7 +1470,7 @@ def main(
         single_date_rf_idx, single_date_rf_names, _ = build_single_date_selected_indices(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            candidates_json=rf_sd_json,
+            candidates_json=rf_sd_json, top_k=top_k,
         )
 
     # ── naive_mt_gsi (GSI — scoped to 4 phenol dates only) ──────────────
@@ -1445,7 +1479,7 @@ def main(
         naive_mt_idx, naive_mt_names, phenol_map = build_naive_multitemporal_selected_indices(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            force=force,
+            top_k=top_k, force=force,
         )
 
     # ── naive_mt_rf (RF — scoped to 4 phenol dates only) ────────────────
@@ -1464,7 +1498,7 @@ def main(
         naive_mt_rf_idx, naive_mt_rf_names, _ = build_naive_multitemporal_selected_indices(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            candidates_json=rf_nmt_json,
+            candidates_json=rf_nmt_json, top_k=top_k,
         )
 
     def _find_direct_json(selector: str) -> Path:
@@ -1687,6 +1721,10 @@ if __name__ == "__main__":
         "--batch-size", type=int, default=None, metavar="N",
         help=f"Override BATCH_SIZE from config (default: {BATCH_SIZE}).",
     )
+    parser.add_argument(
+        "--eval-only", metavar="CKPT_PATH",
+        help="Skip training — load checkpoint and run spatial test evaluation only.",
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1719,6 +1757,39 @@ if __name__ == "__main__":
 
     if args.upload_existing:
         _upload_existing_models(filter_exps=args.exp, filter_archs=args.arch)
+        sys.exit(0)
+
+    if args.eval_only:
+        ckpt_path = Path(args.eval_only)
+        if not ckpt_path.exists():
+            log.error(f"Checkpoint not found: {ckpt_path}")
+            sys.exit(1)
+        if args.data_dir:
+            global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
+            _dd = Path(args.data_dir)
+            S2_TRAIN_DIR     = _dd / "s2" / "train"
+            S2_PROCESSED_DIR = S2_TRAIN_DIR
+            CDL_TRAIN        = _dd / "cdl" / "cdl_train.tif"
+            MODELS_DIR       = _dd / "models"
+            FIGURES_DIR      = _dd / "figures"
+            SPATIAL_TEST_AREAS = [
+                {"name": "test_a", "s2_dir": _dd / "s2" / "test_a", "cdl": _dd / "cdl" / "cdl_test_a.tif"},
+                {"name": "test_b", "s2_dir": _dd / "s2" / "test_b", "cdl": _dd / "cdl" / "cdl_test_b.tif"},
+            ]
+        ckpt = torch.load(ckpt_path, map_location=DEVICE)
+        arch = ckpt.get("architecture", (args.arch or ["segformer"])[0])
+        in_ch = ckpt["in_channels"]
+        band_names = ckpt.get("band_names", [])
+        exp_name = ckpt_path.parent.name
+        exp_dir  = ckpt_path.parent
+        model = build_model(arch, in_ch, NUM_CLASSES)
+        model.load_state_dict(ckpt["model_state_dict"])
+        log.info(f"Loaded checkpoint: {ckpt_path}  arch={arch}  in_ch={in_ch}")
+        with mlflow.start_run(run_name=f"{exp_name}_eval"):
+            mlflow.set_tag("eval_only", "true")
+            mlflow.set_tag("checkpoint", str(ckpt_path))
+            for area in SPATIAL_TEST_AREAS:
+                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir)
         sys.exit(0)
 
     top_k_list = args.top_k or [None]

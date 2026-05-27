@@ -84,7 +84,7 @@ def build_single_date_selected_indices(
     local_band_to_idx,
     s2_paths=None,
     cdl_path=None,
-    top_k: int | None = None,
+    top_k: int | None = 5,
     candidates_json: Path | None = None,
     force: bool = False,
 ):
@@ -151,9 +151,10 @@ def build_single_date_selected_indices(
         log.warning(f"single_date_selected: {skipped}/{len(union_bands)} band(s) not in local band map for date={best_date}")
 
     log.info(
-        f"single_date_selected: date={best_date}, {len(idx)} channels "
-        f"(top_k={top_k or 'all'} per crop → {len(union_bands)} union bands)"
+        f"single_date_selected: date={best_date}, top_k={top_k} per crop "
+        f"→ {len(union_bands)} union bands → {len(idx)} channels"
     )
+    log.info(f"single_date_selected bands: {union_bands}")
     return idx, names, best_date
 
 

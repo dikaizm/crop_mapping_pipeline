@@ -108,7 +108,7 @@ def build_naive_multitemporal_selected_indices(
     local_band_to_idx,
     s2_paths=None,
     cdl_path=None,
-    top_k: int | None = None,
+    top_k: int | None = 5,
     candidates_json: Path | None = None,
     force: bool = False,
 ):
@@ -174,9 +174,10 @@ def build_naive_multitemporal_selected_indices(
         )
 
     log.info(
-        f"naive_multitemporal_selected: {len(dedup_idx)} channels "
-        f"({len(union_bands)} union bands × {len(phenol_map)} dates, top_k={top_k or 'all'})"
+        f"naive_multitemporal_selected: top_k={top_k} per crop "
+        f"→ {len(union_bands)} union bands × {len(phenol_map)} dates → {len(dedup_idx)} channels"
     )
+    log.info(f"naive_multitemporal_selected bands: {union_bands}")
     return dedup_idx, dedup_names, phenol_map
 
 

@@ -89,6 +89,10 @@ GDRIVE_PROCESSED_V3_FOLDER_ID     = "1WyMw6j1jRdTeIMrG0rkbRv712RBw5rz_"
 GDRIVE_PROCESSED_V5_FOLDER_ID     = "1uIYK2dgfmAKyiw1E-wt0qYvIx0OJhLwy"
 GDRIVE_MODELS_FOLDER_ID        = "1R6VbWAJpwEe83iCZX0x2O_m8zLetkH9J"
 
+# Spatial test area S2 folders (processed, flat — one file per date)
+GDRIVE_S2_TEST_A_FOLDER_ID = "1i1tlLlfuKu8NB1lnKb1bZTFciJa5A2tt"
+GDRIVE_S2_TEST_B_FOLDER_ID = "1_RP6y_NsmN7OVkruQg6X3WrWbVOgjF8H"
+
 # ── MLflow ─────────────────────────────────────────────────────────────────────
 MLFLOW_TRACKING_URI        = "https://mlflow-geoai.stelarea.com"
 MLFLOW_EXPERIMENT_PIPELINE = "cropmap_pipeline_runs"

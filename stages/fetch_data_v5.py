@@ -163,18 +163,22 @@ def list_dates_by_year(folder_id: str, years: list = None) -> dict:
 # ── Download ────────────────────────────────────────────────────────────────────
 
 def _download_one(fname: str, file_id: str, output_dir: str,
-                  overwrite: bool = False) -> tuple[str, str]:
-    """Download one file into {output_dir}/{year}/. Returns (path, status)."""
+                  overwrite: bool = False, flat: bool = False) -> tuple[str, str]:
+    """Download one file into {output_dir}/{year}/ (or flat {output_dir}/). Returns (path, status)."""
     from googleapiclient.http import MediaIoBaseDownload
 
-    yr = _year_from_filename(fname)
-    if not yr:
-        log.warning("  Cannot parse year from '%s' — skipping", fname)
-        return "", "error"
-
-    yr_dir   = Path(output_dir) / yr
-    yr_dir.mkdir(parents=True, exist_ok=True)
-    out_path = yr_dir / fname
+    if flat:
+        dest_dir = Path(output_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / fname
+    else:
+        yr = _year_from_filename(fname)
+        if not yr:
+            log.warning("  Cannot parse year from '%s' — skipping", fname)
+            return "", "error"
+        yr_dir   = Path(output_dir) / yr
+        yr_dir.mkdir(parents=True, exist_ok=True)
+        out_path = yr_dir / fname
 
     if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
         log.info("  Skip (exists): %s/%s", yr, fname)
@@ -192,7 +196,7 @@ def _download_one(fname: str, file_id: str, output_dir: str,
                 if status:
                     log.info("  %s: %d%%", fname, int(status.progress() * 100))
         tmp.rename(out_path)
-        log.info("  Done: %s/%s  (%.0f MB)", yr, fname, out_path.stat().st_size / 1e6)
+        log.info("  Done: %s  (%.0f MB)", fname, out_path.stat().st_size / 1e6)
         return str(out_path), "new"
     except Exception as exc:
         tmp.unlink(missing_ok=True)
@@ -201,7 +205,8 @@ def _download_one(fname: str, file_id: str, output_dir: str,
 
 
 def _download_many(name_to_id: dict, output_dir: str,
-                   overwrite: bool = False, workers: int = 2) -> list:
+                   overwrite: bool = False, workers: int = 2,
+                   flat: bool = False) -> list:
     """Parallel download — thread-local Drive service per worker."""
     total     = len(name_to_id)
     results   = []
@@ -212,7 +217,7 @@ def _download_many(name_to_id: dict, output_dir: str,
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dl") as pool:
         futures = {
-            pool.submit(_download_one, fname, fid, output_dir, overwrite): fname
+            pool.submit(_download_one, fname, fid, output_dir, overwrite, flat): fname
             for fname, fid in name_to_id.items()
         }
         done_n = 0
@@ -369,6 +374,8 @@ if __name__ == "__main__":
     parser.add_argument("--raw", action="store_true",
                         help="Download raw S2 files (no _processed suffix) from raw GDrive folders")
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--test-areas", action="store_true",
+                        help="Download test_a and test_b S2 files to s2/test_a/ and s2/test_b/")
     parser.add_argument("--auth", action="store_true")
     args = parser.parse_args()
 
@@ -423,6 +430,24 @@ if __name__ == "__main__":
 
     if args.list_files:
         sys.exit(0)
+
+    # Spatial test areas — flat folders → {s2_output_dir}/test_a/ and test_b/
+    if args.test_areas:
+        from crop_mapping_pipeline.config import (
+            GDRIVE_S2_TEST_A_FOLDER_ID,
+            GDRIVE_S2_TEST_B_FOLDER_ID,
+        )
+        for area_name, fid in [("test_a", GDRIVE_S2_TEST_A_FOLDER_ID),
+                                ("test_b", GDRIVE_S2_TEST_B_FOLDER_ID)]:
+            area_out = str(Path(s2_output_dir) / area_name)
+            log.info("  Fetching S2 %s from folder %s → %s", area_name, fid, area_out)
+            name_to_id = list_folder(fid)
+            if args.list_files:
+                for name in sorted(name_to_id):
+                    print(f"  [{area_name}] {name}")
+                continue
+            _download_many(name_to_id, area_out,
+                           overwrite=args.overwrite, workers=args.workers, flat=True)
 
     # CDL — flat folder → {output_dir}/cdl/
     if args.include_cdl:
