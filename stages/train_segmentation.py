@@ -238,6 +238,18 @@ def compute_per_class_f1(logits, labels, num_classes):
     return f1s
 
 
+def compute_per_class_oa(logits, labels, num_classes):
+    """Per-class OA = recall = TP / (TP + FN). Excludes background (class 0)."""
+    preds  = logits.argmax(dim=1).view(-1).numpy()
+    labels = labels.view(-1).numpy()
+    oas = {}
+    for cls in range(1, num_classes):
+        tp = int(((preds == cls) & (labels == cls)).sum())
+        fn = int(((preds != cls) & (labels == cls)).sum())
+        oas[cls] = float(tp / (tp + fn)) if (tp + fn) > 0 else float("nan")
+    return oas
+
+
 def mean_f1(f1_dict):
     vals = [v for v in f1_dict.values() if not np.isnan(v)]
     return float(np.mean(vals)) if vals else 0.0
@@ -269,10 +281,12 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
     miou            = compute_miou(all_logits, all_labels, num_classes)
     per_class_iou   = compute_per_class_iou(all_logits, all_labels, num_classes)
     per_class_f1    = compute_per_class_f1(all_logits, all_labels, num_classes)
+    per_class_oa    = compute_per_class_oa(all_logits, all_labels, num_classes)
     mf1             = mean_f1(per_class_f1)
     return {
         "loss": total_loss / len(loader), "miou": miou, "oa": oa,
         "mf1": mf1, "per_class_iou": per_class_iou, "per_class_f1": per_class_f1,
+        "per_class_oa": per_class_oa,
     }
 
 
@@ -942,6 +956,12 @@ def run_experiment(
                     name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
                     slug   = name.lower().replace('/', '_').replace(' ', '_')
                     per_cls_metrics[f"val_f1_{slug}"] = f1v
+            for cls_id, oav in val_m["per_class_oa"].items():
+                if not np.isnan(oav):
+                    cdl_id = KEEP_CLASSES[cls_id - 1]
+                    name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                    slug   = name.lower().replace('/', '_').replace(' ', '_')
+                    per_cls_metrics[f"val_oa_{slug}"] = oav
             mlflow.log_metrics({
                 "train_loss": train_loss,
                 "val_loss":   val_m["loss"],
@@ -989,15 +1009,18 @@ def run_experiment(
                 f"best={best_miou:.4f} patience={no_improve}/{EARLY_STOP} "
                 f"{ep_t:.0f}s  {total_min:.1f}min"
             )
-            _iou_parts, _f1_parts = [], []
+            _iou_parts, _f1_parts, _oa_parts = [], [], []
             for cls_id, iou in val_m["per_class_iou"].items():
                 cdl_id = KEEP_CLASSES[cls_id - 1]
                 short  = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}").replace(" ", "")
                 _iou_parts.append(f"{short}={iou:.3f}" if not np.isnan(iou) else f"{short}=  nan")
                 f1v = val_m["per_class_f1"].get(cls_id, float("nan"))
                 _f1_parts.append(f"{short}={f1v:.3f}" if not np.isnan(f1v) else f"{short}=  nan")
+                oav = val_m["per_class_oa"].get(cls_id, float("nan"))
+                _oa_parts.append(f"{short}={oav:.3f}" if not np.isnan(oav) else f"{short}=  nan")
             log.info("    IoU: " + "  ".join(_iou_parts))
             log.info("     F1: " + "  ".join(_f1_parts))
+            log.info("     OA: " + "  ".join(_oa_parts))
 
             # Save last checkpoint every epoch (overwrites previous)
             torch.save({
