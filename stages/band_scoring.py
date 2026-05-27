@@ -94,11 +94,11 @@ def configure_data_dir(data_dir: str | None) -> None:
 
     processed = pathlib.Path(data_dir)
     PROCESSED_DIR    = processed
-    S2_TRAIN_DIR     = processed / "train"
+    S2_TRAIN_DIR     = processed / "s2" / "train"
     S2_PROCESSED_DIR = S2_TRAIN_DIR
     CDL_TRAIN        = processed / "cdl" / "cdl_train.tif"
     CDL_BY_YEAR      = {"2024": CDL_TRAIN}
-    GSI_CANDIDATES_JSON = processed / "train" / "gsi_candidates.json"
+    GSI_CANDIDATES_JSON = processed / "s2" / "train" / "gsi_candidates.json"
     log.info(f"Data dir overridden to {processed}")
 
 

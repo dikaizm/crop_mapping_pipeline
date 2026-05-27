@@ -169,11 +169,11 @@ def main():
     args = parser.parse_args()
 
     data_root = Path(args.data_dir) if args.data_dir else PROCESSED_DIR
-    train_dir = data_root / "train"
+    train_dir = data_root / "s2" / "train"
     fig_dir   = (Path(args.data_dir) if args.data_dir else FIGURES_DIR) / "histogram_check"
 
     test_areas = [
-        {"name": a["name"], "s2_dir": data_root / a["name"]}
+        {"name": a["name"], "s2_dir": data_root / "s2" / a["name"]}
         for a in SPATIAL_TEST_AREAS
     ]
 

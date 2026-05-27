@@ -1323,7 +1323,7 @@ def main(
     if data_dir:
         global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
         data_dir = Path(data_dir)
-        S2_TRAIN_DIR     = data_dir / "train"
+        S2_TRAIN_DIR     = data_dir / "s2" / "train"
         S2_PROCESSED_DIR = S2_TRAIN_DIR
         CDL_TRAIN        = data_dir / "cdl" / "cdl_train.tif"
         CDL_BY_YEAR      = {"2024": CDL_TRAIN}

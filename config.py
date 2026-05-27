@@ -19,8 +19,8 @@ PRELOAD_CACHE_DIR = PROCESSED_DIR / "preload_cache"
 PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # S2 data organised by role, not year
-S2_TRAIN_DIR = PROCESSED_DIR / "train"   # main training area (all dates, flat)
-S2_PROCESSED_DIR = S2_TRAIN_DIR          # backwards-compat alias
+S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "train"   # main training area (all dates, flat)
+S2_PROCESSED_DIR = S2_TRAIN_DIR                  # backwards-compat alias
 
 CDL_TRAIN  = CDL_DIR / "cdl_train.tif"
 CDL_BY_YEAR = {"2024": CDL_TRAIN}        # legacy lookup used internally
@@ -106,17 +106,17 @@ SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 
 # ── Spatial test areas (held-out geography, same year as TRAIN_YEARS) ─────────
-# S2 files: data/processed/test_1/*.tif  (same dates/bands as train area)
+# S2 files: data/processed/s2/test_1/*.tif  (same dates/bands as train area)
 # CDL files: data/processed/cdl/cdl_test_1.tif
 SPATIAL_TEST_AREAS = [
     {
         "name":   "test_1",
-        "s2_dir": PROCESSED_DIR / "test_1",
+        "s2_dir": PROCESSED_DIR / "s2" / "test_1",
         "cdl":    CDL_DIR / "cdl_test_1.tif",
     },
     {
         "name":   "test_2",
-        "s2_dir": PROCESSED_DIR / "test_2",
+        "s2_dir": PROCESSED_DIR / "s2" / "test_2",
         "cdl":    CDL_DIR / "cdl_test_2.tif",
     },
 ]
@@ -146,7 +146,7 @@ TOP_BANDS_PER_CROP = 9    # top bands per crop (= len(VEGE_BANDS))
 MAX_DATES_PER_CROP = TOP_DATES_PER_CROP
 MAX_BANDS_PER_CROP = TOP_BANDS_PER_CROP
 
-GSI_CANDIDATES_JSON = PROCESSED_DIR / "train" / "gsi_candidates.json"
+GSI_CANDIDATES_JSON = PROCESSED_DIR / "s2" / "train" / "gsi_candidates.json"
 
 # ── Band selection outputs ──────────────────────────────────────────────────────
 # GSI: rank all (date × band) channels by per-crop SI_global, take top-K union
