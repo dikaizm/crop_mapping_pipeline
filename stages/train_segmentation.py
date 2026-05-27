@@ -1472,6 +1472,7 @@ def main(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
             candidates_json=rf_sd_json, top_k=top_k,
+            best_date=sd_date_key,
         )
 
     # ── naive_mt_gsi (GSI — scoped to 4 phenol dates only) ──────────────
@@ -1500,6 +1501,7 @@ def main(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
             candidates_json=rf_nmt_json, top_k=top_k,
+            phenol_map=phenol_map_base,
         )
 
     def _find_direct_json(selector: str) -> Path:

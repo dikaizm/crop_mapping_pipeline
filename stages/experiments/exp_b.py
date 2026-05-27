@@ -23,8 +23,23 @@ _CALENDAR_TARGETS = {"Dormant": "0115", "GreenUp": "0615", "Peak": "0715", "Sene
 
 
 def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None):
-    """Return phenol_map {label: date_str} using NDVI or calendar fallback."""
+    """Return phenol_map {label: date_str} using NDVI or calendar fallback. Caches result."""
     available_dates = sorted(local_date_to_idx.keys())
+
+    cache_path = (
+        Path(s2_paths[0]).parent / "phenol_dates.json"
+        if s2_paths else None
+    )
+    if cache_path and cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                cached = json.load(f)
+            if cached.get("dates_key") == available_dates and cached.get("phenol_map"):
+                log.info(f"naive_multitemporal: phenol dates cached → {cached['phenol_map']}")
+                return cached["phenol_map"]
+        except Exception:
+            pass
+
     phenol_map = {}
 
     if s2_paths and cdl_path:
@@ -61,6 +76,10 @@ def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None):
                 key=lambda d: abs(int(d[4:]) - target_doy),
             )
         log.info(f"naive_multitemporal: calendar-heuristic dates={phenol_map}")
+
+    if cache_path:
+        with open(cache_path, "w") as f:
+            json.dump({"phenol_map": phenol_map, "dates_key": available_dates}, f)
 
     return phenol_map
 
@@ -111,6 +130,7 @@ def build_naive_multitemporal_selected_indices(
     top_k: int | None = 5,
     candidates_json: Path | None = None,
     force: bool = False,
+    phenol_map: dict | None = None,
 ):
     """4 phenological dates × GSI or RF top-K band union.
 
@@ -126,8 +146,11 @@ def build_naive_multitemporal_selected_indices(
         Pre-computed candidates JSON (RF variant). None → compute GSI inline.
     force : bool
         Re-run scoped GSI even if cached JSON exists.
+    phenol_map : dict | None
+        Pre-computed {label: date_str}. Skips NDVI scan if provided.
     """
-    phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
+    if phenol_map is None:
+        phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
 
     if candidates_json is not None:
         json_path = Path(candidates_json)
