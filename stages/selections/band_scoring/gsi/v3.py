@@ -23,13 +23,19 @@ def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[st
     """
     all_bandnames = []
     all_dates_set = []
+    file_band_counts: list[int] = []
     for s2_path in s2_paths:
         fname = os.path.basename(s2_path)
         match = re.search(r"_(\d{4})_(\d{2})_(\d{2})_processed", fname)
         date_str = f"{match.group(1)}{match.group(2)}{match.group(3)}" if match else fname[:8]
         if date_str not in all_dates_set:
             all_dates_set.append(date_str)
-        all_bandnames.extend([f"{band}_{date_str}" for band in fa2.S2_BAND_NAMES])
+        with rasterio.open(s2_path) as src:
+            n_file_bands = src.count
+            descs = [d for d in (src.descriptions or []) if d]
+        file_band_counts.append(n_file_bands)
+        band_labels = descs[:n_file_bands] if len(descs) >= n_file_bands else fa2.S2_BAND_NAMES[:n_file_bands]
+        all_bandnames.extend([f"{band}_{date_str}" for band in band_labels])
 
     all_dates = sorted(all_dates_set)
     n_channels = len(all_bandnames)
@@ -60,9 +66,8 @@ def _sample_year(s2_paths: list[str], cdl_path: str) -> tuple[list[str], list[st
     # Fill data column-by-column, one S2 file at a time
     data = np.full((n, n_channels), np.nan, dtype=np.float32)
     col = 0
-    for s2_path in s2_paths:
+    for s2_path, n_file_bands in zip(s2_paths, file_band_counts):
         with rasterio.open(s2_path) as src:
-            n_file_bands = src.count
             arr = src.read().astype(np.float32)
         arr[arr == fa2.S2_NODATA] = np.nan
         arr_2d = arr.reshape(n_file_bands, -1).T
