@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from crop_mapping_pipeline.config import (
-    MLFLOW_EXPERIMENT_TRAIN_6CLASS,
+    MLFLOW_EXPERIMENT_TRAIN_SPATIAL,
 )
 
 
@@ -30,7 +30,7 @@ class ExperimentConfig:
     band_indices:      Any           # list[int] or dict{yr: (list[int], list[str])}
     band_names:        list          # reference-year channel names
     default_loss:      str  = "v1"  # "v1" | "v2"
-    mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_6CLASS
+    mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_SPATIAL
     extra_kw:          dict = field(default_factory=dict)
 
 
