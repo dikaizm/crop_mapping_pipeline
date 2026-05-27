@@ -1124,7 +1124,7 @@ def run_experiment(
         log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
         for area in SPATIAL_TEST_AREAS:
             area_r = _evaluate_spatial_area(
-                model, area, exp_cfg.band_names, exp_name, exp_dir, skip_viz=skip_viz,
+                model, area, band_names_list, exp_name, exp_dir, skip_viz=skip_viz,
             )
             if area_r is not None:
                 spatial_results[area["name"]] = area_r
