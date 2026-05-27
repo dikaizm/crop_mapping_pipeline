@@ -77,6 +77,31 @@ log = logging.getLogger(__name__)
 DEVICE = get_device()
 
 
+def _check_gdrive_token() -> None:
+    """Attempt to refresh the OAuth token; log warning if unavailable or expired."""
+    import pickle
+    from google.auth.transport.requests import Request
+
+    if not GDRIVE_OAUTH_TOKEN.exists():
+        log.warning(f"GDrive token not found at {GDRIVE_OAUTH_TOKEN} — artifact upload will fail")
+        return
+    try:
+        with open(GDRIVE_OAUTH_TOKEN, "rb") as f:
+            creds = pickle.load(f)
+        if creds.expired and creds.refresh_token:
+            log.info("GDrive token expired — refreshing...")
+            creds.refresh(Request())
+            with open(GDRIVE_OAUTH_TOKEN, "wb") as f:
+                pickle.dump(creds, f)
+            log.info("GDrive token refreshed and saved.")
+        elif creds.expired:
+            log.warning("GDrive token expired and no refresh_token — artifact upload will fail")
+        else:
+            log.info("GDrive token valid.")
+    except Exception as e:
+        log.warning(f"GDrive token check failed ({e}) — artifact upload will fail")
+
+
 def _device_label() -> str:
     if torch.cuda.is_available():
         return f"cuda ({torch.cuda.get_device_name(0)})"
@@ -1415,6 +1440,8 @@ def main(
     if epochs:
         MAX_EPOCHS = epochs
         log.info(f"Max epochs overridden: {MAX_EPOCHS}")
+
+    _check_gdrive_token()
 
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
