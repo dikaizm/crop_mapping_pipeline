@@ -25,8 +25,8 @@ log = logging.getLogger(__name__)
 PHENOL_TARGETS = {"Jan": "0115", "Mar": "0315", "Jul": "0715", "Nov": "1115"}
 
 
-def build_exp_A_v2_indices(local_date_to_idx, local_band_to_idx):
-    """Build per-window indices for Exp A_v2.
+def build_single_date_window_indices(local_date_to_idx, local_band_to_idx):
+    """Build per-window single-date indices (all 9 VEGE_BANDS per window).
 
     Returns
     -------
@@ -45,7 +45,11 @@ def build_exp_A_v2_indices(local_date_to_idx, local_band_to_idx):
         off   = local_date_to_idx[matched_date] * N_BANDS_PER_DATE
         idx   = [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
         names = [f"{b}_{matched_date}" for b in VEGE_BANDS]
-        log.info(f"Exp A_v2 [{label}]: date={matched_date}, {len(idx)} channels")
+        log.info(f"single_date_window [{label}]: date={matched_date}, {len(idx)} channels")
         variants[label] = (idx, names, matched_date)
 
     return variants
+
+
+# backwards-compat alias
+build_exp_A_v2_indices = build_single_date_window_indices

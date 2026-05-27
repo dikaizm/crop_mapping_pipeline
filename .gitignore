@@ -13,3 +13,4 @@ logs/
 documents/
 .vscode/
 .hf_cache/
+data/processed/preload_cache/
