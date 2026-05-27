@@ -105,6 +105,22 @@ MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
 SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 
+# ── Spatial test areas (held-out geography, same year as TRAIN_YEARS) ─────────
+# S2 files: data/processed/s2/test_area_1/*.tif  (same dates as main area)
+# CDL files: data/processed/cdl/cdl_2024_test_area_1.tif
+SPATIAL_TEST_AREAS = [
+    {
+        "name":   "test_area_1",
+        "s2_dir": S2_PROCESSED_DIR / "test_area_1",
+        "cdl":    CDL_DIR / "cdl_2024_test_area_1.tif",
+    },
+    {
+        "name":   "test_area_2",
+        "s2_dir": S2_PROCESSED_DIR / "test_area_2",
+        "cdl":    CDL_DIR / "cdl_2024_test_area_2.tif",
+    },
+]
+
 # ── Training hyperparameters ───────────────────────────────────────────────────
 TRAIN_YEARS    = ["2024"]
 TEST_YEAR      = "2024"

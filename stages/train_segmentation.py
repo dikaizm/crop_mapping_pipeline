@@ -63,7 +63,7 @@ from crop_mapping_pipeline.config import (
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA,
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
-    TRAIN_YEARS, TEST_YEAR,
+    TRAIN_YEARS, TEST_YEAR, SPATIAL_TEST_AREAS,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, SEED, ARCH_CFG,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
@@ -515,6 +515,126 @@ class PreloadedDataset(torch.utils.data.Dataset):
         return self._imgs[idx], self._masks[idx]
 
 
+# ── Spatial test area evaluation ─────────────────────────────────────────────
+
+def _evaluate_spatial_area(
+    model,
+    area: dict,
+    band_names: list,
+    exp_name: str,
+    exp_dir: Path,
+    skip_viz: bool = False,
+) -> "dict | None":
+    """Evaluate model on one held-out spatial test area.
+
+    area: {"name": str, "s2_dir": Path, "cdl": Path}
+    band_names: channel names from experiment (e.g. ["B4_20240730", ...]).
+    Returns evaluate_test_set result dict, or None if area data missing.
+    """
+    import glob as _glob
+
+    area_name = area["name"]
+    s2_dir    = Path(area["s2_dir"])
+    cdl_path  = Path(area["cdl"])
+
+    area_s2 = sorted(_glob.glob(str(s2_dir / "*.tif")))
+    if not area_s2:
+        log.warning(f"  Spatial test {area_name}: no S2 files in {s2_dir} — skipping")
+        return None
+    if not cdl_path.exists():
+        log.warning(f"  Spatial test {area_name}: CDL not found at {cdl_path} — skipping")
+        return None
+
+    log.info(f"  Spatial test [{area_name}]: {len(area_s2)} S2 files, CDL={cdl_path.name}")
+
+    _, area_band_to_idx, _, _ = build_local_band_map(area_s2)
+
+    area_global_indices = []
+    skipped_bands = []
+    for bname in band_names:
+        idx = area_band_to_idx.get(bname)
+        if idx is not None:
+            area_global_indices.append(idx)
+        else:
+            skipped_bands.append(bname)
+
+    if skipped_bands:
+        log.warning(f"  Spatial test {area_name}: {len(skipped_bands)} band(s) not found in area files (date mismatch?): {skipped_bands[:3]}...")
+    if not area_global_indices:
+        log.error(f"  Spatial test {area_name}: no matching bands — skipping")
+        return None
+
+    area_s2_filtered, area_idx_local = _filter_s2_by_band_indices(area_s2, area_global_indices)
+
+    _area_ds_raw = RasterPatchDataset(
+        s2_paths=area_s2_filtered, cdl_path=str(cdl_path),
+        patch_size=PATCH_SIZE, stride=STRIDE,
+        keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
+        min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
+    )
+    area_ds = PreloadedDataset(_area_ds_raw, desc=f"{area_name}_test")
+    area_dl = DataLoader(area_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+
+    area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
+    log.info(f"  [{area_name}] mIoU={area_r['miou']:.4f}  OA={area_r['oa']:.4f}")
+    log.info(f"  {'Class':<20} {'IoU':>7}")
+    for cls_id, iou in area_r["per_class_iou"].items():
+        cdl_id = KEEP_CLASSES[cls_id - 1]
+        name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+        log.info(f"  {name:<20} {iou:.4f}" if not np.isnan(iou) else f"  {name:<20}     nan")
+
+    # MLflow metrics prefixed with area name
+    mlflow.log_metrics({
+        f"{area_name}_miou": area_r["miou"],
+        f"{area_name}_oa":   area_r["oa"],
+    })
+    for cls_id, iou in area_r["per_class_iou"].items():
+        if not np.isnan(iou):
+            cdl_id = KEEP_CLASSES[cls_id - 1]
+            cname  = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+            mlflow.log_metric(
+                f"{area_name}_iou_{cname.lower().replace('/', '_').replace(' ', '_')}",
+                iou,
+            )
+
+    # Per-class IoU CSV
+    iou_rows = [
+        {
+            "class_id":   cls_id,
+            "cdl_id":     KEEP_CLASSES[cls_id - 1],
+            "class_name": CDL_CLASS_NAMES.get(KEEP_CLASSES[cls_id - 1], f"cls{cls_id}"),
+            "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
+        }
+        for cls_id, iou in area_r["per_class_iou"].items()
+    ]
+    iou_csv = exp_dir / f"{area_name}_per_class_iou.csv"
+    pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
+    mlflow.log_artifact(str(iou_csv))
+
+    # Confusion matrix
+    cm_path = exp_dir / f"{area_name}_confusion_matrix.png"
+    _plot_confusion_matrix(area_r["preds"], area_r["labels"], str(cm_path))
+    mlflow.log_artifact(str(cm_path))
+
+    # Segmentation map
+    if not skip_viz:
+        gt_map, _   = load_gt_remap(str(cdl_path))
+        pred_map, _ = run_full_inference(
+            model, area_s2_filtered, area_idx_local,
+            patch_size=PATCH_SIZE, stride=PATCH_SIZE,
+        )
+        seg_path = exp_dir / f"{area_name}_segmentation_map.png"
+        save_segmentation_map(
+            pred_map, gt_map,
+            title=f"{exp_name} — {area_name}",
+            save_path=str(seg_path),
+        )
+        mlflow.log_artifact(str(seg_path))
+        del pred_map, gt_map
+
+    return area_r
+
+
 # ── Main experiment runner ────────────────────────────────────────────────────
 
 def run_experiment(
@@ -618,17 +738,16 @@ def run_experiment(
 
     single_year_mode = len(TRAIN_YEARS) == 1 and TRAIN_YEARS[0] == TEST_YEAR
     if single_year_mode:
-        # 3-way spatial split from same-year dataset: 70/15/15
+        # 2-way split (train/val): spatial test done on held-out SPATIAL_TEST_AREAS
         n_total = len(train_val_ds)
-        n_test  = max(1, int(VAL_FRAC * n_total))
         n_val   = max(1, int(VAL_FRAC * n_total))
-        n_train = n_total - n_val - n_test
-        train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
-        # Full-image inference vars not applicable in single-year patch-split mode
+        n_train = n_total - n_val
+        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
         test_cdl         = CDL_BY_YEAR[TEST_YEAR]
         test_s2_filtered = None
         test_idx_local   = None
-        log.info(f"  Single-year mode: 3-way split from {TEST_YEAR} patches")
+        test_ds          = val_ds   # placeholder; spatial test areas evaluated separately
+        log.info(f"  Single-year mode: 2-way split from {TEST_YEAR} — spatial test via SPATIAL_TEST_AREAS")
     else:
         n_total = len(train_val_ds)
         n_val   = max(1, int(VAL_FRAC * n_total))
@@ -835,7 +954,12 @@ def run_experiment(
         # ── Test evaluation ───────────────────────────────────────────────────
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
-        test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
+
+        # In single_year_mode test is done via SPATIAL_TEST_AREAS — skip patch test_dl
+        if single_year_mode:
+            test_r = {"miou": float("nan"), "oa": float("nan"), "per_class_iou": {}}
+        else:
+            test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
 
         mlflow.log_metrics({
             "best_val_miou": best_miou,
@@ -927,6 +1051,17 @@ def run_experiment(
             )
             del pred_map, gt_map
 
+        # ── Spatial test area evaluation ──────────────────────────────────────
+        spatial_results = {}
+        if single_year_mode and SPATIAL_TEST_AREAS:
+            log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
+            for area in SPATIAL_TEST_AREAS:
+                area_r = _evaluate_spatial_area(
+                    model, area, exp_cfg.band_names, exp_name, exp_dir, skip_viz=skip_viz,
+                )
+                if area_r is not None:
+                    spatial_results[area["name"]] = area_r
+
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",
             model_files=[best_ckpt, last_ckpt],
@@ -954,16 +1089,20 @@ def run_experiment(
         "arch":          arch,
         "in_channels":   in_channels,
         "best_val_miou": round(best_miou,      4),
-        "test_miou":     round(test_r["miou"], 4),
-        "test_oa":       round(test_r["oa"],   4),
+        "test_miou":     round(test_r["miou"], 4) if not np.isnan(test_r["miou"]) else float("nan"),
+        "test_oa":       round(test_r["oa"],   4) if not np.isnan(test_r["oa"])   else float("nan"),
         "total_epochs":  len(history),
         "run_id":        run_id,
         "ckpt":          str(best_ckpt),
     }
-    log.info(
-        f"\n✅ {exp_name}  val_mIoU={best_miou:.4f}  "
-        f"test_mIoU={test_r['miou']:.4f}  run={run_id}"
-    )
+    for aname, ar in spatial_results.items():
+        summary[f"{aname}_miou"] = round(ar["miou"], 4)
+        summary[f"{aname}_oa"]   = round(ar["oa"],   4)
+
+    spatial_str = "  ".join(
+        f"{n}={r['miou']:.4f}" for n, r in spatial_results.items()
+    ) if spatial_results else f"test_mIoU={test_r['miou']:.4f}"
+    log.info(f"\n✅ {exp_name}  val_mIoU={best_miou:.4f}  {spatial_str}  run={run_id}")
     return summary
 
 
