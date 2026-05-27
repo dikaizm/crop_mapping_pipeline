@@ -567,13 +567,12 @@ def _evaluate_spatial_area(
 
     area_s2_filtered, area_idx_local = _filter_s2_by_band_indices(area_s2, area_global_indices)
 
-    _area_ds_raw = RasterPatchDataset(
+    area_ds = RasterPatchDataset(
         s2_paths=area_s2_filtered, cdl_path=str(cdl_path),
         patch_size=PATCH_SIZE, stride=STRIDE,
         keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
-    area_ds = PreloadedDataset(_area_ds_raw, desc=f"{area_name}_test")
     area_dl = DataLoader(area_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
@@ -760,13 +759,12 @@ def run_experiment(
         assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
         test_idx, _ = _yr_idx(TEST_YEAR)
         test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
-        _test_ds_raw = RasterPatchDataset(
+        test_ds = RasterPatchDataset(
             s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
             keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
             min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
         )
-        test_ds = PreloadedDataset(_test_ds_raw, desc=TEST_YEAR + "_test")
 
     # Class-weighted sampler: rare-class patches sampled more frequently
     log.info("  Computing patch weights for class-balanced sampling...")
