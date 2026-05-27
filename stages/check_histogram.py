@@ -1,6 +1,6 @@
 """Check if histogram matching is needed between train and spatial test areas.
 
-Compares per-band pixel distributions across train/test_1/test_2 for a
+Compares per-band pixel distributions across train/test_a/test_b for a
 representative S2 date. Outputs:
   - Console: mean/std shift per band per area
   - figures/histogram_check/  histograms + KL-divergence heatmap

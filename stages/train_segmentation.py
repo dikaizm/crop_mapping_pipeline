@@ -736,35 +736,14 @@ def run_experiment(
 
     gen = torch.Generator().manual_seed(SEED)
 
-    single_year_mode = len(TRAIN_YEARS) == 1 and TRAIN_YEARS[0] == TEST_YEAR
-    if single_year_mode:
-        # 2-way split (train/val): spatial test done on held-out SPATIAL_TEST_AREAS
-        n_total = len(train_val_ds)
-        n_val   = max(1, int(VAL_FRAC * n_total))
-        n_train = n_total - n_val
-        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
-        test_cdl         = CDL_TRAIN
-        test_s2_filtered = None
-        test_idx_local   = None
-        test_ds          = val_ds   # placeholder; spatial test areas evaluated separately
-        log.info(f"  Single-year mode: 2-way split from {TEST_YEAR} — spatial test via SPATIAL_TEST_AREAS")
-    else:
-        n_total = len(train_val_ds)
-        n_val   = max(1, int(VAL_FRAC * n_total))
-        n_train = n_total - n_val
-        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
-
-        test_s2  = _s2_for_year(s2_processed, TEST_YEAR)
-        test_cdl = CDL_TRAIN
-        assert test_s2 and test_cdl.exists(), f"Test year {TEST_YEAR} data missing"
-        test_idx, _ = _yr_idx(TEST_YEAR)
-        test_s2_filtered, test_idx_local = _filter_s2_by_band_indices(test_s2, test_idx)
-        test_ds = RasterPatchDataset(
-            s2_paths=test_s2_filtered, cdl_path=str(test_cdl),
-            patch_size=PATCH_SIZE, stride=STRIDE,
-            keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
-            min_valid_frac=MIN_VALID_FRAC, band_indices=test_idx_local,
-        )
+    # 2-way split: train/val from main area; test via held-out SPATIAL_TEST_AREAS
+    n_total = len(train_val_ds)
+    n_val   = max(1, int(VAL_FRAC * n_total))
+    n_train = n_total - n_val
+    train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
+    test_ds          = val_ds   # unused placeholder for DataLoader construction
+    test_s2_filtered = None
+    test_idx_local   = None
 
     # Class-weighted sampler: rare-class patches sampled more frequently
     log.info("  Computing patch weights for class-balanced sampling...")
@@ -779,7 +758,7 @@ def run_experiment(
     train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
     val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    log.info(f"  Patches: {n_train:,} train (augmented) / {n_val:,} val / {len(test_ds):,} test ({TEST_YEAR})")
+    log.info(f"  Patches: {n_train:,} train (augmented) / {n_val:,} val [spatial test via test_a/test_b]")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
     model     = build_model(arch, in_channels, NUM_CLASSES)
@@ -954,11 +933,8 @@ def run_experiment(
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
 
-        # In single_year_mode test is done via SPATIAL_TEST_AREAS — skip patch test_dl
-        if single_year_mode:
-            test_r = {"miou": float("nan"), "oa": float("nan"), "per_class_iou": {}}
-        else:
-            test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
+        # Test done via SPATIAL_TEST_AREAS — no patch-level test set
+        test_r = {"miou": float("nan"), "oa": float("nan"), "per_class_iou": {}}
 
         mlflow.log_metrics({
             "best_val_miou": best_miou,
@@ -1052,14 +1028,13 @@ def run_experiment(
 
         # ── Spatial test area evaluation ──────────────────────────────────────
         spatial_results = {}
-        if single_year_mode and SPATIAL_TEST_AREAS:
-            log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
-            for area in SPATIAL_TEST_AREAS:
-                area_r = _evaluate_spatial_area(
-                    model, area, exp_cfg.band_names, exp_name, exp_dir, skip_viz=skip_viz,
-                )
-                if area_r is not None:
-                    spatial_results[area["name"]] = area_r
+        log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
+        for area in SPATIAL_TEST_AREAS:
+            area_r = _evaluate_spatial_area(
+                model, area, exp_cfg.band_names, exp_name, exp_dir, skip_viz=skip_viz,
+            )
+            if area_r is not None:
+                spatial_results[area["name"]] = area_r
 
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",

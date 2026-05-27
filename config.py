@@ -107,18 +107,18 @@ SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 
 # ── Spatial test areas (held-out geography, same year as TRAIN_YEARS) ─────────
-# S2 files: data/processed/s2/test_1/*.tif  (same dates/bands as train area)
-# CDL files: data/processed/cdl/cdl_test_1.tif
+# S2 files: data/processed/s2/test_a/*.tif  (same dates/bands as train area)
+# CDL files: data/processed/cdl/cdl_test_a.tif
 SPATIAL_TEST_AREAS = [
     {
-        "name":   "test_1",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_1",
-        "cdl":    CDL_DIR / "cdl_test_1.tif",
+        "name":   "test_a",
+        "s2_dir": PROCESSED_DIR / "s2" / "test_a",
+        "cdl":    CDL_DIR / "cdl_test_a.tif",
     },
     {
-        "name":   "test_2",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_2",
-        "cdl":    CDL_DIR / "cdl_test_2.tif",
+        "name":   "test_b",
+        "s2_dir": PROCESSED_DIR / "s2" / "test_b",
+        "cdl":    CDL_DIR / "cdl_test_b.tif",
     },
 ]
 
