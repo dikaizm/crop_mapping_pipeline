@@ -101,7 +101,7 @@ FIGURES_DIR = _FIGURES_DIR
 LOGS_DIR = _LOGS_DIR
 
 # Stage output paths — defaults based on PROCESSED_DIR; overridden by configure_data_dir
-STAGE1V3_CANDIDATES_JSON        = _PROCESSED_DIR / "s2" / "2022" / "stage1v3_candidates.json"
+STAGE1V3_CANDIDATES_JSON        = _PROCESSED_DIR / "s2" / "train" / "stage1v3_candidates.json"
 STAGE2V3_PER_CROP_JSON          = _PROCESSED_DIR / "stage2v3_per_crop_results.json"
 STAGE3_EXP_C_V2_JSON            = _PROCESSED_DIR / "stage3_exp_c_v2.json"
 STAGE3_EXP_C_V2_BANDS           = _PROCESSED_DIR / "stage3_exp_c_v2_bands.txt"
@@ -129,12 +129,9 @@ def configure_data_dir(data_dir: str | None) -> None:
 
     processed = pathlib.Path(data_dir)
     PROCESSED_DIR = processed
-    S2_PROCESSED_DIR = processed / "s2"
-    CDL_BY_YEAR = {
-        yr: processed / "cdl" / f"cdl_{yr}_study_area_filtered.tif"
-        for yr in ["2022", "2023", "2024"]
-    }
-    STAGE1V3_CANDIDATES_JSON = processed / "s2" / "2022" / "stage1v3_candidates.json"
+    S2_PROCESSED_DIR = processed / "s2" / "train"
+    CDL_BY_YEAR = {"2024": processed / "cdl" / "cdl_train.tif"}
+    STAGE1V3_CANDIDATES_JSON = processed / "s2" / "train" / "stage1v3_candidates.json"
     STAGE2V3_PER_CROP_JSON = processed / "stage2v3_per_crop_results.json"
     STAGE3_EXP_C_V2_JSON = processed / "stage3_exp_c_v2.json"
     STAGE3_EXP_C_V2_BANDS = processed / "stage3_exp_c_v2_bands.txt"
@@ -155,8 +152,8 @@ def get_stage2_output_path(selector: str) -> pathlib.Path:
 
 
 def _glob_s2_year(yr: str) -> list[str]:
-    """Glob S2 files for a year — matches both raw and _processed filenames."""
-    d = S2_PROCESSED_DIR / yr
+    """Glob S2 files from flat train dir (yr param kept for API compat)."""
+    d = S2_PROCESSED_DIR
     files = sorted(glob(str(d / "*_processed.tif")) + glob(str(d / "S2H_*.tif")))
     seen = set()
     return [p for p in files if not (p in seen or seen.add(p))]
