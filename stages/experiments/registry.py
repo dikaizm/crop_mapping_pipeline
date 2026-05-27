@@ -1,20 +1,16 @@
 """Experiment registry for Stage 3 training.
 
-Each experiment is declared as an ExperimentConfig entry.
-To add a new experiment:
-  1. Build its band indices in main() of train_segmentation.py
-  2. Add one ExperimentConfig entry in build_registry() below
+Six experiments:
+  single_date_gsi     — peak NDVI date, GSI band selection
+  single_date_rf      — peak NDVI date, RF band selection
+  naive_multitemporal — 4 phenological dates, GSI band selection
+  naive_mt_rf         — 4 phenological dates, RF band selection
+  gsi                 — multi-temporal, GSI-direct top-K channels
+  rf                  — multi-temporal, RF-importance top-K channels
 
-ExperimentConfig fields
------------------------
-key             Unique string identifier (matches --exp CLI value).
-description     Human-readable description logged to MLflow.
-band_indices    list[int] or dict{yr: (list[int], list[str])} — channel indices.
-band_names      list[str] — channel names for the reference year (for logging).
-default_loss    "v1" (WeightedCrossEntropy) or "v2" (PhenologyAwareLoss).
-                CLI --loss-version overrides this for all experiments in a run.
-extra_kw        Extra keyword arguments forwarded to run_experiment()
-                (e.g. source MLflow run IDs for artifact linking).
+To add an experiment:
+  1. Build its band indices in main() of train_segmentation.py
+  2. Add an ExperimentConfig entry in build_registry() below
 """
 
 from __future__ import annotations
@@ -23,238 +19,81 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from crop_mapping_pipeline.config import (
-    MLFLOW_EXPERIMENT_TRAIN,
-    MLFLOW_EXPERIMENT_TRAIN_V2,
-    MLFLOW_EXPERIMENT_TRAIN_V3,
-    MLFLOW_EXPERIMENT_TRAIN_DIRECT,
-    MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR,
     MLFLOW_EXPERIMENT_TRAIN_6CLASS,
 )
 
 
 @dataclass
 class ExperimentConfig:
-    key:              str
-    description:      str
-    band_indices:     Any                        # list[int] or dict{yr: (list, list)}
-    band_names:       list                       # reference-year channel names
-    default_loss:     str  = "v1"               # "v1" | "v2"
-    mlflow_experiment: str = MLFLOW_EXPERIMENT_TRAIN
-    extra_kw:         dict = field(default_factory=dict)
+    key:               str
+    description:       str
+    band_indices:      Any           # list[int] or dict{yr: (list[int], list[str])}
+    band_names:        list          # reference-year channel names
+    default_loss:      str  = "v1"  # "v1" | "v2"
+    mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_6CLASS
+    extra_kw:          dict = field(default_factory=dict)
 
 
 def build_registry(
-    # ── Exp A ──────────────────────────────────────────────────────────────
-    exp_A_idx,   exp_A_names,   july30_key,
-    # ── Exp B ──────────────────────────────────────────────────────────────
-    exp_B_idx,   exp_B_names,   phenol_map,
-    # ── Exp C (Stage 2 CNN forward-selection) ──────────────────────────────
-    exp_C_idx,   exp_C_names,
-    resolved_stage2_run_id   = None,
-    resolved_project_run_id  = None,
-    # ── Exp C_v2 (Stage 2v2 two-phase CNN) ────────────────────────────────
-    exp_C_v2_idx  = None, exp_C_v2_names  = None,
-    resolved_stage2v3_run_id    = None,
-    resolved_project_run_id_v2  = None,
-    # ── Exp C_v2_rf (Stage 2v2 RF selector) ───────────────────────────────
-    exp_C_v2_rf_idx = None, exp_C_v2_rf_names = None,
-    # ── Exp C_v3 (Stage 2v3 incremental sweep, multi phase × k) — V2 ────────
-    exp_C_v3_variants = None,              # {(phase, k): (idx, names)}
-    # ── Exp D (Stage 1v3 GSI direct, no Stage 2) ──────────────────────────
-    exp_D_idx  = None, exp_D_names  = None,
-    # ── Exp D_v2 (Stage 1v2 channel union) ────────────────────────────────
-    exp_D_v2_idx = None, exp_D_v2_names = None,
-    # ── GSI-direct (single-stage, all channels ranked by SI_global) ───────
-    exp_gsi_direct_idx = None, exp_gsi_direct_names = None,
-    # ── RF-direct (single-stage, all channels ranked by RF importance) ────
-    exp_rf_direct_idx  = None, exp_rf_direct_names  = None,
-    # ── all_channels (no selection — upper bound) ─────────────────────────
-    exp_all_channels_idx = None, exp_all_channels_names = None,
-    # ── Exp A_v2 (per-window single-date) — V2 ─────────────────────────────
-    exp_A_v2_variants = None,              # {label: (idx, names, date)}
-    # ── V3 experiments ─────────────────────────────────────────────────────
-    exp_A_v3_variants = None,              # {label: (idx, names, date)}
-    exp_B_v3_variants = None,              # {(phase, k): (idx, names)}
-    exp_C_v3_rf_idx   = None, exp_C_v3_rf_names = None,
+    single_date_idx      = None,  single_date_names      = None,  single_date_key = None,
+    single_date_rf_idx   = None,  single_date_rf_names   = None,
+    naive_mt_idx         = None,  naive_mt_names         = None,  phenol_map      = None,
+    naive_mt_rf_idx      = None,  naive_mt_rf_names      = None,
+    gsi_idx              = None,  gsi_names              = None,
+    rf_idx               = None,  rf_names               = None,
 ) -> dict[str, ExperimentConfig]:
     """Build and return the experiment registry.
 
     Only experiments whose band indices are not None are registered.
-    C_v3 variants are registered individually as 'C_v3_{phase}_k{k:02d}'.
     """
-
     reg: dict[str, ExperimentConfig] = {}
 
-    # ── Baselines ───────────────────────────────────────────────────────────
-
-    reg["single_date"] = ExperimentConfig(
-        key               = "single_date",
-        description       = f"Single-date peak growing season {july30_key}, 9ch — single-date baseline",
-        band_indices      = exp_A_idx,
-        band_names        = exp_A_names,
-        default_loss      = "v1",
-        mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
-    )
-
-    # ── Exp A_v2: one entry per phenological window (V2 experiment) ────────────
-    for label, (idx, names, date) in (exp_A_v2_variants or {}).items():
-        key = f"A_v2_{label}"
-        reg[key] = ExperimentConfig(
-            key               = key,
-            description       = f"Single-date {date} [{label}], 9ch — phenological window baseline",
-            band_indices      = idx,
-            band_names        = names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V2,
+    if single_date_idx is not None:
+        reg["single_date_gsi"] = ExperimentConfig(
+            key         = "single_date_gsi",
+            description = f"Single-date {single_date_key}, GSI bands — {len(single_date_idx)}ch",
+            band_indices= single_date_idx,
+            band_names  = single_date_names,
         )
 
-    # ── Exp A_v3: one entry per phenological window (V3 experiment) ────────────
-    for label, (idx, names, date) in (exp_A_v3_variants or {}).items():
-        key = f"A_v3_{label}"
-        reg[key] = ExperimentConfig(
-            key               = key,
-            description       = f"Single-date {date} [{label}], 9ch — v3 phenological baseline",
-            band_indices      = idx,
-            band_names        = names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
+    if single_date_rf_idx is not None:
+        reg["single_date_rf"] = ExperimentConfig(
+            key         = "single_date_rf",
+            description = f"Single-date {single_date_key}, RF bands — {len(single_date_rf_idx)}ch",
+            band_indices= single_date_rf_idx,
+            band_names  = single_date_rf_names,
         )
 
-    reg["naive_multitemporal"] = ExperimentConfig(
-        key               = "naive_multitemporal",
-        description       = f"4 NDVI-based phenological dates {list(phenol_map.values())}, {len(exp_B_idx)}ch — naive multi-temporal baseline",
-        band_indices      = exp_B_idx,
-        band_names        = exp_B_names,
-        default_loss      = "v1",
-        mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
-    )
-
-    # ── Proposed method ─────────────────────────────────────────────────────
-
-    if exp_C_idx is not None:
-        n = len(exp_C_idx) if isinstance(exp_C_idx, list) else "per-year"
-        reg["C"] = ExperimentConfig(
-            key         = "C",
-            description = f"Stage2 CNN forward-selection K*={n}ch — proposed method",
-            band_indices= exp_C_idx,
-            band_names  = exp_C_names,
-            default_loss= "v1",
-            extra_kw    = {
-                "source_stage2_run_id":  resolved_stage2_run_id,
-                "source_project_run_id": resolved_project_run_id,
-            },
+    if naive_mt_idx is not None:
+        reg["naive_mt_gsi"] = ExperimentConfig(
+            key         = "naive_mt_gsi",
+            description = f"4 phenological dates {list(phenol_map.values())}, GSI bands — {len(naive_mt_idx)}ch",
+            band_indices= naive_mt_idx,
+            band_names  = naive_mt_names,
         )
 
-    if exp_C_v2_idx is not None:
-        n = len(exp_C_v2_idx) if isinstance(exp_C_v2_idx, list) else "per-year"
-        reg["C_v2"] = ExperimentConfig(
-            key         = "C_v2",
-            description = f"Stage2v2 two-phase CNN K*_dates×K*_bands={n}ch",
-            band_indices= exp_C_v2_idx,
-            band_names  = exp_C_v2_names,
-            default_loss= "v1",
-            extra_kw    = {
-                "source_stage2_run_id":  resolved_stage2v3_run_id,
-                "source_project_run_id": resolved_project_run_id_v2,
-            },
+    if naive_mt_rf_idx is not None:
+        reg["naive_mt_rf"] = ExperimentConfig(
+            key         = "naive_mt_rf",
+            description = f"4 phenological dates {list(phenol_map.values())}, RF bands — {len(naive_mt_rf_idx)}ch",
+            band_indices= naive_mt_rf_idx,
+            band_names  = naive_mt_rf_names,
         )
 
-    # ── Ablations ───────────────────────────────────────────────────────────
-
-    if exp_C_v2_rf_idx is not None:
-        reg["C_v2_rf"] = ExperimentConfig(
-            key         = "C_v2_rf",
-            description = f"Stage2v2 RF selector K*={len(exp_C_v2_rf_idx)}ch — ablation: RF vs CNN oracle",
-            band_indices= exp_C_v2_rf_idx,
-            band_names  = exp_C_v2_rf_names,
-            default_loss= "v1",
+    if gsi_idx is not None:
+        reg["gsi"] = ExperimentConfig(
+            key         = "gsi",
+            description = f"GSI-direct top-K, {len(gsi_idx)}ch — spectral-temporal selection",
+            band_indices= gsi_idx,
+            band_names  = gsi_names,
         )
 
-    # ── Exp C_v3 (RF forward selection — V3 proposed method) ────────────────
-    if exp_C_v3_rf_idx is not None:
-        reg["C_v3"] = ExperimentConfig(
-            key               = "C_v3",
-            description       = f"Stage2 RF forward-selection K*={len(exp_C_v3_rf_idx)}ch — v3 proposed method",
-            band_indices      = exp_C_v3_rf_idx,
-            band_names        = exp_C_v3_rf_names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
-        )
-
-    if exp_D_idx is not None:
-        reg["D"] = ExperimentConfig(
-            key         = "D",
-            description = f"Stage1v3 GSI top-K={len(exp_D_idx)}ch — ablation: no CNN validation",
-            band_indices= exp_D_idx,
-            band_names  = exp_D_names,
-            default_loss= "v1",
-        )
-
-    if exp_D_v2_idx is not None:
-        reg["D_v2"] = ExperimentConfig(
-            key         = "D_v2",
-            description = f"Stage1v2 candidate union={len(exp_D_v2_idx)}ch — legacy Stage1 baseline",
-            band_indices= exp_D_v2_idx,
-            band_names  = exp_D_v2_names,
-            default_loss= "v1",
-        )
-
-    # ── Single-stage direct selectors ───────────────────────────────────────
-
-    if exp_gsi_direct_idx is not None:
-        reg["gsi_direct"] = ExperimentConfig(
-            key         = "gsi_direct",
-            description = f"GSI-direct all-channel ranking top-K union={len(exp_gsi_direct_idx)}ch — single-stage baseline",
-            band_indices= exp_gsi_direct_idx,
-            band_names  = exp_gsi_direct_names,
-            default_loss= "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
-        )
-
-    if exp_rf_direct_idx is not None:
-        reg["rf_direct"] = ExperimentConfig(
-            key         = "rf_direct",
-            description = f"RF-direct all-channel ranking top-K union={len(exp_rf_direct_idx)}ch — single-stage proposed",
-            band_indices= exp_rf_direct_idx,
-            band_names  = exp_rf_direct_names,
-            default_loss= "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
-        )
-
-    if exp_all_channels_idx is not None:
-        reg["all_channels"] = ExperimentConfig(
-            key               = "all_channels",
-            description       = f"All channels, no selection — {len(exp_all_channels_idx)}ch upper bound",
-            band_indices      = exp_all_channels_idx,
-            band_names        = exp_all_channels_names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_6CLASS,
-        )
-
-    # ── C_v3 sweep: one entry per (phase, k) — V2 experiment (legacy) ─────────
-
-    for (phase, k), (idx, names) in sorted((exp_C_v3_variants or {}).items()):
-        key = f"C_v3_{phase}_k{k:02d}"
-        reg[key] = ExperimentConfig(
-            key               = key,
-            description       = f"Stage2v3 {phase}_sweep k={k} {len(idx)}ch",
-            band_indices      = idx,
-            band_names        = names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V2,
-        )
-
-    # ── B_v3: Stage 1 GSI top-k sweep — V3 experiment ──────────────────────
-
-    for (phase, k), (idx, names) in sorted((exp_B_v3_variants or {}).items()):
-        key = f"B_v3_{phase}_k{k:02d}"
-        reg[key] = ExperimentConfig(
-            key               = key,
-            description       = f"Stage1 GSI {phase}_sweep top-k={k} {len(idx)}ch — v3 baseline",
-            band_indices      = idx,
-            band_names        = names,
-            default_loss      = "v1",
-            mlflow_experiment = MLFLOW_EXPERIMENT_TRAIN_V3,
+    if rf_idx is not None:
+        reg["rf"] = ExperimentConfig(
+            key         = "rf",
+            description = f"RF-direct top-K, {len(rf_idx)}ch — RF importance selection",
+            band_indices= rf_idx,
+            band_names  = rf_names,
         )
 
     return reg
@@ -264,42 +103,5 @@ def expand_exp_keys(
     requested: list[str],
     registry:  dict[str, ExperimentConfig],
 ) -> list[str]:
-    """Expand shorthand keys into concrete registry keys.
-
-    'C_v3' expands to all registered 'C_v3_*' keys (sorted).
-    All other keys are passed through as-is.
-    """
-    expanded = []
-    for key in requested:
-        if key == "A_v2":
-            matched = sorted(k for k in registry if k.startswith("A_v2_"))
-            if not matched:
-                raise RuntimeError("No A_v2 variants registered.")
-            expanded.extend(matched)
-        elif key == "A_v3":
-            matched = sorted(k for k in registry if k.startswith("A_v3_"))
-            if not matched:
-                raise RuntimeError("No A_v3 variants registered.")
-            expanded.extend(matched)
-        elif key == "B_v3":
-            matched = sorted(k for k in registry if k.startswith("B_v3_"))
-            if not matched:
-                raise RuntimeError(
-                    "No B_v3 variants registered — did you pass --v3-phase and --v3-k?"
-                )
-            expanded.extend(matched)
-        elif key == "C_v3":
-            if "C_v3" in registry:
-                # Direct entry: RF selection for V3 experiment
-                expanded.append("C_v3")
-            else:
-                # Legacy: expand to C_v3_* sweep entries (V2 experiment)
-                matched = sorted(k for k in registry if k.startswith("C_v3_"))
-                if not matched:
-                    raise RuntimeError(
-                        "No C_v3 entry registered — did you pass --v3-phase and --v3-k?"
-                    )
-                expanded.extend(matched)
-        else:
-            expanded.append(key)
-    return expanded
+    """Pass-through: all keys are concrete (no shorthands needed)."""
+    return list(requested)

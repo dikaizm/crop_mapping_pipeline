@@ -1,5 +1,6 @@
-"""Exp A — Single date (peak growing season by NDVI) × 9 vegetation bands."""
+"""Single-date experiments — peak NDVI date, all VEGE_BANDS or GSI-selected bands."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -38,15 +39,10 @@ def _mean_ndvi(tif_path, cdl_arr, valid_thresh=0.80):
         return None, 0.0
 
 
-def build_exp_A_indices(local_date_to_idx, local_band_to_idx,
-                        s2_paths=None, cdl_path=None):
-    """Single date (peak NDVI over crop pixels) × 9 vegetation bands.
-
-    Falls back to nearest Jul-14/Jul-29 date if NDVI computation is unavailable.
-    """
+def _find_peak_ndvi_date(local_date_to_idx, s2_paths=None, cdl_path=None):
+    """Return peak-NDVI date string. Falls back to Jul-14/29/30 heuristic."""
     available_dates = sorted(local_date_to_idx.keys())
 
-    best_date = None
     if s2_paths and cdl_path:
         try:
             with rasterio.open(cdl_path) as src:
@@ -54,24 +50,112 @@ def build_exp_A_indices(local_date_to_idx, local_band_to_idx,
             ndvi_scores = {}
             for d in available_dates:
                 fi = local_date_to_idx[d]
-                ndvi, vf = _mean_ndvi(s2_paths[fi], cdl_arr)
+                ndvi, _ = _mean_ndvi(s2_paths[fi], cdl_arr)
                 if ndvi is not None:
                     ndvi_scores[d] = ndvi
             if ndvi_scores:
-                best_date = max(ndvi_scores, key=ndvi_scores.get)
-                log.info(f"Exp A: NDVI-selected date={best_date} (NDVI={ndvi_scores[best_date]:.4f})")
+                best = max(ndvi_scores, key=ndvi_scores.get)
+                log.info(f"single_date: NDVI-selected date={best} (NDVI={ndvi_scores[best]:.4f})")
+                return best
         except Exception as e:
-            log.warning(f"Exp A: NDVI selection failed ({e}), falling back to Jul heuristic")
+            log.warning(f"single_date: NDVI selection failed ({e}), falling back to Jul heuristic")
 
-    if best_date is None:
-        best_date = next(
-            (k for k in available_dates if k[4:6] == "07" and k[6:8] in ("14", "29", "30")),
-            available_dates[-1],
-        )
-        log.info(f"Exp A: heuristic date={best_date}")
+    best = next(
+        (k for k in available_dates if k[4:6] == "07" and k[6:8] in ("14", "29", "30")),
+        available_dates[-1],
+    )
+    log.info(f"single_date: heuristic date={best}")
+    return best
 
+
+def build_single_date_indices(local_date_to_idx, local_band_to_idx,
+                              s2_paths=None, cdl_path=None):
+    """Single date (peak NDVI) × all 9 VEGE_BANDS."""
+    best_date = _find_peak_ndvi_date(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
     off   = local_date_to_idx[best_date] * N_BANDS_PER_DATE
     idx   = [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
     names = [f"{b}_{best_date}" for b in VEGE_BANDS]
-    log.info(f"Exp A: {len(idx)} channels")
+    log.info(f"single_date: {len(idx)} channels")
     return idx, names, best_date
+
+
+def build_single_date_selected_indices(
+    local_date_to_idx,
+    local_band_to_idx,
+    s2_paths=None,
+    cdl_path=None,
+    top_k: int | None = None,
+    candidates_json: Path | None = None,
+    force: bool = False,
+):
+    """Single date (peak NDVI) × GSI or RF top-K band union.
+
+    When candidates_json is None: runs scoped GSI on the peak date's single
+    file and caches to gsi_single_date_candidates.json alongside the data.
+    When candidates_json is provided (RF variant): loads that JSON directly.
+
+    Parameters
+    ----------
+    top_k : int | None
+        Bands per crop before union. None = use all ranked bands.
+    candidates_json : Path | None
+        Pre-computed candidates JSON (RF variant). None → compute GSI inline.
+    force : bool
+        Re-run scoped GSI even if cached JSON exists.
+    """
+    best_date = _find_peak_ndvi_date(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
+
+    if candidates_json is not None:
+        json_path = Path(candidates_json)
+        if not json_path.exists():
+            raise FileNotFoundError(f"Candidates JSON not found: {json_path}")
+        with open(json_path) as f:
+            band_candidates = json.load(f)["band_candidates_per_crop"]
+    else:
+        if s2_paths is None or cdl_path is None:
+            raise ValueError("s2_paths and cdl_path required for scoped GSI scoring")
+        from crop_mapping_pipeline.stages.selections.band_scoring.gsi.v3 import compute_band_candidates
+        peak_file = s2_paths[local_date_to_idx[best_date]]
+        out_json  = Path(s2_paths[0]).parent / "gsi_single_date_candidates.json"
+        band_candidates = compute_band_candidates([peak_file], cdl_path, out_json=out_json, force=force)
+
+    seen: set[str] = set()
+    union_bands: list[str] = []
+    for crop_id in KEEP_CLASSES:
+        ranked = band_candidates.get(str(crop_id), [])
+        k = top_k if top_k is not None else len(ranked)
+        for band in ranked[:k]:
+            if band not in seen and band in S2_BAND_NAMES:
+                seen.add(band)
+                union_bands.append(band)
+
+    if not union_bands:
+        raise ValueError("No valid bands found in band_candidates_per_crop")
+
+    idx, names, skipped = [], [], 0
+    for band in union_bands:
+        local_name = f"{band}_{best_date}"
+        i = local_band_to_idx.get(local_name)
+        if i is not None:
+            idx.append(i)
+            names.append(local_name)
+        else:
+            skipped += 1
+
+    if not idx:
+        raise ValueError(
+            f"single_date_selected: no bands matched date={best_date}. "
+            "Check S2 files include this date."
+        )
+    if skipped:
+        log.warning(f"single_date_selected: {skipped}/{len(union_bands)} band(s) not in local band map for date={best_date}")
+
+    log.info(
+        f"single_date_selected: date={best_date}, {len(idx)} channels "
+        f"(top_k={top_k or 'all'} per crop → {len(union_bands)} union bands)"
+    )
+    return idx, names, best_date
+
+
+# backwards-compat aliases
+build_exp_A_indices = build_single_date_indices

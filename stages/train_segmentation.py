@@ -1,28 +1,23 @@
 """
-Stage 3 — Full Model Validation (Exp A / B / C / D).
+Stage 3 — Full Model Validation.
 
-Four experiment configurations × 2 architectures = up to 8 training runs.
+Six experiment configurations × 2 architectures = up to 12 training runs.
 
-| Config | Input                           | Channels | Purpose                        |
-|--------|---------------------------------|----------|--------------------------------|
-| Exp A  | Single-date (Jul 30)            | 9        | Conventional baseline          |
-| Exp B  | 4 phenological dates            | 36       | Multi-temporal naive           |
-| Exp C  | Stage 2 CNN forward-selection   | K*       | Proposed method                |
-| Exp D      | Stage 1v3 GSI top-K (no Stage 2)  | K*   | Ablation: no CNN validation    |
-| Exp D_v2   | Stage 1v2 channel union           | K*   | Legacy Stage 1 direct baseline |
-| Exp C_v2_rf| Stage 2 RF importance selection   | K*   | Ablation: RF vs CNN oracle     |
-|            |                                   |      |                                |
-| V3 experiment (cropmap_segmentation_s2_v3):   |      |                                |
-| Exp A_v3   | 1 date per phenological window    | 9    | V3 temporal baseline           |
-| Exp B_v3   | Stage 1 GSI top-k sweep           | 1–N  | V3 GSI-only ablation           |
-| Exp C_v3   | Stage 2 RF forward selection      | K*   | V3 proposed method             |
+| Config             | Dates               | Band selection | Purpose                      |
+|--------------------|---------------------|----------------|------------------------------|
+| single_date_gsi    | peak NDVI           | GSI            | Domain temporal + GSI bands  |
+| single_date_rf     | peak NDVI           | RF             | Domain temporal + RF bands   |
+| naive_mt_gsi       | 4 phenological      | GSI            | Multi-temporal + GSI bands   |
+| naive_mt_rf        | 4 phenological      | RF             | Multi-temporal + RF bands    |
+| gsi                | GSI-direct          | GSI-direct     | GSI spectral-temporal        |
+| rf                 | RF-direct           | RF-direct      | RF spectral-temporal         |
 
 Usage:
-    python scripts/train_segmentation.py                 # run all 6 experiments
-    python scripts/train_segmentation.py --exp single_date   # only single-date baseline (both archs)
-    python scripts/train_segmentation.py --exp C --arch segformer
-    python scripts/train_segmentation.py --force         # re-run even if ckpt exists
-    python scripts/train_segmentation.py --data-dir /mnt/data
+    python stages/train_segmentation.py                       # run all 6 experiments
+    python stages/train_segmentation.py --exp single_date     # only single-date baseline
+    python stages/train_segmentation.py --exp gsi --arch segformer
+    python stages/train_segmentation.py --force               # re-run even if ckpt exists
+    python stages/train_segmentation.py --data-dir /mnt/data
 """
 
 import os
@@ -71,10 +66,6 @@ from crop_mapping_pipeline.config import (
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, SEED, ARCH_CFG,
-    STAGE3_EXP_C_BANDS, STAGE3_EXP_C_BANDS_PROJECTED,
-    STAGE3_EXP_C_V2_JSON,
-    STAGE3_EXP_C_V2_RF_JSON,
-    STAGE3_EXP_D_JSON,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
@@ -118,7 +109,7 @@ def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_
     contribute at least one channel in band_indices, with indices remapped to
     their positions in the reduced stack.
 
-    Example: 25 files × 11 bands = 275 channels.  Exp A selects bands [157..165]
+    Example: 25 files × 11 bands = 275 channels.  single_date selects bands [157..165]
     (file 14 only) → returns [s2_paths[14]], remapped to [0..8].
     """
     if band_indices is None:
@@ -145,24 +136,20 @@ def _filter_s2_by_band_indices(s2_paths, band_indices, n_bands_per_file=N_BANDS_
 from crop_mapping_pipeline.stages.experiments import (
     parse_date,
     build_local_band_map,
-    build_exp_A_indices,
-    build_exp_A_v2_indices,
-    build_exp_B_indices,
-    build_exp_C_indices,
-    build_exp_C_indices_projected,
+    build_single_date_indices,
+    build_single_date_selected_indices,
+    build_naive_multitemporal_indices,
+    build_naive_multitemporal_selected_indices,
     build_registry,
     expand_exp_keys,
-    build_exp_C_v2_indices,
-    build_exp_C_v2_indices_projected,
-    build_exp_C_v2_rf_indices,
-    build_exp_C_v3_indices,
-    build_exp_D_indices,
-    build_exp_D_v2_indices,
 )
 from crop_mapping_pipeline.stages.experiments.exp_select_direct import build_direct_indices
+from crop_mapping_pipeline.stages.selections.rf_band_only import run_rf_band_only, save_rf_band_json
 from crop_mapping_pipeline.config import (
     SELECT_GSI_DIRECT_JSON,
     SELECT_RF_DIRECT_JSON,
+    GSI_CANDIDATES_JSON,
+    PROCESSED_DIR,
 )
 
 
@@ -541,15 +528,8 @@ def run_experiment(
     loss_version="v1",      # "v1" = WeightedCrossEntropy | "v2" = PhenologyAwareLoss
     force=False,
     skip_viz=False,
-    source_stage2_run_id=None,
-    source_project_run_id=None,
 ):
-    """
-    band_indices can be:
-      - list[int]           → same indices applied to every year (Exp A / B, or
-                              Exp C without projected file)
-      - dict{yr: (idx, names)} → per-year indices from build_exp_C_indices_projected()
-    """
+    """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     exp_dir       = MODELS_DIR / f"{exp_name}_{run_timestamp}"
@@ -735,10 +715,7 @@ def run_experiment(
         })
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
-        if source_stage2_run_id:
-            mlflow.set_tag("source_stage2_run_id", source_stage2_run_id)
-        if source_project_run_id:
-            mlflow.set_tag("source_project_run_id", source_project_run_id)
+
 
         # ── Training loop ─────────────────────────────────────────────────────
         best_miou              = 0.0
@@ -1195,11 +1172,6 @@ def main(
     force=False,
     data_dir=None,
     skip_viz=False,
-    stage2_run_id=None,
-    project_run_id=None,
-    v3_phases=("band",),
-    v3_ks=(3,),
-    stage2v3_sweep_run_id=None,
     top_k=None,
     batch_size=None,
 ):
@@ -1307,143 +1279,116 @@ def main(
     # ── Build experiment channel sets ─────────────────────────────────────
     _ref_year_s2  = _s2_for_year(s2_processed, TRAIN_YEARS[0])
     _ref_year_cdl = CDL_BY_YEAR[TRAIN_YEARS[0]]
-    exp_A_idx, exp_A_names, july30_key = build_exp_A_indices(
-        local_date_to_idx, local_band_to_idx,
-        s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-    )
-    exp_A_v2_variants = build_exp_A_v2_indices(
-        local_date_to_idx, local_band_to_idx
-    )
-    exp_B_idx, exp_B_names, phenol_map = build_exp_B_indices(
-        local_date_to_idx, local_band_to_idx,
-        s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-    )
-    # Exp C: prefer per-year projected indices; fall back to single-ref-year
-    exp_C_idx = exp_C_names = exp_C_projected = resolved_project_run_id = resolved_stage2_run_id = None
-    if not exps or "C" in exps:
-        exp_C_projected, resolved_project_run_id = build_exp_C_indices_projected(
-            s2_processed, project_run_id=project_run_id
+
+    _base_dir = Path(data_dir) if data_dir else PROCESSED_DIR
+
+    # ── Base domain channels (all 9 VEGE_BANDS, no band selection) ─────────
+    needs_sd  = not exps or "single_date_gsi" in exps or "single_date_rf" in exps
+    needs_nmt = not exps or "naive_mt_gsi" in exps or "naive_mt_rf" in exps
+
+    sd_base_idx = sd_base_names = sd_date_key = None
+    nmt_base_idx = nmt_base_names = phenol_map_base = None
+
+    if needs_sd:
+        sd_base = build_single_date_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
         )
-        resolved_stage2_run_id = None
-        if exp_C_projected:
-            exp_C_idx   = exp_C_projected          # dict {yr: (idx, names)}
-            exp_C_names = exp_C_projected[TRAIN_YEARS[0]][1]   # ref names for logging
-            log.info("Exp C: using per-year projected band indices")
+        sd_base_idx, sd_base_names, sd_date_key = sd_base
+
+    if needs_nmt:
+        nmt_base = build_naive_multitemporal_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+        )
+        nmt_base_idx, nmt_base_names, phenol_map_base = nmt_base
+
+    # ── single_date_gsi (GSI — scoped to peak date only) ─────────────────
+    single_date_idx = single_date_names = single_date_key = None
+    if not exps or "single_date_gsi" in exps:
+        single_date_idx, single_date_names, single_date_key = build_single_date_selected_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+            force=force,
+        )
+
+    # ── single_date (RF — scoped to peak date only) ───────────────────────
+    single_date_rf_idx = single_date_rf_names = None
+    if not exps or "single_date_rf" in exps:
+        rf_sd_json = _base_dir / "rf_band_single_date.json"
+        # sd_date_key guaranteed set when needs_sd is True (single_date_rf implies it)
+        sd_peak_file = _ref_year_s2[local_date_to_idx[sd_date_key]]
+        if not force and rf_sd_json.exists():
+            log.info(f"rf_band single_date: cached → {rf_sd_json.name}")
         else:
-            exp_C_idx, exp_C_names, resolved_stage2_run_id = build_exp_C_indices(
-                mmdd_to_date, local_band_to_idx, stage2_run_id=stage2_run_id
+            save_rf_band_json(
+                run_rf_band_only([sd_peak_file], str(_ref_year_cdl), sd_base_names),
+                rf_sd_json,
             )
-            log.info("Exp C: using single reference-year band indices (no projected file)")
-
-    # Exp C v2: only loaded when explicitly requested via --exp C_v2
-    exp_C_v2_idx = exp_C_v2_names = resolved_project_run_id_v2 = resolved_stage2v3_run_id = None
-    if exps and "C_v2" in exps:
-        exp_C_v2_projected, resolved_project_run_id_v2 = build_exp_C_v2_indices_projected(
-            s2_processed
+        single_date_rf_idx, single_date_rf_names, _ = build_single_date_selected_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+            candidates_json=rf_sd_json,
         )
-        resolved_stage2v3_run_id = None
-        if exp_C_v2_projected:
-            exp_C_v2_idx   = exp_C_v2_projected
-            exp_C_v2_names = exp_C_v2_projected[TRAIN_YEARS[0]][1]
-            log.info("Exp C v2: using per-year projected band indices")
+
+    # ── naive_mt_gsi (GSI — scoped to 4 phenol dates only) ──────────────
+    naive_mt_idx = naive_mt_names = phenol_map = None
+    if not exps or "naive_mt_gsi" in exps:
+        naive_mt_idx, naive_mt_names, phenol_map = build_naive_multitemporal_selected_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+            force=force,
+        )
+
+    # ── naive_mt_rf (RF — scoped to 4 phenol dates only) ────────────────
+    naive_mt_rf_idx = naive_mt_rf_names = None
+    if not exps or "naive_mt_rf" in exps:
+        rf_nmt_json = _base_dir / "rf_band_naive_mt.json"
+        # phenol_map_base guaranteed set when needs_nmt is True
+        nmt_phenol_files = [_ref_year_s2[local_date_to_idx[d]] for d in phenol_map_base.values()]
+        if not force and rf_nmt_json.exists():
+            log.info(f"rf_band naive_mt: cached → {rf_nmt_json.name}")
         else:
-            exp_C_v2_idx, exp_C_v2_names, resolved_stage2v3_run_id = build_exp_C_v2_indices(
-                mmdd_to_date, local_band_to_idx
+            save_rf_band_json(
+                run_rf_band_only(nmt_phenol_files, str(_ref_year_cdl), nmt_base_names),
+                rf_nmt_json,
             )
-            log.info("Exp C v2: using single reference-year band indices (no projected file)")
-
-    # Exp C_v2_rf: only loaded when explicitly requested via --exp C_v2_rf
-    exp_C_v2_rf_idx = exp_C_v2_rf_names = None
-    if exps and "C_v2_rf" in exps:
-        exp_C_v2_rf_idx, exp_C_v2_rf_names = build_exp_C_v2_rf_indices(
-            mmdd_to_date, local_band_to_idx
+        naive_mt_rf_idx, naive_mt_rf_names, _ = build_naive_multitemporal_selected_indices(
+            local_date_to_idx, local_band_to_idx,
+            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+            candidates_json=rf_nmt_json,
         )
-        log.info(f"Exp C_v2_rf: RF-selected features, {len(exp_C_v2_rf_idx)} channels")
-
-    # Exp D: only loaded when explicitly requested via --exp D
-    exp_D_idx = exp_D_names = None
-    if exps and "D" in exps:
-        exp_D_idx, exp_D_names = build_exp_D_indices(mmdd_to_date, local_band_to_idx)
-        log.info(f"Exp D: Stage 1 top-K features, {len(exp_D_idx)} channels")
-
-    # Exp D_v2: legacy Stage 1v2 channel union, only when explicitly requested
-    exp_D_v2_idx = exp_D_v2_names = None
-    if exps and "D_v2" in exps:
-        exp_D_v2_idx, exp_D_v2_names = build_exp_D_v2_indices(mmdd_to_date, local_band_to_idx)
-        log.info(f"Exp D_v2: Stage 1 v2 channel union, {len(exp_D_v2_idx)} channels")
-
-    # Exp C_v3 sweep (legacy, V2 experiment) — kept for backward compat
-    exp_C_v3_variants: dict = {}
-
-    # Exp A_v3: phenological window baselines → V3 experiment
-    exp_A_v3_variants = None
-    if exps and "A_v3" in exps:
-        exp_A_v3_variants = build_exp_A_v2_indices(local_date_to_idx, local_band_to_idx)
-        log.info(f"Exp A_v3: {len(exp_A_v3_variants)} phenological window variants")
-
-    # Exp B_v3: Stage 1 GSI top-k sweep → V3 experiment
-    exp_B_v3_variants: dict = {}
-    if exps and "B_v3" in exps:
-        for _phase in v3_phases:
-            for _k in v3_ks:
-                _idx, _names = build_exp_C_v3_indices(
-                    phase=_phase,
-                    k=_k,
-                    mmdd_to_date=mmdd_to_date,
-                    local_band_to_idx=local_band_to_idx,
-                    mlflow_run_id=stage2v3_sweep_run_id,
-                )
-                exp_B_v3_variants[(_phase, _k)] = (_idx, _names)
-                log.info(f"Exp B_v3 phase={_phase} k={_k}: {len(_idx)} channels")
-
-    # Exp C_v3: Stage 2 RF forward selection → V3 experiment (proposed method)
-    exp_C_v3_rf_idx = exp_C_v3_rf_names = None
-    if exps and "C_v3" in exps:
-        exp_C_v3_rf_idx, exp_C_v3_rf_names = build_exp_C_v2_rf_indices(
-            mmdd_to_date, local_band_to_idx
-        )
-        log.info(f"Exp C_v3: RF forward-selection, {len(exp_C_v3_rf_idx)} channels")
 
     def _find_direct_json(selector: str) -> Path:
-        """Find best available JSON: exact k match, or largest k available as subset base."""
+        """Return JSON path for a direct selector; falls back to largest k if exact k missing."""
         base = Path(data_dir) if data_dir else SELECT_GSI_DIRECT_JSON.parent
         if top_k:
             exact = base / f"select_{selector}_k{top_k}.json"
             if exact.exists():
                 return exact
-            # Fall back to largest available k JSON (subset_k will trim at load time)
             candidates = sorted(base.glob(f"select_{selector}_k*.json"))
             if candidates:
                 log.info(f"  {selector}: k={top_k} JSON not found, using {candidates[-1].name} with subset_k")
                 return candidates[-1]
         return base / f"select_{selector}_k{SELECT_TOP_K_PER_CROP}.json"
 
-    # GSI-direct: single-stage all-channel GSI ranking
-    exp_gsi_direct_idx = exp_gsi_direct_names = None
-    if exps and "gsi_direct" in exps:
+    gsi_idx = gsi_names = None
+    if not exps or "gsi" in exps:
         gsi_json = _find_direct_json("gsi_direct")
-        exp_gsi_direct_idx, exp_gsi_direct_names = build_direct_indices(
+        gsi_idx, gsi_names = build_direct_indices(
             gsi_json, mmdd_to_date, local_band_to_idx,
-            selector_name="gsi_direct", subset_k=top_k,
+            selector_name="gsi", subset_k=top_k,
         )
-        log.info(f"Exp gsi_direct (k={top_k or 'all'}): {len(exp_gsi_direct_idx)} channels")
+        log.info(f"gsi (k={top_k or 'all'}): {len(gsi_idx)} channels")
 
-    # RF-direct: single-stage all-channel RF importance ranking
-    exp_rf_direct_idx = exp_rf_direct_names = None
-    if exps and "rf_direct" in exps:
+    rf_idx = rf_names = None
+    if not exps or "rf" in exps:
         rf_json = _find_direct_json("rf_direct")
-        exp_rf_direct_idx, exp_rf_direct_names = build_direct_indices(
+        rf_idx, rf_names = build_direct_indices(
             rf_json, mmdd_to_date, local_band_to_idx,
-            selector_name="rf_direct", subset_k=top_k,
+            selector_name="rf", subset_k=top_k,
         )
-        log.info(f"Exp rf_direct (k={top_k or 'all'}): {len(exp_rf_direct_idx)} channels")
-
-    # all_channels: no selection — use every available (date × band) channel
-    exp_all_channels_idx = exp_all_channels_names = None
-    if exps and "all_channels" in exps:
-        exp_all_channels_idx   = list(range(len(local_band_names)))
-        exp_all_channels_names = local_band_names
-        log.info(f"Exp all_channels: {len(exp_all_channels_idx)} channels (no selection)")
+        log.info(f"rf (k={top_k or 'all'}): {len(rf_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor = compute_class_weights()
@@ -1451,29 +1396,16 @@ def main(
 
     # ── Build experiment registry & plan ───────────────────────────────────
     all_archs = list(ARCH_CFG.keys())
-    run_exps  = exps  or ["single_date", "naive_multitemporal", "C"]
+    run_exps  = exps  or ["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"]
     run_archs = archs or all_archs
 
     registry = build_registry(
-        exp_A_idx=exp_A_idx,   exp_A_names=exp_A_names,   july30_key=july30_key,
-        exp_A_v2_variants=exp_A_v2_variants,
-        exp_B_idx=exp_B_idx,   exp_B_names=exp_B_names,   phenol_map=phenol_map,
-        exp_C_idx=exp_C_idx,   exp_C_names=exp_C_names,
-        resolved_stage2_run_id=resolved_stage2_run_id,
-        resolved_project_run_id=resolved_project_run_id,
-        exp_C_v2_idx=exp_C_v2_idx,   exp_C_v2_names=exp_C_v2_names,
-        resolved_stage2v3_run_id=resolved_stage2v3_run_id,
-        resolved_project_run_id_v2=resolved_project_run_id_v2,
-        exp_C_v2_rf_idx=exp_C_v2_rf_idx, exp_C_v2_rf_names=exp_C_v2_rf_names,
-        exp_C_v3_variants=exp_C_v3_variants,
-        exp_D_idx=exp_D_idx,   exp_D_names=exp_D_names,
-        exp_D_v2_idx=exp_D_v2_idx, exp_D_v2_names=exp_D_v2_names,
-        exp_A_v3_variants=exp_A_v3_variants,
-        exp_B_v3_variants=exp_B_v3_variants,
-        exp_C_v3_rf_idx=exp_C_v3_rf_idx, exp_C_v3_rf_names=exp_C_v3_rf_names,
-        exp_gsi_direct_idx=exp_gsi_direct_idx, exp_gsi_direct_names=exp_gsi_direct_names,
-        exp_rf_direct_idx=exp_rf_direct_idx,   exp_rf_direct_names=exp_rf_direct_names,
-        exp_all_channels_idx=exp_all_channels_idx, exp_all_channels_names=exp_all_channels_names,
+        single_date_idx=single_date_idx,           single_date_names=single_date_names,           single_date_key=sd_date_key,
+        single_date_rf_idx=single_date_rf_idx,     single_date_rf_names=single_date_rf_names,
+        naive_mt_idx=naive_mt_idx,                 naive_mt_names=naive_mt_names,                 phenol_map=phenol_map_base,
+        naive_mt_rf_idx=naive_mt_rf_idx,           naive_mt_rf_names=naive_mt_rf_names,
+        gsi_idx=gsi_idx,     gsi_names=gsi_names,
+        rf_idx=rf_idx,       rf_names=rf_names,
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)
@@ -1606,17 +1538,16 @@ def _upload_existing_models(filter_exps=None, filter_archs=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Stage 3 — Train segmentation models")
+    parser = argparse.ArgumentParser(description="Train segmentation models for band selection comparison")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["single_date", "naive_multitemporal", "all_channels", "A_v2", "A_v3", "B_v3", "C", "C_v2", "C_v2_rf", "C_v3", "D", "D_v2", "gsi_direct", "rf_direct"],
-        default=["single_date", "naive_multitemporal", "C"],
+        choices=["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
+        default=["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
         help=(
-            "Which experiments to run (default: single_date naive_multitemporal C). "
-            "single_date=peak NDVI single date 9ch, naive_multitemporal=4 NDVI-based phenological dates 36ch. "
-            "V3 experiments (all log to cropmap_segmentation_s2_v3): "
-            "A_v3=phenological baselines, B_v3=Stage1 GSI top-k sweep, C_v3=Stage2 RF selection. "
-            "A_v3/B_v3 expand to multiple variants; use --v3-phase and --v3-k for B_v3."
+            "Experiments to run (default: all six). "
+            "single_date_gsi=peak NDVI + GSI bands, single_date_rf=peak NDVI + RF bands, "
+            "naive_mt_gsi=4 phenol dates + GSI bands, naive_mt_rf=4 phenol dates + RF bands, "
+            "gsi=GSI-direct, rf=RF-direct."
         ),
     )
     parser.add_argument(
@@ -1638,37 +1569,6 @@ if __name__ == "__main__":
             "Upload best_model.pth and last_model.pth for all existing run dirs under "
             "MODELS_DIR to Google Drive without re-training. "
             "Optionally filter with --exp / --arch."
-        ),
-    )
-    parser.add_argument(
-        "--stage2-run-id", default=None,
-        help=(
-            "MLflow run ID of the Stage 2 parent run to fetch stage3_exp_c_bands.txt from. "
-            "If omitted and the file is absent locally, the latest Stage 2 run is used."
-        ),
-    )
-    parser.add_argument(
-        "--project-run-id", default=None,
-        help=(
-            "MLflow run ID of the stage2v2_project run to fetch "
-            "stage3_exp_c_bands_projected.json from. "
-            "If omitted and the file is absent locally, the latest project run is used."
-        ),
-    )
-    parser.add_argument(
-        "--v3-phase", nargs="+", choices=["band", "date"], default=["band"],
-        help="Exp C_v3: one or more sweep phases — 'band' (Phase A) and/or 'date' (Phase B). Each phase×k becomes a separate run. Default: band",
-    )
-    parser.add_argument(
-        "--v3-k", nargs="+", type=int, default=[3],
-        help="Exp C_v3: one or more sweep levels k (1-indexed). Each k becomes a separate run. Default: 3",
-    )
-    parser.add_argument(
-        "--stage2v3-sweep-run-id", default=None,
-        help=(
-            "MLflow run ID of the Stage 2v3 sweep run "
-            "(b3dbb46372e147fd997c85ea8ce5b9d0 by default). "
-            "Used to download band files if absent locally."
         ),
     )
     parser.add_argument(
@@ -1726,11 +1626,6 @@ if __name__ == "__main__":
             force=args.force,
             data_dir=args.data_dir,
             skip_viz=args.skip_viz,
-            stage2_run_id=args.stage2_run_id,
-            project_run_id=args.project_run_id,
-            v3_phases=args.v3_phase,
-            v3_ks=args.v3_k,
-            stage2v3_sweep_run_id=args.stage2v3_sweep_run_id,
             top_k=k,
             batch_size=args.batch_size,
         )

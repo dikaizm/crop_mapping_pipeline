@@ -1,12 +1,12 @@
 """
-Pipeline orchestrator — runs all stages end-to-end.
+Pipeline orchestrator — runs all steps end-to-end.
 
-Stages:
-  process  — Stage 0.5: download raw S2 + CDL, process, upload to GDrive, delete raw
-  fetch    — Stage 0: download processed S2 + CDL from Google Drive
-  feature  — Stage 1+2: GSI ranking + CNN forward selection (feature_analysis_v2.py)
-  train    — Stage 3: train Exp A/B/C × 2 architectures (train_segmentation.py)
-  all      — run fetch + feature + train in order
+Steps:
+  process  — download raw S2 + CDL, process, upload to GDrive, delete raw
+  fetch    — download processed S2 + CDL from Google Drive
+  score    — band scoring: GSI + RF importance (band_scoring.py)
+  train    — train segmentation models for band selection comparison (train_segmentation.py)
+  all      — run fetch + score + train in order
 
 Usage:
     python pipeline.py --stages process --years 2022 2023 2024 --shutdown
@@ -133,18 +133,18 @@ def run_fetch(force=False, data_dir=None, years=None, **_):
 
 
 def run_feature(force=False, data_dir=None):
-    """Stage 1+2 — feature analysis (GSI + CNN forward selection)."""
+    """Band scoring — GSI and RF importance scoring."""
     log.info("=" * 60)
-    log.info("STAGE 1+2 — Feature analysis")
+    log.info("BAND SCORING — GSI and RF importance")
     log.info("=" * 60)
-    from crop_mapping_pipeline.stages.feature_analysis_v2 import main as feature_main
-    feature_main(force=force, data_dir=data_dir, stage="all")
+    from crop_mapping_pipeline.stages.band_scoring import main as feature_main
+    feature_main(force=force, data_dir=data_dir, mode="gsi")
 
 
 def run_train(force=False, data_dir=None):
-    """Stage 3 — train segmentation models (Exp A/B/C)."""
+    """Train segmentation models for band selection comparison."""
     log.info("=" * 60)
-    log.info("STAGE 3 — Train segmentation models")
+    log.info("TRAINING — Band selection comparison")
     log.info("=" * 60)
     from crop_mapping_pipeline.stages.train_segmentation import main as train_main
     train_main(force=force, data_dir=data_dir)
