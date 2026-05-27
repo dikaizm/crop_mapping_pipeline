@@ -220,6 +220,29 @@ def compute_per_class_iou(logits, labels, num_classes):
     return ious
 
 
+def compute_per_class_f1(logits, labels, num_classes):
+    """Per-class F1 via precision × recall. Excludes background (class 0)."""
+    preds  = logits.argmax(dim=1).view(-1).numpy()
+    labels = labels.view(-1).numpy()
+    f1s = {}
+    for cls in range(1, num_classes):
+        tp = int(((preds == cls) & (labels == cls)).sum())
+        fp = int(((preds == cls) & (labels != cls)).sum())
+        fn = int(((preds != cls) & (labels == cls)).sum())
+        prec   = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+        recall = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+        if not (np.isnan(prec) or np.isnan(recall)) and (prec + recall) > 0:
+            f1s[cls] = float(2 * prec * recall / (prec + recall))
+        else:
+            f1s[cls] = float("nan")
+    return f1s
+
+
+def mean_f1(f1_dict):
+    vals = [v for v in f1_dict.values() if not np.isnan(v)]
+    return float(np.mean(vals)) if vals else 0.0
+
+
 @torch.no_grad()
 def validate_one_epoch(model, loader, criterion, device, num_classes):
     model.eval()
@@ -242,10 +265,15 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
     all_logits = torch.cat(all_logits)
     all_labels = torch.cat(all_labels)
     preds      = all_logits.argmax(dim=1)
-    oa         = (preds == all_labels).float().mean().item()
-    miou       = compute_miou(all_logits, all_labels, num_classes)
-    per_class  = compute_per_class_iou(all_logits, all_labels, num_classes)
-    return {"loss": total_loss / len(loader), "miou": miou, "oa": oa, "per_class_iou": per_class}
+    oa              = (preds == all_labels).float().mean().item()
+    miou            = compute_miou(all_logits, all_labels, num_classes)
+    per_class_iou   = compute_per_class_iou(all_logits, all_labels, num_classes)
+    per_class_f1    = compute_per_class_f1(all_logits, all_labels, num_classes)
+    mf1             = mean_f1(per_class_f1)
+    return {
+        "loss": total_loss / len(loader), "miou": miou, "oa": oa,
+        "mf1": mf1, "per_class_iou": per_class_iou, "per_class_f1": per_class_f1,
+    }
 
 
 @torch.no_grad()
@@ -861,7 +889,9 @@ def run_experiment(
 
         # ── Training loop ─────────────────────────────────────────────────────
         best_miou              = 0.0
+        best_val_mf1           = 0.0
         best_val_per_class_iou = {}
+        best_val_per_class_f1  = {}
         no_improve             = 0
         history                = []
         t_start    = time.time()
@@ -904,12 +934,19 @@ def run_experiment(
                 if not np.isnan(iou):
                     cdl_id = KEEP_CLASSES[cls_id - 1]
                     name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
-                    key    = f"val_iou_{name.lower().replace('/', '_').replace(' ', '_')}"
-                    per_cls_metrics[key] = iou
+                    slug   = name.lower().replace('/', '_').replace(' ', '_')
+                    per_cls_metrics[f"val_iou_{slug}"] = iou
+            for cls_id, f1v in val_m["per_class_f1"].items():
+                if not np.isnan(f1v):
+                    cdl_id = KEEP_CLASSES[cls_id - 1]
+                    name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                    slug   = name.lower().replace('/', '_').replace(' ', '_')
+                    per_cls_metrics[f"val_f1_{slug}"] = f1v
             mlflow.log_metrics({
                 "train_loss": train_loss,
                 "val_loss":   val_m["loss"],
                 "val_miou":   val_m["miou"],
+                "val_mf1":    val_m["mf1"],
                 "val_oa":     val_m["oa"],
                 "lr":         scheduler.get_last_lr()[0],
                 **per_cls_metrics,
@@ -920,13 +957,16 @@ def run_experiment(
                 "train_loss": round(train_loss,       4),
                 "val_loss":   round(val_m["loss"],    4),
                 "val_miou":   round(val_m["miou"],    4),
+                "val_mf1":    round(val_m["mf1"],     4),
                 "val_oa":     round(val_m["oa"],      4),
                 "epoch_t_s":  round(ep_t,              1),
             })
 
             if val_m["miou"] > best_miou + EARLY_STOP_DELTA:
                 best_miou              = val_m["miou"]
+                best_val_mf1           = val_m["mf1"]
                 best_val_per_class_iou = val_m["per_class_iou"]
+                best_val_per_class_f1  = val_m["per_class_f1"]
                 no_improve = 0
                 torch.save({
                     "epoch":            epoch,
@@ -945,17 +985,19 @@ def run_experiment(
             log.info(
                 f"  Ep {epoch+1:3d}/{MAX_EPOCHS} "
                 f"loss={train_loss:.4f} val={val_m['loss']:.4f} "
-                f"mIoU={val_m['miou']:.4f} OA={val_m['oa']:.4f} best={best_miou:.4f} "
-                f"patience={no_improve}/{EARLY_STOP} "
+                f"mIoU={val_m['miou']:.4f} mF1={val_m['mf1']:.4f} OA={val_m['oa']:.4f} "
+                f"best={best_miou:.4f} patience={no_improve}/{EARLY_STOP} "
                 f"{ep_t:.0f}s  {total_min:.1f}min"
             )
-            _cls_parts = []
+            _iou_parts, _f1_parts = [], []
             for cls_id, iou in val_m["per_class_iou"].items():
-                cdl_id    = KEEP_CLASSES[cls_id - 1]
-                short     = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}").replace(" ", "")
-                iou_str   = f"{iou:.3f}" if not np.isnan(iou) else "  nan"
-                _cls_parts.append(f"{short}={iou_str}")
-            log.info("         " + "  ".join(_cls_parts))
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                short  = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}").replace(" ", "")
+                _iou_parts.append(f"{short}={iou:.3f}" if not np.isnan(iou) else f"{short}=  nan")
+                f1v = val_m["per_class_f1"].get(cls_id, float("nan"))
+                _f1_parts.append(f"{short}={f1v:.3f}" if not np.isnan(f1v) else f"{short}=  nan")
+            log.info("    IoU: " + "  ".join(_iou_parts))
+            log.info("     F1: " + "  ".join(_f1_parts))
 
             # Save last checkpoint every epoch (overwrites previous)
             torch.save({
@@ -983,6 +1025,7 @@ def run_experiment(
 
         mlflow.log_metrics({
             "best_val_miou": best_miou,
+            "best_val_mf1":  best_val_mf1,
             "test_miou":     test_r["miou"],
             "test_oa":       test_r["oa"],
             "total_epochs":  len(history),
@@ -991,10 +1034,14 @@ def run_experiment(
             if not np.isnan(iou):
                 cdl_id = KEEP_CLASSES[cls_id - 1]
                 name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
-                mlflow.log_metric(
-                    f"best_val_iou_{name.lower().replace('/', '_').replace(' ', '_')}",
-                    iou,
-                )
+                slug   = name.lower().replace('/', '_').replace(' ', '_')
+                mlflow.log_metric(f"best_val_iou_{slug}", iou)
+        for cls_id, f1v in best_val_per_class_f1.items():
+            if not np.isnan(f1v):
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                slug   = name.lower().replace('/', '_').replace(' ', '_')
+                mlflow.log_metric(f"best_val_f1_{slug}", f1v)
         for cls_id, iou in test_r["per_class_iou"].items():
             if not np.isnan(iou):
                 cdl_id = KEEP_CLASSES[cls_id - 1]
