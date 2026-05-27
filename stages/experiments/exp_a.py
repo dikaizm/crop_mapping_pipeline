@@ -40,8 +40,23 @@ def _mean_ndvi(tif_path, cdl_arr, valid_thresh=0.80):
 
 
 def _find_peak_ndvi_date(local_date_to_idx, s2_paths=None, cdl_path=None):
-    """Return peak-NDVI date string. Falls back to Jul-14/29/30 heuristic."""
+    """Return peak-NDVI date string. Caches result alongside S2 data. Falls back to Jul heuristic."""
     available_dates = sorted(local_date_to_idx.keys())
+
+    # Cache key: sorted date list (proxy for which S2 files are present)
+    cache_path = (
+        Path(s2_paths[0]).parent / "peak_ndvi_date.json"
+        if s2_paths else None
+    )
+    if cache_path and cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                cached = json.load(f)
+            if cached.get("dates_key") == available_dates and cached.get("date"):
+                log.info(f"single_date: peak NDVI date cached → {cached['date']}")
+                return cached["date"]
+        except Exception:
+            pass
 
     if s2_paths and cdl_path:
         try:
@@ -56,6 +71,9 @@ def _find_peak_ndvi_date(local_date_to_idx, s2_paths=None, cdl_path=None):
             if ndvi_scores:
                 best = max(ndvi_scores, key=ndvi_scores.get)
                 log.info(f"single_date: NDVI-selected date={best} (NDVI={ndvi_scores[best]:.4f})")
+                if cache_path:
+                    with open(cache_path, "w") as f:
+                        json.dump({"date": best, "dates_key": available_dates, "ndvi_scores": ndvi_scores}, f)
                 return best
         except Exception as e:
             log.warning(f"single_date: NDVI selection failed ({e}), falling back to Jul heuristic")
@@ -87,6 +105,7 @@ def build_single_date_selected_indices(
     top_k: int | None = 5,
     candidates_json: Path | None = None,
     force: bool = False,
+    best_date: str | None = None,
 ):
     """Single date (peak NDVI) × GSI or RF top-K band union.
 
@@ -102,8 +121,11 @@ def build_single_date_selected_indices(
         Pre-computed candidates JSON (RF variant). None → compute GSI inline.
     force : bool
         Re-run scoped GSI even if cached JSON exists.
+    best_date : str | None
+        Pre-computed peak NDVI date (YYYYMMDD). Skips NDVI scan if provided.
     """
-    best_date = _find_peak_ndvi_date(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
+    if best_date is None:
+        best_date = _find_peak_ndvi_date(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
 
     if candidates_json is not None:
         json_path = Path(candidates_json)

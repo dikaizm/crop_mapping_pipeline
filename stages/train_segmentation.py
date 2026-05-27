@@ -1452,6 +1452,7 @@ def main(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
             top_k=top_k, force=force,
+            best_date=sd_date_key,   # reuse peak date from build_single_date_indices
         )
 
     # ── single_date (RF — scoped to peak date only) ───────────────────────
