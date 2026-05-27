@@ -1350,56 +1350,94 @@ def main(
         raise FileNotFoundError(f"No processed S2 files in {S2_TRAIN_DIR}")
 
     # ── Validate TIF files — drop corrupt and empty-data files ────────────
+    # Cache result to s2_validation_cache.json; invalidated when file set changes.
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    corrupt  = []
-    no_data  = []
-    valid_s2 = []
-    MIN_VALID_FRAC_FILE = 0.01   # <1% valid pixels → skip date
-    VALIDATION_WIN      = 512    # read 512×512 centre sample (not half the image)
+    MIN_VALID_FRAC_FILE = 0.01
+    VALIDATION_WIN      = 512
 
-    def _check_file(path):
+    _val_cache_path = S2_TRAIN_DIR / "s2_validation_cache.json"
+    _val_cache_key  = sorted(Path(p).name for p in s2_processed)
+
+    def _load_validation_cache():
+        if not _val_cache_path.exists():
+            return None
         try:
-            with rasterio.open(path) as src:
-                h, w      = src.height, src.width
-                n_bands   = src.count
-                sz        = min(VALIDATION_WIN, w // 4, h // 4)
-                valid_px, total_px = 0, 0
-                # Check first, middle, and last band to catch corruption anywhere in file
-                check_bands = sorted({1, n_bands // 2, n_bands})
-                for band in check_bands:
-                    for gy in range(3):
-                        for gx in range(3):
-                            ox = int((gx + 0.5) * w / 3) - sz // 2
-                            oy = int((gy + 0.5) * h / 3) - sz // 2
-                            ox = max(0, min(ox, w - sz))
-                            oy = max(0, min(oy, h - sz))
-                            win  = rasterio.windows.Window(ox, oy, sz, sz)
-                            data = src.read(band, window=win).astype(np.float32)
-                            ok   = (data != S2_NODATA) & np.isfinite(data)
-                            valid_px += ok.sum()
-                            total_px += ok.size
-            return path, valid_px / total_px, None
+            with open(_val_cache_path) as f:
+                c = json.load(f)
+            if c.get("files_key") == _val_cache_key:
+                return c
+        except Exception:
+            pass
+        return None
+
+    _cached = _load_validation_cache()
+    if _cached:
+        log.info(f"S2 validation cache hit ({len(_cached['valid'])} valid files)")
+        valid_s2  = [p for p in s2_processed if Path(p).name in set(_cached["valid"])]
+        _corrupt_names = set(_cached.get("corrupt", []))
+        _nodata_names  = {r[0] for r in _cached.get("no_data", [])}
+        corrupt  = [(p, "") for p in s2_processed if Path(p).name in _corrupt_names]
+        no_data  = [(p, r[1]) for p in s2_processed
+                    for r in _cached.get("no_data", []) if r[0] == Path(p).name]
+    else:
+        corrupt  = []
+        no_data  = []
+        valid_s2 = []
+
+        def _check_file(path):
+            try:
+                with rasterio.open(path) as src:
+                    h, w      = src.height, src.width
+                    n_bands   = src.count
+                    sz        = min(VALIDATION_WIN, w // 4, h // 4)
+                    valid_px, total_px = 0, 0
+                    check_bands = sorted({1, n_bands // 2, n_bands})
+                    for band in check_bands:
+                        for gy in range(3):
+                            for gx in range(3):
+                                ox = int((gx + 0.5) * w / 3) - sz // 2
+                                oy = int((gy + 0.5) * h / 3) - sz // 2
+                                ox = max(0, min(ox, w - sz))
+                                oy = max(0, min(oy, h - sz))
+                                win  = rasterio.windows.Window(ox, oy, sz, sz)
+                                data = src.read(band, window=win).astype(np.float32)
+                                ok   = (data != S2_NODATA) & np.isfinite(data)
+                                valid_px += ok.sum()
+                                total_px += ok.size
+                return path, valid_px / total_px, None
+            except Exception as e:
+                return path, 0.0, str(e)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_check_file, p): p for p in s2_processed}
+            for fut in as_completed(futures):
+                path, frac, err = fut.result()
+                if err:
+                    corrupt.append((path, err))
+                elif frac < MIN_VALID_FRAC_FILE:
+                    no_data.append((path, frac))
+                else:
+                    valid_s2.append(path)
+
+        valid_s2.sort()
+
+        try:
+            with open(_val_cache_path, "w") as f:
+                json.dump({
+                    "files_key": _val_cache_key,
+                    "valid":     [Path(p).name for p in valid_s2],
+                    "corrupt":   [Path(p).name for p, _ in corrupt],
+                    "no_data":   [[Path(p).name, frac] for p, frac in no_data],
+                }, f)
+            log.info(f"S2 validation cached → {_val_cache_path.name}")
         except Exception as e:
-            return path, 0.0, str(e)
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_check_file, p): p for p in s2_processed}
-        for fut in as_completed(futures):
-            path, frac, err = fut.result()
-            if err:
-                corrupt.append((path, err))
-            elif frac < MIN_VALID_FRAC_FILE:
-                no_data.append((path, frac))
-            else:
-                valid_s2.append(path)
-
-    valid_s2.sort()   # restore sorted order after parallel completion
+            log.warning(f"Could not write validation cache: {e}")
 
     if corrupt:
         log.error(f"Found {len(corrupt)} corrupt S2 file(s) — re-download before training:")
         for p, err in corrupt:
-            log.error(f"  {p}  ({err})")
+            log.error(f"  {Path(p).name}  ({err})")
         raise RuntimeError(
             f"{len(corrupt)} corrupt S2 file(s) detected. "
             "Re-download:  python stages/fetch_data_v2.py --processed --years <year> --overwrite"
