@@ -327,10 +327,13 @@ def evaluate_test_set(model, loader, num_classes, device):
     all_logits = torch.cat(all_logits)
     all_labels = torch.cat(all_labels)
     preds      = all_logits.argmax(dim=1)
+    per_class_f1 = compute_per_class_f1(all_logits, all_labels, num_classes)
     return {
         "miou":          compute_miou(all_logits, all_labels, num_classes),
         "oa":            (preds == all_labels).float().mean().item(),
+        "mf1":           mean_f1(per_class_f1),
         "per_class_iou": compute_per_class_iou(all_logits, all_labels, num_classes),
+        "per_class_f1":  per_class_f1,
         "preds":         preds,
         "labels":        all_labels,
     }
@@ -1193,6 +1196,7 @@ def run_experiment(
             "best_val_miou": best_miou,
             "best_val_mf1":  best_val_mf1,
             "test_miou":     test_r["miou"],
+            "test_mf1":      test_r["mf1"],
             "test_oa":       test_r["oa"],
             "total_epochs":  len(history),
         })
@@ -1216,9 +1220,17 @@ def run_experiment(
                     f"test_iou_{name.lower().replace('/', '_').replace(' ', '_')}",
                     iou,
                 )
+        for cls_id, f1v in test_r["per_class_f1"].items():
+            if not np.isnan(f1v):
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                mlflow.log_metric(
+                    f"test_f1_{name.lower().replace('/', '_').replace(' ', '_')}",
+                    f1v,
+                )
 
         # ── Log per-class IoU table to console ───────────────────────────────
-        log.info(f"  Test results  mIoU={test_r['miou']:.4f}  OA={test_r['oa']:.4f}")
+        log.info(f"  Test results  mIoU={test_r['miou']:.4f}  mF1={test_r['mf1']:.4f}  OA={test_r['oa']:.4f}")
         log.info(f"  {'Class':<20} {'CDL ID':>6}  {'IoU':>7}")
         log.info(f"  {'-'*38}")
         for cls_id, iou in test_r["per_class_iou"].items():
@@ -1341,6 +1353,7 @@ def run_experiment(
         "in_channels":   in_channels,
         "best_val_miou": round(best_miou,      4),
         "test_miou":     round(test_r["miou"], 4) if not np.isnan(test_r["miou"]) else float("nan"),
+        "test_mf1":      round(test_r["mf1"],  4) if not np.isnan(test_r["mf1"])  else float("nan"),
         "test_oa":       round(test_r["oa"],   4) if not np.isnan(test_r["oa"])   else float("nan"),
         "total_epochs":  len(history),
         "run_id":        run_id,
