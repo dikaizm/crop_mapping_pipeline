@@ -1177,12 +1177,12 @@ def run_experiment(
                 log.info(f"  Early stopping at epoch {epoch + 1}")
                 break
 
-        # ── Test evaluation ───────────────────────────────────────────────────
+        # ── Test evaluation (held-out same-area split) ────────────────────────
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
 
-        # Test done via SPATIAL_TEST_AREAS — no patch-level test set
-        test_r = {"miou": float("nan"), "oa": float("nan"), "per_class_iou": {}}
+        log.info("  Evaluating on held-out test set (same area, random split)...")
+        test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
 
         mlflow.log_metrics({
             "best_val_miou": best_miou,
