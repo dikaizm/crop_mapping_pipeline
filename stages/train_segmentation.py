@@ -529,15 +529,35 @@ class PreloadedDataset(torch.utils.data.Dataset):
         stats_path = imgs_path.with_suffix(".stats.npz") if imgs_path else None
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
-            # Require stats file: if imgs/masks cached but stats missing, the normalisation
-            # is unknown → we can't safely use this cache. Force rebuild by deleting imgs/masks.
+            stale = False
+            stale_reason = ""
+
             if stats_path and not stats_path.exists():
+                stale = True
+                stale_reason = "imgs+masks exist but .stats.npz missing"
+            elif stats_path and stats_path.exists() and channel_stats is not None:
+                # Verify cached stats match the passed-in training stats.
+                # If they differ the cache was built with wrong (e.g. area-specific) stats.
+                d_check = np.load(str(stats_path))
+                cached_means = d_check["means"]
+                if (len(cached_means) != len(channel_stats[0]) or
+                        not np.allclose(cached_means, channel_stats[0], rtol=1e-3, atol=1e-3)):
+                    stale = True
+                    stale_reason = (
+                        f"cached stats differ from training stats "
+                        f"(cached mean[0]={cached_means[0]:.2f} vs "
+                        f"training mean[0]={channel_stats[0][0]:.2f})"
+                    )
+
+            if stale:
                 log.warning(
-                    f"  [{desc}] Cache partial (imgs+masks exist but .stats.npz missing) — "
-                    "deleting stale cache and rebuilding to ensure correct normalisation"
+                    f"  [{desc}] Cache stale ({stale_reason}) — "
+                    "deleting and rebuilding with correct normalisation stats"
                 )
-                imgs_path.unlink(missing_ok=True)
-                masks_path.unlink(missing_ok=True)
+                for p in (imgs_path, masks_path, stats_path):
+                    if p is not None:
+                        p.unlink(missing_ok=True)
+                # fall through to cache-miss rebuild path
             else:
                 log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
                 t0 = time.time()
