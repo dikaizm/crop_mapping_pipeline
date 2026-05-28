@@ -818,13 +818,16 @@ def _evaluate_spatial_area(
                 f1v,
             )
 
-    # Per-class IoU CSV
+    # Per-class metrics CSV (IoU + F1)
     iou_rows = [
         {
             "class_id":   cls_id,
             "cdl_id":     KEEP_CLASSES[cls_id - 1],
             "class_name": CDL_CLASS_NAMES.get(KEEP_CLASSES[cls_id - 1], f"cls{cls_id}"),
             "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
+            "f1":         round(area_r["per_class_f1"].get(cls_id, float("nan")), 4)
+                          if not np.isnan(area_r["per_class_f1"].get(cls_id, float("nan")))
+                          else float("nan"),
         }
         for cls_id, iou in area_r["per_class_iou"].items()
     ]
@@ -1267,23 +1270,26 @@ def run_experiment(
         ax1.set(xlabel="Epoch", ylabel="Loss", title=f"{exp_name} — Loss")
         ax1.legend(); ax1.grid(True)
         ax2.plot(hist_df["epoch"], hist_df["val_miou"], color="green", label="Val mIoU")
-        ax2.axhline(best_miou, linestyle="--", color="gray", label=f"Best={best_miou:.4f}")
-        ax2.set(xlabel="Epoch", ylabel="mIoU", title=f"{exp_name} — mIoU")
+        ax2.plot(hist_df["epoch"], hist_df["val_mf1"],  color="blue",  label="Val mF1", alpha=0.7)
+        ax2.axhline(best_miou, linestyle="--", color="gray", label=f"Best mIoU={best_miou:.4f}")
+        ax2.set(xlabel="Epoch", ylabel="Score", title=f"{exp_name} — mIoU / mF1")
         ax2.legend(); ax2.grid(True)
         plt.tight_layout()
         curve_path = exp_dir / "training_curve.png"
         plt.savefig(curve_path, dpi=150)
         plt.close()
 
-        # Per-class IoU CSV
+        # Per-class metrics CSV (IoU + F1)
         iou_rows = []
         for cls_id, iou in test_r["per_class_iou"].items():
             cdl_id = KEEP_CLASSES[cls_id - 1]
+            f1v    = test_r["per_class_f1"].get(cls_id, float("nan"))
             iou_rows.append({
                 "class_id":   cls_id,
                 "cdl_id":     cdl_id,
                 "class_name": CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}"),
                 "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
+                "f1":         round(f1v, 4) if not np.isnan(f1v) else float("nan"),
             })
         iou_csv = exp_dir / "test_per_class_iou.csv"
         pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
