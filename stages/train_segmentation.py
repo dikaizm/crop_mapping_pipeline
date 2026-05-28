@@ -320,6 +320,7 @@ def evaluate_test_set(model, loader, num_classes, device):
     model.eval()
     all_logits, all_labels = [], []
     for imgs, masks in loader:
+        imgs = torch.nan_to_num(imgs, nan=0.0, posinf=5.0, neginf=-5.0)
         logits = model(imgs.to(device))
         all_logits.append(logits.cpu())
         all_labels.append(masks.cpu())
@@ -528,18 +529,25 @@ class PreloadedDataset(torch.utils.data.Dataset):
         stats_path = imgs_path.with_suffix(".stats.npz") if imgs_path else None
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
-            log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
-            t0 = time.time()
-            self._imgs  = np.load(str(imgs_path), mmap_mode="r")   # memory-mapped, not in RAM
-            self._masks = torch.load(masks_path, map_location="cpu", weights_only=True)
-            gb_disk = imgs_path.stat().st_size / 1e9
-            log.info(f"  [{desc}] mmap ready in {time.time()-t0:.1f}s ({gb_disk:.2f} GB on disk)")
-            if stats_path and stats_path.exists():
+            # Require stats file: if imgs/masks cached but stats missing, the normalisation
+            # is unknown → we can't safely use this cache. Force rebuild by deleting imgs/masks.
+            if stats_path and not stats_path.exists():
+                log.warning(
+                    f"  [{desc}] Cache partial (imgs+masks exist but .stats.npz missing) — "
+                    "deleting stale cache and rebuilding to ensure correct normalisation"
+                )
+                imgs_path.unlink(missing_ok=True)
+                masks_path.unlink(missing_ok=True)
+            else:
+                log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
+                t0 = time.time()
+                self._imgs  = np.load(str(imgs_path), mmap_mode="r")   # memory-mapped, not in RAM
+                self._masks = torch.load(masks_path, map_location="cpu", weights_only=True)
+                gb_disk = imgs_path.stat().st_size / 1e9
+                log.info(f"  [{desc}] mmap ready in {time.time()-t0:.1f}s ({gb_disk:.2f} GB on disk)")
                 d = np.load(str(stats_path))
                 self.channel_stats = (d["means"], d["stds"])
-            else:
-                self.channel_stats = channel_stats
-            return
+                return
 
         log.info(f"  [{desc}] Cache miss → preloading from {len(dataset._s2_srcs)} TIF files …")
         t0 = time.time()
@@ -745,6 +753,12 @@ def _evaluate_spatial_area(
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
     # Use PreloadedDataset for consistent z-score normalisation with training
+    if channel_stats is None:
+        log.warning(f"  Spatial test {area_name}: channel_stats is None — "
+                    "test area will compute its own normalisation stats (WRONG for evaluation!)")
+    else:
+        log.info(f"  Spatial test {area_name}: using training channel_stats "
+                 f"(n_ch={len(channel_stats[0])}, means [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}])")
     area_preloaded = PreloadedDataset(
         area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats,
     )
@@ -797,6 +811,7 @@ def _evaluate_spatial_area(
         pred_map, _ = run_full_inference(
             model, area_s2_filtered, area_idx_local,
             patch_size=PATCH_SIZE, stride=PATCH_SIZE,
+            channel_stats=channel_stats,
         )
         seg_path = exp_dir / f"{area_name}_segmentation_map.png"
         save_segmentation_map(
@@ -911,6 +926,15 @@ def run_experiment(
         train_year_datasets.append(preloaded)
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
+    if channel_stats is None:
+        raise RuntimeError(
+            "channel_stats is None after training loop — PreloadedDataset cache may be "
+            "incomplete (imgs/masks cached but .stats.npz missing). Delete preload_cache "
+            "and re-run to regenerate normalisation stats."
+        )
+    log.info(f"  channel_stats: means range [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}]  "
+             f"stds range [{channel_stats[1].min():.1f}, {channel_stats[1].max():.1f}]  "
+             f"n_ch={len(channel_stats[0])}")
     train_val_ds = ConcatDataset(train_year_datasets)
 
     gen = torch.Generator().manual_seed(SEED)
@@ -1224,7 +1248,8 @@ def run_experiment(
             log.info(f"  Running full-image inference for {exp_name}...")
             gt_map, _    = load_gt_remap(str(test_cdl))
             pred_map, _  = run_full_inference(
-                model, test_s2_filtered, test_idx_local, patch_size=PATCH_SIZE, stride=PATCH_SIZE
+                model, test_s2_filtered, test_idx_local, patch_size=PATCH_SIZE, stride=PATCH_SIZE,
+                channel_stats=channel_stats,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             save_segmentation_map(
@@ -1393,8 +1418,14 @@ def upload_models_to_gdrive(run_name, model_files):
         return {}
 
 
-def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256):
-    """Tiled inference — reads one window at a time, never loads full rasters."""
+def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256,
+                       channel_stats=None):
+    """Tiled inference — reads one window at a time, never loads full rasters.
+
+    channel_stats: (means, stds) arrays of shape (K,) for global z-score normalisation.
+        Must match the stats used during training. If None, falls back to per-patch
+        per-channel min-max (legacy, produces wrong results for z-score trained models).
+    """
     with rasterio.open(s2_paths[0]) as src:
         H, W    = src.height, src.width
         profile = dict(src.profile)
@@ -1405,6 +1436,14 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
     n_cols   = (W + stride - 1) // stride
     total    = n_rows * n_cols
     K        = len(band_indices)
+
+    if channel_stats is None:
+        log.warning("run_full_inference: channel_stats is None — falling back to per-patch "
+                    "min-max (results may be wrong for z-score trained models)")
+        means_inf = stds_inf = None
+    else:
+        means_inf = channel_stats[0].astype(np.float32)  # (K,)
+        stds_inf  = channel_stats[1].astype(np.float32)  # (K,)
 
     model.eval()
     done = 0
@@ -1424,17 +1463,23 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
                         except Exception:
                             arr = np.zeros((src.count, ph, pw), dtype=np.float32)
                         arr[arr == S2_NODATA] = 0.0
+                        arr[~np.isfinite(arr)] = 0.0
                         bands.append(arr)
 
                     patch = np.concatenate(bands, axis=0)[band_indices]  # (K, ph, pw)
 
-                    # Per-channel min-max normalisation (matches RasterPatchDataset)
-                    for ch in range(K):
-                        lo, hi = float(patch[ch].min()), float(patch[ch].max())
-                        if hi > lo:
-                            patch[ch] = (patch[ch] - lo) / (hi - lo)
-                        else:
-                            patch[ch] = 0.0
+                    if means_inf is not None:
+                        # Global z-score normalisation — matches PreloadedDataset training norm
+                        patch = (patch - means_inf[:, None, None]) / (stds_inf[:, None, None] + 1e-7)
+                        patch = np.clip(patch, -5.0, 5.0)
+                    else:
+                        # Legacy per-channel per-patch min-max fallback
+                        for ch in range(K):
+                            lo, hi = float(patch[ch].min()), float(patch[ch].max())
+                            if hi > lo:
+                                patch[ch] = (patch[ch] - lo) / (hi - lo)
+                            else:
+                                patch[ch] = 0.0
 
                     # Pad to patch_size if at border
                     if ph < patch_size or pw < patch_size:
