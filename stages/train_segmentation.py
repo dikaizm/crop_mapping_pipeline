@@ -873,6 +873,7 @@ def run_experiment(
     loss_version="v1",      # "v1" = WeightedCrossEntropy | "v2" = PhenologyAwareLoss
     force=False,
     skip_viz=False,
+    upload_executor=None,   # ThreadPoolExecutor for async GDrive upload; None = synchronous
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -1342,12 +1343,23 @@ def run_experiment(
             if area_r is not None:
                 spatial_results[area["name"]] = area_r
 
-        gdrive_links = upload_models_to_gdrive(
-            run_name=f"{exp_name}_{run_timestamp}",
-            model_files=[best_ckpt, last_ckpt],
-        )
-        for fname, link in gdrive_links.items():
-            mlflow.set_tag(f"gdrive_{fname}", link)
+        _upload_run_name = f"{exp_name}_{run_timestamp}"
+        if upload_executor is not None:
+            upload_future = upload_executor.submit(
+                upload_models_to_gdrive,
+                run_name=_upload_run_name,
+                model_files=[best_ckpt, last_ckpt],
+            )
+            mlflow.set_tag("gdrive_upload", "pending")
+            log.info(f"  GDrive upload submitted as background task for {_upload_run_name}")
+        else:
+            upload_future = None
+            gdrive_links = upload_models_to_gdrive(
+                run_name=_upload_run_name,
+                model_files=[best_ckpt, last_ckpt],
+            )
+            for fname, link in gdrive_links.items():
+                mlflow.set_tag(f"gdrive_{fname}", link)
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
         mlflow.log_artifact(str(iou_csv))
@@ -1376,6 +1388,7 @@ def run_experiment(
         "total_epochs":  len(history),
         "run_id":        run_id,
         "ckpt":          str(best_ckpt),
+        "upload_future": upload_future,
     }
     for aname, ar in spatial_results.items():
         summary[f"{aname}_miou"] = round(ar["miou"], 4)
@@ -1938,6 +1951,7 @@ def main(
     # ── Run experiments — one top-level run per exp_key, nested run per arch ─
     all_results = []
     exp_groups: dict = {}
+    upload_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gdrive_upload")
     for exp_key, arch, band_idx, band_names, description, extra_kw in plan:
         exp_groups.setdefault(exp_key, []).append((arch, band_idx, band_names, description, extra_kw))
 
@@ -1971,10 +1985,28 @@ def main(
                     loss_version=loss_version,
                     force=force,
                     skip_viz=skip_viz,
+                    upload_executor=upload_executor,
                     **extra_kw,
                 )
                 if result is not None:
                     all_results.append(result)
+
+    # ── Resolve GDrive upload futures and update MLflow tags ─────────────────
+    upload_executor.shutdown(wait=False)
+    pending = [(r["run_id"], r["upload_future"]) for r in all_results if r.get("upload_future")]
+    if pending:
+        log.info(f"Waiting for {len(pending)} GDrive upload(s) to complete...")
+        client = mlflow.MlflowClient()
+        for run_id, future in pending:
+            try:
+                links = future.result()
+                for fname, link in links.items():
+                    client.set_tag(run_id, f"gdrive_{fname}", link)
+                client.set_tag(run_id, "gdrive_upload", "done")
+                log.info(f"  GDrive upload done — run_id={run_id}")
+            except Exception as e:
+                log.warning(f"  GDrive upload failed for run_id={run_id}: {e}")
+                client.set_tag(run_id, "gdrive_upload", f"failed: {e}")
 
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
