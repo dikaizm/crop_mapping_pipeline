@@ -1,5 +1,5 @@
 {
-  "run_ts": "20260528-013939",
+  "run_ts": "20260528-151148",
   "selector": "gsi_direct",
   "top_k": 20,
   "n_union": 75,
