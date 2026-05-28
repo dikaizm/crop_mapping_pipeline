@@ -798,6 +798,7 @@ def _evaluate_spatial_area(
     # MLflow metrics prefixed with area name
     mlflow.log_metrics({
         f"{area_name}_miou": area_r["miou"],
+        f"{area_name}_mf1":  area_r["mf1"],
         f"{area_name}_oa":   area_r["oa"],
     })
     for cls_id, iou in area_r["per_class_iou"].items():
@@ -807,6 +808,14 @@ def _evaluate_spatial_area(
             mlflow.log_metric(
                 f"{area_name}_iou_{cname.lower().replace('/', '_').replace(' ', '_')}",
                 iou,
+            )
+    for cls_id, f1v in area_r["per_class_f1"].items():
+        if not np.isnan(f1v):
+            cdl_id = KEEP_CLASSES[cls_id - 1]
+            cname  = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+            mlflow.log_metric(
+                f"{area_name}_f1_{cname.lower().replace('/', '_').replace(' ', '_')}",
+                f1v,
             )
 
     # Per-class IoU CSV
@@ -1050,6 +1059,7 @@ def run_experiment(
         # ── Training loop ─────────────────────────────────────────────────────
         best_miou              = 0.0
         best_val_mf1           = 0.0
+        best_val_oa            = 0.0
         best_val_per_class_iou = {}
         best_val_per_class_f1  = {}
         no_improve             = 0
@@ -1131,6 +1141,7 @@ def run_experiment(
             if val_m["miou"] > best_miou + EARLY_STOP_DELTA:
                 best_miou              = val_m["miou"]
                 best_val_mf1           = val_m["mf1"]
+                best_val_oa            = val_m["oa"]
                 best_val_per_class_iou = val_m["per_class_iou"]
                 best_val_per_class_f1  = val_m["per_class_f1"]
                 no_improve = 0
@@ -1195,6 +1206,7 @@ def run_experiment(
         mlflow.log_metrics({
             "best_val_miou": best_miou,
             "best_val_mf1":  best_val_mf1,
+            "best_val_oa":   best_val_oa,
             "test_miou":     test_r["miou"],
             "test_mf1":      test_r["mf1"],
             "test_oa":       test_r["oa"],
