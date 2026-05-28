@@ -924,6 +924,8 @@ def run_experiment(
     train_year_datasets_raw = []   # RasterPatchDataset — for _patch_weights (needs _cdl etc.)
     train_year_datasets     = []   # PreloadedDataset  — for DataLoader
     channel_stats = None           # computed from first year, reused for all years + test areas
+    primary_s2_filtered = None     # S2 paths for primary year (used for segmentation map)
+    primary_idx_local   = None     # band indices for primary year
     for yr in TRAIN_YEARS:
         yr_s2  = _s2_for_year(s2_processed, yr)
         yr_cdl = CDL_TRAIN
@@ -932,6 +934,9 @@ def run_experiment(
             continue
         yr_idx, _ = _yr_idx(yr)
         yr_s2_filtered, yr_idx_local = _filter_s2_by_band_indices(yr_s2, yr_idx)
+        if primary_s2_filtered is None:
+            primary_s2_filtered = yr_s2_filtered
+            primary_idx_local   = yr_idx_local
         ds_raw = RasterPatchDataset(
             s2_paths=yr_s2_filtered, cdl_path=str(yr_cdl),
             patch_size=PATCH_SIZE, stride=STRIDE,
@@ -1264,7 +1269,7 @@ def run_experiment(
         if "preds" in test_r and "labels" in test_r:
             _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
 
-        # Segmentation map PNG (full-tile inference — skipped in single-year patch-split mode)
+        # Segmentation map PNG (full-tile inference)
         seg_path = None
         if not skip_viz and test_s2_filtered is not None:
             log.info(f"  Running full-image inference for {exp_name}...")
@@ -1277,6 +1282,21 @@ def run_experiment(
             save_segmentation_map(
                 pred_map, gt_map,
                 title=f"{exp_name} — Test Segmentation ({TEST_YEAR})",
+                save_path=str(seg_path),
+            )
+            del pred_map, gt_map
+        elif not skip_viz and primary_s2_filtered is not None:
+            log.info(f"  Running full-image inference on training area for {exp_name}...")
+            gt_map, _   = load_gt_remap(str(CDL_TRAIN))
+            pred_map, _ = run_full_inference(
+                model, primary_s2_filtered, primary_idx_local,
+                patch_size=PATCH_SIZE, stride=PATCH_SIZE,
+                channel_stats=channel_stats,
+            )
+            seg_path = exp_dir / "test_segmentation_map.png"
+            save_segmentation_map(
+                pred_map, gt_map,
+                title=f"{exp_name} — Segmentation Map ({TRAIN_YEARS[0]})",
                 save_path=str(seg_path),
             )
             del pred_map, gt_map
