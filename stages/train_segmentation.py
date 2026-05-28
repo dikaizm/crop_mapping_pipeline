@@ -1467,17 +1467,34 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
     pred_ds = pred_map[::downsample, ::downsample]
     gt_ds   = gt_map[::downsample, ::downsample]
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-    axes[0].imshow(gt_ds,   cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+    # Error map: 0=background, 1=correct crop, 2=incorrect crop
+    error = np.zeros_like(gt_ds, dtype=np.uint8)
+    crop_mask = gt_ds > 0
+    error[crop_mask & (pred_ds == gt_ds)] = 1   # correct
+    error[crop_mask & (pred_ds != gt_ds)] = 2   # incorrect
+    error_cmap = ListedColormap(["#e0e0e0", "#ffffff", "#2255cc"])  # bg / correct / incorrect
+    error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
+
+    fig, axes = plt.subplots(1, 3, figsize=(22, 8))
+    axes[0].imshow(gt_ds,   cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
     axes[0].set_title("Ground Truth (CDL)", fontsize=12, fontweight="bold")
     axes[0].axis("off")
-    axes[1].imshow(pred_ds, cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+    axes[1].imshow(pred_ds, cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
     axes[1].set_title("Prediction",         fontsize=12, fontweight="bold")
     axes[1].axis("off")
+    axes[2].imshow(error,   cmap=error_cmap, norm=error_norm, interpolation="nearest")
+    axes[2].set_title("Correct / Incorrect", fontsize=12, fontweight="bold")
+    axes[2].axis("off")
 
-    patches = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
-               for i in range(1, NUM_CLASSES)]
-    fig.legend(handles=patches, loc="lower center", ncol=5, fontsize=9,
+    crop_patches = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
+                    for i in range(1, NUM_CLASSES)]
+    error_patches = [
+        mpatches.Patch(color="#ffffff", label="Correct",   edgecolor="#aaaaaa", linewidth=0.5),
+        mpatches.Patch(color="#2255cc", label="Incorrect"),
+        mpatches.Patch(color="#e0e0e0", label="Background"),
+    ]
+    fig.legend(handles=crop_patches + error_patches, loc="lower center",
+               ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
                bbox_to_anchor=(0.5, -0.01), frameon=True)
     plt.suptitle(title, fontsize=13, y=1.01)
     plt.tight_layout()
