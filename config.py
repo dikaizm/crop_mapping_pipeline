@@ -105,6 +105,7 @@ MLFLOW_EXPERIMENT_TRAIN_DIRECT = "cropmap_segmentation_s2_direct"
 MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR = "cropmap_segmentation_s2_single_year"
 MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
 MLFLOW_EXPERIMENT_TRAIN_SPATIAL     = "cropmap_segmentation_s2_spatial"
+MLFLOW_EXPERIMENT_TRAIN_SAME_AREA   = "cropmap_segmentation_s2_same_area"
 
 # ── GSI scoring hyperparameters ───────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
