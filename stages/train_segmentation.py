@@ -456,7 +456,7 @@ def _patch_weights(datasets: list) -> np.ndarray:
 # ── Augmentation wrapper ───────────────────────────────────────────────────────
 
 class AugmentedSubset(torch.utils.data.Dataset):
-    """Wraps a Subset and applies random H/V flips + 90° rotations to (img, mask)."""
+    """Wraps a Subset and applies geometric + spectral augmentations to (img, mask)."""
 
     def __init__(self, subset):
         self.subset = subset
@@ -465,20 +465,42 @@ class AugmentedSubset(torch.utils.data.Dataset):
         return len(self.subset)
 
     def __getitem__(self, idx):
-        img, mask = self.subset[idx]   # img: (C,H,W) float, mask: (H,W) long
-        # Random horizontal flip
+        img, mask = self.subset[idx]   # img: (C,H,W) float32 z-score, mask: (H,W) long
+
+        # ── Geometric ────────────────────────────────────────────────────────
         if torch.rand(1).item() > 0.5:
             img  = torch.flip(img,  [-1])
             mask = torch.flip(mask, [-1])
-        # Random vertical flip
         if torch.rand(1).item() > 0.5:
             img  = torch.flip(img,  [-2])
             mask = torch.flip(mask, [-2])
-        # Random 90° rotation (k ∈ {0,1,2,3})
         k = torch.randint(0, 4, (1,)).item()
         if k:
             img  = torch.rot90(img,  k, [-2, -1])
             mask = torch.rot90(mask, k, [-2, -1])
+
+        # ── Spectral jitter: per-channel scale ∈ [0.9,1.1] + offset ∈ [-0.1,0.1] ──
+        C = img.shape[0]
+        scale  = 0.9 + 0.2 * torch.rand(C, 1, 1)
+        offset = (torch.rand(C, 1, 1) - 0.5) * 0.2
+        img = img * scale + offset
+
+        # ── Random channel dropout (p=0.05 per channel) ──────────────────────
+        drop_mask = (torch.rand(C, 1, 1) > 0.05).float()
+        img = img * drop_mask
+
+        # ── Gaussian noise std=0.05 ───────────────────────────────────────────
+        img = img + torch.randn_like(img) * 0.05
+
+        # ── Random erasing (~10–20% patch area) ──────────────────────────────
+        if torch.rand(1).item() < 0.5:
+            H, W    = img.shape[-2], img.shape[-1]
+            rh      = int(H * (0.1 + 0.1 * torch.rand(1).item()))
+            rw      = int(W * (0.1 + 0.1 * torch.rand(1).item()))
+            r0      = torch.randint(0, H - rh + 1, (1,)).item()
+            c0      = torch.randint(0, W - rw + 1, (1,)).item()
+            img[:, r0:r0 + rh, c0:c0 + rw] = 0.0
+
         return img, mask
 
 
@@ -496,8 +518,14 @@ class PreloadedDataset(torch.utils.data.Dataset):
     Masks stored as int64 .pt (typically <1 GB, always in RAM).
     """
 
-    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None):
+    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None, channel_stats=None):
+        """
+        channel_stats: (means, stds) both shape (n_ch,) float32 for global z-score normalisation.
+            If None, stats are computed from the raw data during preloading and cached.
+            Pass the same stats for all years + test areas for consistent normalisation.
+        """
         imgs_path, masks_path = self._cache_paths(dataset, cache_dir) if cache_dir else (None, None)
+        stats_path = imgs_path.with_suffix(".stats.npz") if imgs_path else None
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
             log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
@@ -506,6 +534,11 @@ class PreloadedDataset(torch.utils.data.Dataset):
             self._masks = torch.load(masks_path, map_location="cpu", weights_only=True)
             gb_disk = imgs_path.stat().st_size / 1e9
             log.info(f"  [{desc}] mmap ready in {time.time()-t0:.1f}s ({gb_disk:.2f} GB on disk)")
+            if stats_path and stats_path.exists():
+                d = np.load(str(stats_path))
+                self.channel_stats = (d["means"], d["stds"])
+            else:
+                self.channel_stats = channel_stats
             return
 
         log.info(f"  [{desc}] Cache miss → preloading from {len(dataset._s2_srcs)} TIF files …")
@@ -570,18 +603,36 @@ class PreloadedDataset(torch.utils.data.Dataset):
                         buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
                 del arr
 
-        # Per-patch normalisation in float32 chunks to avoid float16 precision loss
-        # on raw DN values (0–10000 range). Process CHUNK_PATCHES at a time → bounded RAM.
+        # Global z-score normalisation. If channel_stats not provided, compute from buf
+        # (two-pass: fill raw → compute stats → normalise). Process CHUNK_PATCHES at a
+        # time → bounded RAM. float16 range ±65504 comfortably holds clipped z-scores.
         CHUNK = 128
+        if channel_stats is None:
+            log.info(f"  [{desc}] Computing global channel stats from {n} patches …")
+            ch_sums  = np.zeros(n_ch, dtype=np.float64)
+            ch_sums2 = np.zeros(n_ch, dtype=np.float64)
+            ch_cnt   = 0
+            for start in range(0, n, CHUNK):
+                end   = min(start + CHUNK, n)
+                flat  = buf[start:end].astype(np.float64).reshape(end - start, n_ch, -1)
+                ch_sums  += flat.sum(axis=(0, 2))
+                ch_sums2 += (flat ** 2).sum(axis=(0, 2))
+                ch_cnt   += (end - start) * ps * ps
+            means = (ch_sums / ch_cnt).astype(np.float32)
+            stds  = np.sqrt(np.maximum(ch_sums2 / ch_cnt - means.astype(np.float64) ** 2, 0)).astype(np.float32)
+            stds  = np.where(stds < 1.0, 1.0, stds)   # guard near-zero std (nodata-filled channels)
+            channel_stats = (means, stds)
+            log.info(f"  [{desc}] Stats  mean range [{means.min():.1f}, {means.max():.1f}]"
+                     f"  std range [{stds.min():.1f}, {stds.max():.1f}]")
+
+        means_b = channel_stats[0][np.newaxis, :, np.newaxis, np.newaxis]  # (1,C,1,1)
+        stds_b  = channel_stats[1][np.newaxis, :, np.newaxis, np.newaxis]
         for start in range(0, n, CHUNK):
             end   = min(start + CHUNK, n)
-            chunk = buf[start:end].astype(np.float32)          # (chunk, C, H, W) in RAM
-            lo    = chunk.min(axis=(-2, -1), keepdims=True)
-            hi    = chunk.max(axis=(-2, -1), keepdims=True)
-            rng   = np.where(hi > lo, hi - lo, 1.0)
-            chunk -= lo
-            chunk /= rng
-            buf[start:end] = chunk.astype(np.float16)          # write back to disk
+            chunk = buf[start:end].astype(np.float32)
+            chunk = (chunk - means_b) / (stds_b + 1e-7)
+            chunk = np.clip(chunk, -5.0, 5.0)           # clip outliers; float16 safe
+            buf[start:end] = chunk.astype(np.float16)
         buf.flush()
 
         masks = [
@@ -595,10 +646,14 @@ class PreloadedDataset(torch.utils.data.Dataset):
         elapsed = time.time() - t0
         log.info(f"  [{desc}] Preloaded in {elapsed:.1f}s — {gb_alloc:.1f} GB float16 on disk")
 
+        self.channel_stats = channel_stats
+
         if imgs_path:
             del buf  # close write-mode memmap before rename (WSL/NTFS: open handle blocks rename+reopen)
             _buf_path.rename(imgs_path)
             torch.save(self._masks, masks_path)
+            if stats_path and channel_stats is not None:
+                np.savez(str(stats_path), means=channel_stats[0], stds=channel_stats[1])
             log.info(f"  [{desc}] Cached → {imgs_path.name} + {masks_path.name}")
             self._imgs = np.load(str(imgs_path), mmap_mode="r")
         else:
@@ -615,7 +670,8 @@ class PreloadedDataset(torch.utils.data.Dataset):
             "bands":          list(dataset.band_indices) if dataset.band_indices is not None else None,
             "stride":         getattr(dataset, "stride", None),
             "min_valid_frac": getattr(dataset, "min_valid_frac", None),
-            "n_patches":      len(dataset.patches),  # changes with KEEP_CLASSES → prevents stale cache
+            "n_patches":      len(dataset.patches),
+            "norm":           "zscore_v1",  # invalidates old per-patch min-max caches
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         base = Path(cache_dir) / f"preload_{h}"
@@ -639,6 +695,7 @@ def _evaluate_spatial_area(
     exp_name: str,
     exp_dir: Path,
     skip_viz: bool = False,
+    channel_stats: "tuple | None" = None,
 ) -> "dict | None":
     """Evaluate model on one held-out spatial test area.
 
@@ -687,7 +744,11 @@ def _evaluate_spatial_area(
         keep_classes=KEEP_CLASSES, remap_lut=REMAP_LUT,
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
-    area_dl = DataLoader(area_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    # Use PreloadedDataset for consistent z-score normalisation with training
+    area_preloaded = PreloadedDataset(
+        area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats,
+    )
+    area_dl = DataLoader(area_preloaded, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
     log.info(f"  [{area_name}] mIoU={area_r['miou']:.4f}  OA={area_r['oa']:.4f}")
@@ -827,6 +888,7 @@ def run_experiment(
     # ── Year-based dataset split ──────────────────────────────────────────────
     train_year_datasets_raw = []   # RasterPatchDataset — for _patch_weights (needs _cdl etc.)
     train_year_datasets     = []   # PreloadedDataset  — for DataLoader
+    channel_stats = None           # computed from first year, reused for all years + test areas
     for yr in TRAIN_YEARS:
         yr_s2  = _s2_for_year(s2_processed, yr)
         yr_cdl = CDL_TRAIN
@@ -843,7 +905,10 @@ def run_experiment(
         )
         log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
         train_year_datasets_raw.append(ds_raw)
-        train_year_datasets.append(PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR))
+        preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats)
+        if channel_stats is None:
+            channel_stats = preloaded.channel_stats  # stats from first year, reused for all others
+        train_year_datasets.append(preloaded)
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     train_val_ds = ConcatDataset(train_year_datasets)
@@ -1174,7 +1239,8 @@ def run_experiment(
         log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
         for area in SPATIAL_TEST_AREAS:
             area_r = _evaluate_spatial_area(
-                model, area, band_names_list, exp_name, exp_dir, skip_viz=skip_viz,
+                model, area, band_names_list, exp_name, exp_dir,
+                skip_viz=skip_viz, channel_stats=channel_stats,
             )
             if area_r is not None:
                 spatial_results[area["name"]] = area_r
@@ -1955,7 +2021,7 @@ if __name__ == "__main__":
             mlflow.set_tag("eval_only", "true")
             mlflow.set_tag("checkpoint", str(ckpt_path))
             for area in SPATIAL_TEST_AREAS:
-                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir)
+                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir, channel_stats=None)
         sys.exit(0)
 
     top_k_list = args.top_k or [None]
