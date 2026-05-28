@@ -129,7 +129,7 @@ SPATIAL_TEST_AREAS = [
 # ── Training hyperparameters ───────────────────────────────────────────────────
 TRAIN_YEARS    = ["2024"]
 TEST_YEAR      = "2024"
-PATCH_SIZE     = 256
+PATCH_SIZE     = 128
 STRIDE         = 128
 MIN_VALID_FRAC = 0.1
 BATCH_SIZE     = 8
