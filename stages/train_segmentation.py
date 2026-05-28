@@ -65,7 +65,7 @@ from crop_mapping_pipeline.config import (
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
     TRAIN_YEARS, TEST_YEAR, SPATIAL_TEST_AREAS,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
-    VAL_FRAC, SEED, ARCH_CFG,
+    VAL_FRAC, TEST_FRAC, SEED, ARCH_CFG,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
@@ -959,12 +959,13 @@ def run_experiment(
 
     gen = torch.Generator().manual_seed(SEED)
 
-    # 2-way split: train/val from main area; test via held-out SPATIAL_TEST_AREAS
+    # 3-way random split: train / val (early stopping) / test (held-out, same area)
+    # Spatial test areas (test_a/test_b) evaluated separately as geographic generalization.
     n_total = len(train_val_ds)
-    n_val   = max(1, int(VAL_FRAC * n_total))
-    n_train = n_total - n_val
-    train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
-    test_ds          = val_ds   # unused placeholder for DataLoader construction
+    n_val   = max(1, int(VAL_FRAC  * n_total))
+    n_test  = max(1, int(TEST_FRAC * n_total))
+    n_train = n_total - n_val - n_test
+    train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
     test_s2_filtered = None
     test_idx_local   = None
 
@@ -981,7 +982,7 @@ def run_experiment(
     train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
     val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    log.info(f"  Patches: {n_train:,} train (augmented) / {n_val:,} val [spatial test via test_a/test_b]")
+    log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (all same area, random split)")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
     model     = build_model(arch, in_channels, NUM_CLASSES)
@@ -1028,7 +1029,8 @@ def run_experiment(
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
             "val_patches":    n_val,
-            "test_patches":   len(test_ds),
+            "test_patches":   n_test,
+            "split":          "random_3way",
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),
