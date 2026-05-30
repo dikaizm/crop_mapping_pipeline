@@ -1540,18 +1540,15 @@ def run_experiment(
 
 # ── Full-image inference & visualization ─────────────────────────────────────
 
+# Colors aligned to KEEP_CLASSES = [3, 24, 36, 54, 75, 76]
 CROP_COLORS = [
     "#000000",  # 0  background
-    "#1E90FF",  # 1  Rice
-    "#FFD700",  # 2  Sunflower
-    "#8B4513",  # 3  Winter Wheat
-    "#98FB98",  # 4  Alfalfa
-    "#A9A9A9",  # 5  Other Hay
-    "#FF6347",  # 6  Tomatoes
-    "#800080",  # 7  Grapes
-    "#FF8C00",  # 8  Almonds
-    "#228B22",  # 9  Walnuts
-    "#9370DB",  # 10 Plums
+    "#1E90FF",  # 1  Rice          — DodgerBlue
+    "#FFD700",  # 2  Winter Wheat  — Gold
+    "#228B22",  # 3  Alfalfa       — ForestGreen
+    "#FF6347",  # 4  Tomatoes      — Tomato
+    "#D2B48C",  # 5  Almonds       — Tan
+    "#8B4513",  # 6  Walnuts       — SaddleBrown
 ]
 CLASS_LABELS = ["Background"] + [CDL_CLASS_NAMES[c] for c in KEEP_CLASSES]
 SEG_CMAP     = ListedColormap(CROP_COLORS)
