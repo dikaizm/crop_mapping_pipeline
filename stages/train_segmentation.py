@@ -70,7 +70,9 @@ from crop_mapping_pipeline.config import (
     SELECT_TOP_K_PER_CROP,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
-from crop_mapping_pipeline.stages.losses import build_loss_v1, build_loss_v2, PhenologyAwareLoss
+from crop_mapping_pipeline.stages.losses import (
+    build_loss_v1, build_loss_v2, build_loss_v3, PhenologyAwareLoss,
+)
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
 
@@ -182,8 +184,11 @@ from crop_mapping_pipeline.config import (
 
 # ── Class weights ─────────────────────────────────────────────────────────────
 
-def compute_class_weights(cdl_path=None):
-    """Inverse-frequency weights from CDL (train area). Caches result alongside CDL."""
+def compute_class_weights(cdl_path=None, return_counts=False):
+    """Inverse-frequency weights from CDL (train area). Caches result alongside CDL.
+
+    If return_counts=True, returns (weights_tensor, counts_array).
+    """
     ref_cdl   = Path(cdl_path) if cdl_path else CDL_TRAIN
     cache_key = {"cdl": str(ref_cdl), "keep_classes": KEEP_CLASSES, "num_classes": NUM_CLASSES}
     cache_h   = hashlib.sha256(json.dumps(cache_key, sort_keys=True).encode()).hexdigest()[:12]
@@ -192,9 +197,15 @@ def compute_class_weights(cdl_path=None):
     if cache_path.exists():
         try:
             with open(cache_path) as f:
-                w = json.load(f)["weights"]
+                d = json.load(f)
+            w = d["weights"]
+            c = d.get("class_counts")
             log.info(f"Class weights cache hit → {cache_path.name}")
-            return torch.tensor(w, dtype=torch.float32)
+            wt = torch.tensor(w, dtype=torch.float32)
+            if return_counts and c is not None:
+                return wt, np.asarray(c, dtype=np.float64)
+            if not return_counts:
+                return wt
         except Exception:
             pass
 
@@ -214,7 +225,10 @@ def compute_class_weights(cdl_path=None):
         json.dump({"weights": weights.tolist(), "class_counts": class_counts.tolist()}, f)
     log.info(f"Class weights cached → {cache_path.name}")
 
-    return torch.tensor(weights, dtype=torch.float32)
+    wt = torch.tensor(weights, dtype=torch.float32)
+    if return_counts:
+        return wt, class_counts
+    return wt
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -989,7 +1003,8 @@ def run_experiment(
     description,
     s2_processed,
     class_weights_tensor,
-    loss_version="v1",      # "v1" = WeightedCrossEntropy | "v2" = PhenologyAwareLoss
+    class_counts=None,      # required for v3 effective-number weights
+    loss_version="v1",      # "v1" = WeightedCE | "v2" = PhenologyAware | "v3" = FocalCE+FocalTversky
     force=False,
     skip_viz=False,
     no_preload=False,       # skip disk preload cache; use on-the-fly z-score normalisation
@@ -1156,6 +1171,14 @@ def run_experiment(
             f"  Loss v2 — PhenologyAwareLoss "
             f"(Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})"
         )
+    elif loss_version == "v3":
+        criterion = build_loss_v3(
+            class_counts=class_counts,
+            beta=0.999, gamma_focal=2.0,
+            tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
+            ce_weight=0.6, ft_weight=0.4,
+        ).to(DEVICE)
+        log.info("  Loss v3 — FocalCE + FocalTversky (Effective-Number weights, β=0.999)")
     else:
         criterion = build_loss_v1(class_weights_tensor.to(DEVICE))
         log.info("  Loss v1 — WeightedCrossEntropy")
@@ -2025,7 +2048,7 @@ def main(
         log.info(f"rf (k={top_k or 'all'}): {len(rf_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
-    cw_tensor = compute_class_weights()
+    cw_tensor, cw_counts = compute_class_weights(return_counts=True)
     log.info("Class weights computed")
 
     # ── Build experiment registry & plan ───────────────────────────────────
@@ -2097,6 +2120,7 @@ def main(
                     description=description,
                     s2_processed=s2_processed,
                     class_weights_tensor=cw_tensor,
+                    class_counts=cw_counts,
                     loss_version=loss_version,
                     force=force,
                     skip_viz=skip_viz,
@@ -2202,7 +2226,7 @@ if __name__ == "__main__":
         help="Which architectures to run (default: all)",
     )
     parser.add_argument(
-        "--loss-version", choices=["v1", "v2"], default="v1",
+        "--loss-version", choices=["v1", "v2", "v3"], default="v1",
         help="Loss function version: v1=WeightedCrossEntropy (default), v2=PhenologyAwareLoss",
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
