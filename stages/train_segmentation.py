@@ -717,6 +717,48 @@ class PreloadedDataset(torch.utils.data.Dataset):
         return img, self._masks[idx]
 
 
+# ── No-preload: on-the-fly normalisation ─────────────────────────────────────
+
+class NormalizedDataset(torch.utils.data.Dataset):
+    """Thin z-score wrapper around any (img, mask) Dataset — no disk cache."""
+
+    def __init__(self, dataset, channel_stats):
+        self.dataset = dataset
+        means, stds = channel_stats
+        self.means = torch.tensor(means, dtype=torch.float32).view(-1, 1, 1)
+        self.stds  = torch.tensor(stds,  dtype=torch.float32).view(-1, 1, 1)
+        self.channel_stats = channel_stats
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, mask = self.dataset[idx]
+        if not isinstance(img, torch.Tensor):
+            img = torch.tensor(img, dtype=torch.float32)
+        img = img.float()
+        img = (img - self.means) / (self.stds + 1e-7)
+        img = img.clamp(-5.0, 5.0)
+        return img, mask
+
+
+def _estimate_channel_stats(dataset, n_samples=512):
+    """Sample n_samples patches to estimate per-channel mean/std (no full preload)."""
+    rng = np.random.default_rng(SEED)
+    indices = rng.choice(len(dataset), min(n_samples, len(dataset)), replace=False)
+    patch_means = []
+    patch_vars  = []
+    for i in indices:
+        img, _ = dataset[i]
+        arr = img.numpy().astype(np.float32) if isinstance(img, torch.Tensor) else np.asarray(img, dtype=np.float32)
+        patch_means.append(arr.mean(axis=(1, 2)))
+        patch_vars.append(arr.var(axis=(1, 2)))
+    means = np.stack(patch_means).mean(axis=0).astype(np.float32)
+    stds  = np.sqrt(np.stack(patch_vars).mean(axis=0)).astype(np.float32)
+    stds  = np.where(stds < 1.0, 1.0, stds)
+    return means, stds
+
+
 # ── Spatial test area evaluation ─────────────────────────────────────────────
 
 def _evaluate_spatial_area(
@@ -727,6 +769,7 @@ def _evaluate_spatial_area(
     exp_dir: Path,
     skip_viz: bool = False,
     channel_stats: "tuple | None" = None,
+    no_preload: bool = False,
 ) -> "dict | None":
     """Evaluate model on one held-out spatial test area.
 
@@ -782,10 +825,14 @@ def _evaluate_spatial_area(
     else:
         log.info(f"  Spatial test {area_name}: using training channel_stats "
                  f"(n_ch={len(channel_stats[0])}, means [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}])")
-    area_preloaded = PreloadedDataset(
-        area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats,
-    )
-    area_dl = DataLoader(area_preloaded, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    if no_preload:
+        stats = channel_stats or _estimate_channel_stats(area_ds)
+        area_norm = NormalizedDataset(area_ds, stats)
+    else:
+        area_norm = PreloadedDataset(
+            area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats,
+        )
+    area_dl = DataLoader(area_norm, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
     log.info(f"  [{area_name}] mIoU={area_r['miou']:.4f}  OA={area_r['oa']:.4f}")
@@ -873,6 +920,7 @@ def run_experiment(
     loss_version="v1",      # "v1" = WeightedCrossEntropy | "v2" = PhenologyAwareLoss
     force=False,
     skip_viz=False,
+    no_preload=False,       # skip disk preload cache; use on-the-fly z-score normalisation
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -960,10 +1008,18 @@ def run_experiment(
         )
         log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
         train_year_datasets_raw.append(ds_raw)
-        preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats)
-        if channel_stats is None:
-            channel_stats = preloaded.channel_stats  # stats from first year, reused for all others
-        train_year_datasets.append(preloaded)
+        if no_preload:
+            if channel_stats is None:
+                log.info(f"  [{yr}] --no-preload: estimating channel stats from sample …")
+                channel_stats = _estimate_channel_stats(ds_raw)
+                log.info(f"  [{yr}] Stats  mean range [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}]"
+                         f"  std range [{channel_stats[1].min():.1f}, {channel_stats[1].max():.1f}]")
+            train_year_datasets.append(NormalizedDataset(ds_raw, channel_stats))
+        else:
+            preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats)
+            if channel_stats is None:
+                channel_stats = preloaded.channel_stats
+            train_year_datasets.append(preloaded)
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
     if channel_stats is None:
@@ -1337,7 +1393,7 @@ def run_experiment(
         for area in SPATIAL_TEST_AREAS:
             area_r = _evaluate_spatial_area(
                 model, area, band_names_list, exp_name, exp_dir,
-                skip_viz=skip_viz, channel_stats=channel_stats,
+                skip_viz=skip_viz, channel_stats=channel_stats, no_preload=no_preload,
             )
             if area_r is not None:
                 spatial_results[area["name"]] = area_r
@@ -1971,6 +2027,7 @@ def main(
                     loss_version=loss_version,
                     force=force,
                     skip_viz=skip_viz,
+                    no_preload=args.no_preload,
                     **extra_kw,
                 )
                 if result is not None:
@@ -2064,8 +2121,11 @@ if __name__ == "__main__":
         "--loss-version", choices=["v1", "v2"], default="v1",
         help="Loss function version: v1=WeightedCrossEntropy (default), v2=PhenologyAwareLoss",
     )
-    parser.add_argument("--force",    action="store_true", help="Re-run even if checkpoint exists")
-    parser.add_argument("--skip-viz", action="store_true", help="Skip full-image visualization")
+    parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
+    parser.add_argument("--skip-viz",   action="store_true", help="Skip full-image visualization")
+    parser.add_argument("--no-preload", action="store_true",
+                        help="Skip disk preload cache; use on-the-fly z-score normalization. "
+                             "Slower per epoch but avoids large disk/RAM allocation — useful for high channel counts.")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
     parser.add_argument(
