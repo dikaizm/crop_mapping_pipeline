@@ -71,7 +71,8 @@ from crop_mapping_pipeline.config import (
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import (
-    build_loss_v1, build_loss_v2, build_loss_v3, PhenologyAwareLoss,
+    build_loss_v1, build_loss_v2, build_loss_v3,
+    build_loss_v4, build_loss_v5, PhenologyAwareLoss,
 )
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
@@ -1179,6 +1180,16 @@ def run_experiment(
             ce_weight=0.6, ft_weight=0.4,
         ).to(DEVICE)
         log.info("  Loss v3 — FocalCE + FocalTversky (Effective-Number weights, β=0.999)")
+    elif loss_version == "v4":
+        criterion = build_loss_v4(
+            num_classes=NUM_CLASSES, beta=0.9999, fallback_weight=2.0,
+        ).to(DEVICE)
+        log.info("  Loss v4 — Dynamic Effective Class Balanced (per-batch, β=0.9999)")
+    elif loss_version == "v5":
+        criterion = build_loss_v5(
+            num_classes=NUM_CLASSES, momentum=0.9, init_recall=0.0,
+        ).to(DEVICE)
+        log.info("  Loss v5 — Recall Loss (EMA recall weighting, momentum=0.9)")
     else:
         criterion = build_loss_v1(class_weights_tensor.to(DEVICE))
         log.info("  Loss v1 — WeightedCrossEntropy")
@@ -2226,7 +2237,7 @@ if __name__ == "__main__":
         help="Which architectures to run (default: all)",
     )
     parser.add_argument(
-        "--loss-version", choices=["v1", "v2", "v3"], default="v1",
+        "--loss-version", choices=["v1", "v2", "v3", "v4", "v5"], default="v1",
         help="Loss function version: v1=WeightedCrossEntropy (default), v2=PhenologyAwareLoss",
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
