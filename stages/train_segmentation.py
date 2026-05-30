@@ -1502,21 +1502,25 @@ def run_experiment(
         "exp_name":      exp_name,
         "arch":          arch,
         "in_channels":   in_channels,
-        "best_val_miou": round(best_miou,      4),
-        "test_miou":     round(test_r["miou"], 4) if not np.isnan(test_r["miou"]) else float("nan"),
-        "test_mf1":      round(test_r["mf1"],  4) if not np.isnan(test_r["mf1"])  else float("nan"),
-        "test_oa":       round(test_r["oa"],   4) if not np.isnan(test_r["oa"])   else float("nan"),
+        "best_val_miou": round(best_miou, 4),
         "total_epochs":  len(history),
         "run_id":        run_id,
         "ckpt":          str(best_ckpt),
     }
+    if test_r is not None:
+        summary["test_miou"] = round(test_r["miou"], 4) if not np.isnan(test_r["miou"]) else float("nan")
+        summary["test_mf1"]  = round(test_r["mf1"],  4) if not np.isnan(test_r["mf1"])  else float("nan")
+        summary["test_oa"]   = round(test_r["oa"],   4) if not np.isnan(test_r["oa"])   else float("nan")
     for aname, ar in spatial_results.items():
         summary[f"{aname}_miou"] = round(ar["miou"], 4)
         summary[f"{aname}_oa"]   = round(ar["oa"],   4)
 
-    spatial_str = "  ".join(
-        f"{n}={r['miou']:.4f}" for n, r in spatial_results.items()
-    ) if spatial_results else f"test_mIoU={test_r['miou']:.4f}"
+    if spatial_results:
+        spatial_str = "  ".join(f"{n}={r['miou']:.4f}" for n, r in spatial_results.items())
+    elif test_r is not None:
+        spatial_str = f"test_mIoU={test_r['miou']:.4f}"
+    else:
+        spatial_str = "(no test set)"
     log.info(f"\n✅ {exp_name}  val_mIoU={best_miou:.4f}  {spatial_str}  run={run_id}")
     return summary
 
@@ -2113,14 +2117,24 @@ def main(
 
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
-        summary_df  = pd.DataFrame(all_results).sort_values("test_miou", ascending=False)
+        summary_df  = pd.DataFrame(all_results)
+        # Sort by best available test metric: same-area test, else test_a, else val
+        sort_col = next(
+            (c for c in ("test_miou", "test_a_miou", "test_b_miou", "best_val_miou") if c in summary_df.columns),
+            None,
+        )
+        if sort_col:
+            summary_df = summary_df.sort_values(sort_col, ascending=False)
         summary_csv = MODELS_DIR / "experiment_summary.csv"
         summary_df.to_csv(summary_csv, index=False)
         log.info("\n=== Experiment Summary ===")
-        log.info("\n" + summary_df[[
+        cols = [c for c in [
             "exp_name", "arch", "in_channels",
-            "best_val_miou", "test_miou", "test_oa", "total_epochs",
-        ]].to_string(index=False))
+            "best_val_miou", "test_miou", "test_oa",
+            "test_a_miou", "test_b_miou",
+            "total_epochs",
+        ] if c in summary_df.columns]
+        log.info("\n" + summary_df[cols].to_string(index=False))
         log.info(f"Saved: {summary_csv}")
 
     log.info("All experiments done — segmentation maps, confusion matrices, and IoU CSVs logged to MLflow.")
