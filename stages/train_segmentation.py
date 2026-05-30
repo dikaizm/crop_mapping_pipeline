@@ -695,14 +695,14 @@ class PreloadedDataset(torch.utils.data.Dataset):
     @staticmethod
     def _cache_paths(dataset, cache_dir):
         key = {
-            "s2":             [str(p) for p in dataset.s2_paths],
-            "cdl":            str(dataset.cdl_path),
+            "s2":             sorted(os.path.basename(str(p)) for p in dataset.s2_paths),
+            "cdl":            os.path.basename(str(dataset.cdl_path)),
             "ps":             dataset.patch_size,
             "bands":          list(dataset.band_indices) if dataset.band_indices is not None else None,
             "stride":         getattr(dataset, "stride", None),
             "min_valid_frac": getattr(dataset, "min_valid_frac", None),
             "n_patches":      len(dataset.patches),
-            "norm":           "zscore_v1",  # invalidates old per-patch min-max caches
+            "norm":           "zscore_v2",  # v2: portable hash (basenames); invalidates v1 caches
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         base = Path(cache_dir) / f"preload_{h}"
@@ -974,6 +974,7 @@ def run_experiment(
     force=False,
     skip_viz=False,
     no_preload=False,       # skip disk preload cache; use on-the-fly z-score normalisation
+    cache_only=False,       # build PreloadedDataset cache then exit without training
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -1082,6 +1083,13 @@ def run_experiment(
     log.info(f"  channel_stats: means range [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}]  "
              f"stds range [{channel_stats[1].min():.1f}, {channel_stats[1].max():.1f}]  "
              f"n_ch={len(channel_stats[0])}")
+
+    if cache_only:
+        log.info(f"  [--build-cache-only] Cache built for {exp_name} — skipping training")
+        log.removeHandler(run_log_handler)
+        run_log_handler.close()
+        return None
+
     train_val_ds = ConcatDataset(train_year_datasets)
 
     gen = torch.Generator().manual_seed(SEED)
@@ -2079,6 +2087,7 @@ def main(
                     force=force,
                     skip_viz=skip_viz,
                     no_preload=args.no_preload,
+                    cache_only=args.build_cache_only,
                     **extra_kw,
                 )
                 if result is not None:
@@ -2177,6 +2186,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-preload", action="store_true",
                         help="Skip disk preload cache; use on-the-fly z-score normalization. "
                              "Slower per epoch but avoids large disk/RAM allocation — useful for high channel counts.")
+    parser.add_argument("--build-cache-only", action="store_true",
+                        help="Build PreloadedDataset cache for all selected experiments then exit without training. "
+                             "Transfer the cache dir to another machine and training will use it as a cache hit.")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
     parser.add_argument(
