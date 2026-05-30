@@ -742,20 +742,73 @@ class NormalizedDataset(torch.utils.data.Dataset):
         return img, mask
 
 
-def _estimate_channel_stats(dataset, n_samples=512):
-    """Sample n_samples patches to estimate per-channel mean/std (no full preload)."""
-    rng = np.random.default_rng(SEED)
-    indices = rng.choice(len(dataset), min(n_samples, len(dataset)), replace=False)
-    patch_means = []
-    patch_vars  = []
-    for i in indices:
-        img, _ = dataset[i]
-        arr = img.numpy().astype(np.float32) if isinstance(img, torch.Tensor) else np.asarray(img, dtype=np.float32)
-        patch_means.append(arr.mean(axis=(1, 2)))
-        patch_vars.append(arr.var(axis=(1, 2)))
-    means = np.stack(patch_means).mean(axis=0).astype(np.float32)
-    stds  = np.sqrt(np.stack(patch_vars).mean(axis=0)).astype(np.float32)
+def _compute_channel_stats_full(dataset, n_threads=None):
+    """Full-pass per-channel mean/std — same math as PreloadedDataset, no memmap.
+
+    Reads each TIF file once (parallel), extracts patches in chunks, accumulates
+    ch_sums / ch_sums2 in float64. Peak RAM = one TIF in memory + ~64 MB per chunk.
+    Identical stats to PreloadedDataset; avoids the disk-backed memmap allocation
+    that causes OOM at high channel counts.
+    """
+    n   = len(dataset)
+    ps  = dataset.patch_size
+    band_indices  = dataset.band_indices
+    n_ch_per_file = [src.count for src in dataset._s2_srcs]
+    ch_offsets    = np.cumsum([0] + n_ch_per_file).tolist()
+    n_ch          = len(band_indices) if band_indices is not None else ch_offsets[-1]
+    patches       = dataset.patches
+    nodata        = dataset.nodata
+
+    # Same file_extraction map as PreloadedDataset
+    file_extraction: dict = {}
+    targets = band_indices if band_indices is not None else list(range(ch_offsets[-1]))
+    for out_pos, gi in enumerate(targets):
+        for fi in range(len(n_ch_per_file)):
+            if ch_offsets[fi] <= gi < ch_offsets[fi + 1]:
+                file_extraction.setdefault(fi, []).append((out_pos, gi - ch_offsets[fi] + 1))
+                break
+
+    ch_sums  = np.zeros(n_ch, dtype=np.float64)
+    ch_sums2 = np.zeros(n_ch, dtype=np.float64)
+    ch_cnt   = n * ps * ps
+
+    log.info(f"  [stats] Full-pass channel stats: {n} patches, {len(file_extraction)} TIF files …")
+
+    def _read_one_file(fi):
+        extractions = file_extraction[fi]
+        local_idxs  = [e[1] for e in extractions]
+        out_cols    = [e[0] for e in extractions]
+        try:
+            with rasterio.open(dataset.s2_paths[fi]) as src:
+                arr = src.read(indexes=local_idxs).astype(np.float32)
+            arr[arr == nodata]     = 0.0
+            arr[~np.isfinite(arr)] = 0.0
+            return fi, arr, out_cols
+        except Exception as e:
+            log.warning(f"  [stats] read failed file {fi}: {e}")
+            return fi, None, out_cols
+
+    PCHUNK = 64  # patches per accumulation chunk; peak RAM = PCHUNK × ps² × float64 ≈ 67 MB
+    _n_threads = n_threads or min(len(file_extraction), os.cpu_count() or 8)
+    with ThreadPoolExecutor(max_workers=_n_threads) as pool:
+        for fi, arr, out_cols in pool.map(_read_one_file, list(file_extraction.keys())):
+            if arr is None:
+                continue
+            for ci, out_pos in enumerate(out_cols):
+                plane = arr[ci]  # (H, W) float32
+                for start in range(0, len(patches), PCHUNK):
+                    pslice = patches[start:start + PCHUNK]
+                    batch  = np.stack([plane[r:r + ps, c:c + ps] for r, c in pslice])
+                    flat   = batch.astype(np.float64).ravel()
+                    ch_sums[out_pos]  += flat.sum()
+                    ch_sums2[out_pos] += (flat * flat).sum()
+            del arr
+
+    means = (ch_sums / ch_cnt).astype(np.float32)
+    stds  = np.sqrt(np.maximum(ch_sums2 / ch_cnt - means.astype(np.float64) ** 2, 0)).astype(np.float32)
     stds  = np.where(stds < 1.0, 1.0, stds)
+    log.info(f"  [stats]  mean [{means.min():.1f}, {means.max():.1f}]"
+             f"  std [{stds.min():.1f}, {stds.max():.1f}]")
     return means, stds
 
 
@@ -826,7 +879,7 @@ def _evaluate_spatial_area(
         log.info(f"  Spatial test {area_name}: using training channel_stats "
                  f"(n_ch={len(channel_stats[0])}, means [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}])")
     if no_preload:
-        stats = channel_stats or _estimate_channel_stats(area_ds)
+        stats = channel_stats or _compute_channel_stats_full(area_ds)
         area_norm = NormalizedDataset(area_ds, stats)
     else:
         area_norm = PreloadedDataset(
@@ -1010,10 +1063,8 @@ def run_experiment(
         train_year_datasets_raw.append(ds_raw)
         if no_preload:
             if channel_stats is None:
-                log.info(f"  [{yr}] --no-preload: estimating channel stats from sample …")
-                channel_stats = _estimate_channel_stats(ds_raw)
-                log.info(f"  [{yr}] Stats  mean range [{channel_stats[0].min():.1f}, {channel_stats[0].max():.1f}]"
-                         f"  std range [{channel_stats[1].min():.1f}, {channel_stats[1].max():.1f}]")
+                log.info(f"  [{yr}] --no-preload: computing full channel stats (no memmap) …")
+                channel_stats = _compute_channel_stats_full(ds_raw)
             train_year_datasets.append(NormalizedDataset(ds_raw, channel_stats))
         else:
             preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR, channel_stats=channel_stats)
