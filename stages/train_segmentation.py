@@ -1722,7 +1722,7 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
     crop_mask = gt_ds > 0
     error[crop_mask & (pred_ds == gt_ds)] = 1   # correct
     error[crop_mask & (pred_ds != gt_ds)] = 2   # incorrect
-    error_cmap = ListedColormap(["#e0e0e0", "#ffffff", "#2255cc"])  # bg / correct / incorrect
+    error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])  # bg / correct / incorrect
     error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
 
     fig, axes = plt.subplots(1, 3, figsize=(22, 8))
@@ -1739,9 +1739,9 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
     crop_patches = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
                     for i in range(1, NUM_CLASSES)]
     error_patches = [
-        mpatches.Patch(color="#ffffff", label="Correct",   edgecolor="#aaaaaa", linewidth=0.5),
-        mpatches.Patch(color="#2255cc", label="Incorrect"),
-        mpatches.Patch(color="#e0e0e0", label="Background"),
+        mpatches.Patch(color="#22cc44", label="Correct"),
+        mpatches.Patch(color="#ee2222", label="Incorrect"),
+        mpatches.Patch(color="#d0d0d0", label="Background"),
     ]
     fig.legend(handles=crop_patches + error_patches, loc="lower center",
                ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
