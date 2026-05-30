@@ -77,9 +77,13 @@ class FocalCELoss(nn.Module):
 
     def __init__(self, alpha=None, gamma=2.0, ignore_index=-100):
         super().__init__()
-        self.alpha        = alpha
         self.gamma        = gamma
         self.ignore_index = ignore_index
+        # register as buffer so .to(device) moves it with the module
+        if alpha is not None:
+            self.register_buffer("alpha", alpha.float())
+        else:
+            self.alpha = None
 
     def forward(self, logits, target):
         ce = F.cross_entropy(
