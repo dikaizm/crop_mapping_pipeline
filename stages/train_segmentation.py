@@ -67,6 +67,7 @@ from crop_mapping_pipeline.config import (
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, TEST_FRAC, SEED, ARCH_CFG,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
+    SELECT_TOP_K_PER_CROP,
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import build_loss_v1, build_loss_v2, PhenologyAwareLoss

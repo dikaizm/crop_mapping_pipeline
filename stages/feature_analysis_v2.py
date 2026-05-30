@@ -828,7 +828,7 @@ def main(force: bool = False, data_dir: str = None, output_dir: str = None,
 
         if selector not in _DIRECT_OUTPUT_MAP:
             raise ValueError(
-                f"--selector must be one of {sorted(_DIRECT_OUTPUT_MAP)|sorted(_DOMAIN_SCOPED_SELECTORS)} "
+                f"--selector must be one of {sorted(list(_DIRECT_OUTPUT_MAP) + list(_DOMAIN_SCOPED_SELECTORS))} "
                 f"for --stage select, got {selector!r}"
             )
         ks = top_k_values or [SELECT_TOP_K_PER_CROP]
