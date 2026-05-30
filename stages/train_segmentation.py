@@ -1057,8 +1057,7 @@ def run_experiment(
     log.info(f"{'='*65}\n")
 
     # ── Per-band percentile stats (computed once from all training files) ─────
-    _perc_cache_dir = Path(data_dir) if data_dir else PROCESSED_DIR
-    _perc_cache = _perc_cache_dir / "band_percentiles.npz"
+    _perc_cache = Path(s2_processed[0]).parent / "band_percentiles.npz"
     _all_train_s2 = []
     for yr in TRAIN_YEARS:
         _all_train_s2.extend(_s2_for_year(s2_processed, yr))
