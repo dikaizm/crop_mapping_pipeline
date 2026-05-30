@@ -1094,13 +1094,17 @@ def run_experiment(
 
     gen = torch.Generator().manual_seed(SEED)
 
-    # 3-way random split: train / val (early stopping) / test (held-out, same area)
-    # Spatial test areas (test_a/test_b) evaluated separately as geographic generalization.
+    # Split: train / val  (+optional same-area test when TEST_FRAC > 0)
+    # When TEST_FRAC=0: test_a/test_b spatial areas are the actual test sets.
     n_total = len(train_val_ds)
-    n_val   = max(1, int(VAL_FRAC  * n_total))
-    n_test  = max(1, int(TEST_FRAC * n_total))
+    n_val   = max(1, int(VAL_FRAC * n_total))
+    n_test  = max(1, int(TEST_FRAC * n_total)) if TEST_FRAC > 0 else 0
     n_train = n_total - n_val - n_test
-    train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
+    if n_test > 0:
+        train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
+    else:
+        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
+        test_ds = None
     test_s2_filtered = None
     test_idx_local   = None
 
@@ -1116,8 +1120,11 @@ def run_experiment(
     aug_train_ds = AugmentedSubset(train_ds)
     train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
     val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (all same area, random split)")
+    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True) if test_ds is not None else None
+    if n_test > 0:
+        log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (same-area random split)")
+    else:
+        log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (test via test_a/test_b spatial areas)")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
     model     = build_model(arch, in_channels, NUM_CLASSES)
@@ -1314,22 +1321,31 @@ def run_experiment(
                 log.info(f"  Early stopping at epoch {epoch + 1}")
                 break
 
-        # ── Test evaluation (held-out same-area split) ────────────────────────
+        # ── Test evaluation (held-out same-area split, only when TEST_FRAC > 0) ─
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
 
-        log.info("  Evaluating on held-out test set (same area, random split)...")
-        test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
+        if test_dl is not None:
+            log.info("  Evaluating on held-out test set (same area, random split)...")
+            test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
+        else:
+            log.info("  No same-area test split — skipping; test results from test_a/test_b below")
+            test_r = None
 
-        mlflow.log_metrics({
+        _base_metrics = {
             "best_val_miou": best_miou,
             "best_val_mf1":  best_val_mf1,
             "best_val_oa":   best_val_oa,
-            "test_miou":     test_r["miou"],
-            "test_mf1":      test_r["mf1"],
-            "test_oa":       test_r["oa"],
             "total_epochs":  len(history),
-        })
+        }
+        if test_r is not None:
+            _base_metrics.update({
+                "test_miou": test_r["miou"],
+                "test_mf1":  test_r["mf1"],
+                "test_oa":   test_r["oa"],
+            })
+        mlflow.log_metrics(_base_metrics)
+
         for cls_id, iou in best_val_per_class_iou.items():
             if not np.isnan(iou):
                 cdl_id = KEEP_CLASSES[cls_id - 1]
@@ -1342,34 +1358,36 @@ def run_experiment(
                 name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
                 slug   = name.lower().replace('/', '_').replace(' ', '_')
                 mlflow.log_metric(f"best_val_f1_{slug}", f1v)
-        for cls_id, iou in test_r["per_class_iou"].items():
-            if not np.isnan(iou):
-                cdl_id = KEEP_CLASSES[cls_id - 1]
-                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
-                mlflow.log_metric(
-                    f"test_iou_{name.lower().replace('/', '_').replace(' ', '_')}",
-                    iou,
-                )
-        for cls_id, f1v in test_r["per_class_f1"].items():
-            if not np.isnan(f1v):
-                cdl_id = KEEP_CLASSES[cls_id - 1]
-                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
-                mlflow.log_metric(
-                    f"test_f1_{name.lower().replace('/', '_').replace(' ', '_')}",
-                    f1v,
-                )
 
-        # ── Log per-class IoU table to console ───────────────────────────────
-        log.info(f"  Test results  mIoU={test_r['miou']:.4f}  mF1={test_r['mf1']:.4f}  OA={test_r['oa']:.4f}")
-        log.info(f"  {'Class':<20} {'CDL ID':>6}  {'IoU':>7}")
-        log.info(f"  {'-'*38}")
-        for cls_id, iou in test_r["per_class_iou"].items():
-            cdl_id = KEEP_CLASSES[cls_id - 1]
-            name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
-            iou_s  = f"{iou:.4f}" if not np.isnan(iou) else "    nan"
-            log.info(f"  {name:<20} {cdl_id:>6}  {iou_s:>7}")
-        log.info(f"  {'-'*38}")
-        log.info(f"  {'mIoU':<20} {'':>6}  {test_r['miou']:>7.4f}")
+        if test_r is not None:
+            for cls_id, iou in test_r["per_class_iou"].items():
+                if not np.isnan(iou):
+                    cdl_id = KEEP_CLASSES[cls_id - 1]
+                    name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                    mlflow.log_metric(
+                        f"test_iou_{name.lower().replace('/', '_').replace(' ', '_')}",
+                        iou,
+                    )
+            for cls_id, f1v in test_r["per_class_f1"].items():
+                if not np.isnan(f1v):
+                    cdl_id = KEEP_CLASSES[cls_id - 1]
+                    name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                    mlflow.log_metric(
+                        f"test_f1_{name.lower().replace('/', '_').replace(' ', '_')}",
+                        f1v,
+                    )
+
+            # ── Log per-class IoU table to console ───────────────────────────
+            log.info(f"  Test results  mIoU={test_r['miou']:.4f}  mF1={test_r['mf1']:.4f}  OA={test_r['oa']:.4f}")
+            log.info(f"  {'Class':<20} {'CDL ID':>6}  {'IoU':>7}")
+            log.info(f"  {'-'*38}")
+            for cls_id, iou in test_r["per_class_iou"].items():
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                name   = CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}")
+                iou_s  = f"{iou:.4f}" if not np.isnan(iou) else "    nan"
+                log.info(f"  {name:<20} {cdl_id:>6}  {iou_s:>7}")
+            log.info(f"  {'-'*38}")
+            log.info(f"  {'mIoU':<20} {'':>6}  {test_r['miou']:>7.4f}")
 
         # ── Artifacts ─────────────────────────────────────────────────────────
 
@@ -1394,25 +1412,24 @@ def run_experiment(
         plt.savefig(curve_path, dpi=150)
         plt.close()
 
-        # Per-class metrics CSV (IoU + F1)
-        iou_rows = []
-        for cls_id, iou in test_r["per_class_iou"].items():
-            cdl_id = KEEP_CLASSES[cls_id - 1]
-            f1v    = test_r["per_class_f1"].get(cls_id, float("nan"))
-            iou_rows.append({
-                "class_id":   cls_id,
-                "cdl_id":     cdl_id,
-                "class_name": CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}"),
-                "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
-                "f1":         round(f1v, 4) if not np.isnan(f1v) else float("nan"),
-            })
+        # Per-class metrics CSV + confusion matrix (only when same-area test exists)
         iou_csv = exp_dir / "test_per_class_iou.csv"
-        pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
-
-        # Confusion matrix PNG (skipped when no patch-level test set)
         cm_path = exp_dir / "confusion_matrix.png"
-        if "preds" in test_r and "labels" in test_r:
-            _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
+        if test_r is not None:
+            iou_rows = []
+            for cls_id, iou in test_r["per_class_iou"].items():
+                cdl_id = KEEP_CLASSES[cls_id - 1]
+                f1v    = test_r["per_class_f1"].get(cls_id, float("nan"))
+                iou_rows.append({
+                    "class_id":   cls_id,
+                    "cdl_id":     cdl_id,
+                    "class_name": CDL_CLASS_NAMES.get(cdl_id, f"cls{cls_id}"),
+                    "iou":        round(iou, 4) if not np.isnan(iou) else float("nan"),
+                    "f1":         round(f1v, 4) if not np.isnan(f1v) else float("nan"),
+                })
+            pd.DataFrame(iou_rows).to_csv(iou_csv, index=False)
+            if "preds" in test_r and "labels" in test_r:
+                _plot_confusion_matrix(test_r["preds"], test_r["labels"], str(cm_path))
 
         # Segmentation map PNG (full-tile inference)
         seg_path = None
@@ -1465,7 +1482,8 @@ def run_experiment(
             mlflow.set_tag(f"gdrive_{fname}", link)
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
-        mlflow.log_artifact(str(iou_csv))
+        if iou_csv.exists():
+            mlflow.log_artifact(str(iou_csv))
         if cm_path.exists():
             mlflow.log_artifact(str(cm_path))
         if seg_path is not None:

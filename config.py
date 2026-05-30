@@ -104,8 +104,9 @@ MLFLOW_EXPERIMENT_TRAIN_V3     = "cropmap_segmentation_s2_v3"
 MLFLOW_EXPERIMENT_TRAIN_DIRECT = "cropmap_segmentation_s2_direct"
 MLFLOW_EXPERIMENT_TRAIN_SINGLE_YEAR = "cropmap_segmentation_s2_single_year"
 MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
-MLFLOW_EXPERIMENT_TRAIN_SPATIAL     = "cropmap_segmentation_s2_spatial"
-MLFLOW_EXPERIMENT_TRAIN_SAME_AREA   = "cropmap_segmentation_s2_same_area"
+MLFLOW_EXPERIMENT_TRAIN_SPATIAL      = "cropmap_segmentation_s2_spatial"
+MLFLOW_EXPERIMENT_TRAIN_SAME_AREA    = "cropmap_segmentation_s2_same_area"
+MLFLOW_EXPERIMENT_TRAIN_V6_SPATIAL   = "cropmap_segmentation_s2_v6_spatial"
 
 # ── GSI scoring hyperparameters ───────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
@@ -138,7 +139,7 @@ MAX_EPOCHS     = 150
 EARLY_STOP     = 20
 EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
 VAL_FRAC       = 0.15      # fraction of patches → val (random split)
-TEST_FRAC      = 0.15      # fraction of patches → held-out test (same area)
+TEST_FRAC      = 0.0       # 0 = no same-area test split; test_a/test_b are the actual test sets
 SEED           = 42
 
 ARCH_CFG = {
