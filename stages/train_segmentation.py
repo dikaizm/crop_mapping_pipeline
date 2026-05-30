@@ -509,6 +509,86 @@ class AugmentedSubset(torch.utils.data.Dataset):
         return img, mask
 
 
+# ── Per-band percentile normalisation ─────────────────────────────────────────
+# Compute 1st/99th percentile per S2 band (B1-B12) from training pixels.
+# Sentinel-Hub finding: percentile clipping outperforms z-score and min/max for
+# long-tailed S2 reflectance. Per-band stats are area-invariant when computed
+# from a representative sample across the training region.
+
+def compute_per_band_percentiles(s2_paths, n_samples_per_file=50_000,
+                                  percentiles=(1.0, 99.0), seed=42):
+    """Compute (p1, p99) per S2 band by sampling pixels across all files.
+
+    Returns: (p1, p99), each shape (N_BANDS_PER_DATE,) float32.
+    """
+    rng = np.random.default_rng(seed)
+    samples_per_band: list = [[] for _ in range(N_BANDS_PER_DATE)]
+
+    log.info(f"  [percentiles] Sampling {n_samples_per_file} px/file × {len(s2_paths)} files …")
+    for path in s2_paths:
+        try:
+            with rasterio.open(path) as src:
+                h, w, nb = src.height, src.width, src.count
+                if nb != N_BANDS_PER_DATE:
+                    log.warning(f"  [percentiles] {Path(path).name}: {nb} bands ≠ {N_BANDS_PER_DATE}; skipping")
+                    continue
+                n_pick = min(n_samples_per_file, h * w)
+                ys = rng.integers(0, h, n_pick)
+                xs = rng.integers(0, w, n_pick)
+                for b in range(1, nb + 1):
+                    arr = src.read(b)
+                    vals = arr[ys, xs].astype(np.float32)
+                    vals = vals[np.isfinite(vals) & (vals != S2_NODATA)]
+                    samples_per_band[b - 1].append(vals)
+        except Exception as e:
+            log.warning(f"  [percentiles] {Path(path).name}: read failed — {e}")
+
+    p1  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    p99 = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    for b in range(N_BANDS_PER_DATE):
+        if not samples_per_band[b]:
+            log.warning(f"  [percentiles] Band {S2_BAND_NAMES[b]}: no valid samples; using [0, 10000]")
+            p1[b], p99[b] = 0.0, 10000.0
+            continue
+        cat = np.concatenate(samples_per_band[b])
+        p1[b], p99[b] = np.percentile(cat, percentiles)
+
+    log.info(f"  [percentiles] Per-band stats:")
+    for b in range(N_BANDS_PER_DATE):
+        log.info(f"    {S2_BAND_NAMES[b]}: p1={p1[b]:.1f}  p99={p99[b]:.1f}")
+    return p1, p99
+
+
+def load_or_compute_band_percentiles(s2_paths, cache_path):
+    """Load cached percentiles or compute and cache them. Returns (p1, p99) (N_BANDS,) each."""
+    cache_path = Path(cache_path)
+    if cache_path.exists():
+        d = np.load(str(cache_path))
+        log.info(f"  [percentiles] Loaded from cache → {cache_path.name}")
+        return d["p1"].astype(np.float32), d["p99"].astype(np.float32)
+    p1, p99 = compute_per_band_percentiles(s2_paths)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(str(cache_path), p1=p1, p99=p99)
+    log.info(f"  [percentiles] Cached → {cache_path.name}")
+    return p1, p99
+
+
+def _channel_to_band_idx(dataset_band_indices):
+    """Map each selected channel → its S2 band index (0..N_BANDS_PER_DATE-1)."""
+    if dataset_band_indices is None:
+        # All channels of all files — band cycles every N_BANDS_PER_DATE channels
+        return None
+    return np.asarray([bi % N_BANDS_PER_DATE for bi in dataset_band_indices], dtype=np.int64)
+
+
+def _per_channel_percentiles(band_indices, p1_per_band, p99_per_band):
+    """Expand (N_BANDS,) per-band stats to (n_ch,) per-channel stats via band lookup."""
+    band_idx_per_ch = _channel_to_band_idx(band_indices)
+    if band_idx_per_ch is None:
+        raise ValueError("band_indices required for per-band percentile lookup")
+    return p1_per_band[band_idx_per_ch], p99_per_band[band_idx_per_ch]
+
+
 # ── In-memory dataset cache ───────────────────────────────────────────────────
 
 class PreloadedDataset(torch.utils.data.Dataset):
@@ -523,8 +603,14 @@ class PreloadedDataset(torch.utils.data.Dataset):
     Masks stored as int64 .pt (typically <1 GB, always in RAM).
     """
 
-    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None, channel_stats=None):
-        """Normalisation: fixed /10000 (S2 SR scale). channel_stats param kept for API compat but ignored."""
+    def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None,
+                 channel_stats=None, band_percentiles=None):
+        """Normalisation: per-band 1st/99th percentile → [0, 1] clipped.
+
+        band_percentiles: (p1, p99) each shape (N_BANDS_PER_DATE,). Required.
+        channel_stats: deprecated, kept for API compat (ignored).
+        """
+        assert band_percentiles is not None, "band_percentiles required for percentile normalisation"
         imgs_path, masks_path = self._cache_paths(dataset, cache_dir) if cache_dir else (None, None)
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
@@ -598,12 +684,17 @@ class PreloadedDataset(torch.utils.data.Dataset):
                         buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
                 del arr
 
-        # Fixed /10000 normalisation — S2 SR scale, area-invariant.
+        # Per-band 1st/99th percentile normalisation → [0, 1] clipped.
+        p1_per_ch, p99_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
+        denom = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
+        p1_b  = p1_per_ch[np.newaxis, :, np.newaxis, np.newaxis].astype(np.float32)
+        d_b   = denom[np.newaxis, :, np.newaxis, np.newaxis]
         CHUNK = 128
-        log.info(f"  [{desc}] Normalising with fixed /10000 …")
+        log.info(f"  [{desc}] Normalising with per-band percentile (1st/99th) …")
         for start in range(0, n, CHUNK):
             end   = min(start + CHUNK, n)
-            chunk = buf[start:end].astype(np.float32) / 10000.0
+            chunk = buf[start:end].astype(np.float32)
+            chunk = np.clip((chunk - p1_b) / d_b, 0.0, 1.0)
             buf[start:end] = chunk.astype(np.float16)
         buf.flush()
 
@@ -639,7 +730,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
             "stride":         getattr(dataset, "stride", None),
             "min_valid_frac": getattr(dataset, "min_valid_frac", None),
             "n_patches":      len(dataset.patches),
-            "norm":           "fixed10k",   # fixed /10000 normalisation; invalidates zscore caches
+            "norm":           "percentile_v1",  # per-band 1st/99th percentile; invalidates older caches
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         base = Path(cache_dir) / f"preload_{h}"
@@ -657,10 +748,15 @@ class PreloadedDataset(torch.utils.data.Dataset):
 # ── No-preload: on-the-fly normalisation ─────────────────────────────────────
 
 class NormalizedDataset(torch.utils.data.Dataset):
-    """Fixed /10000 normalisation wrapper — no disk cache, area-invariant."""
+    """Per-band 1st/99th percentile normalisation wrapper — no disk cache."""
 
-    def __init__(self, dataset, channel_stats=None):
+    def __init__(self, dataset, channel_stats=None, band_percentiles=None):
+        assert band_percentiles is not None, "band_percentiles required for percentile normalisation"
         self.dataset = dataset
+        p1_per_ch, p99_per_ch = _per_channel_percentiles(dataset.band_indices, *band_percentiles)
+        denom = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
+        self.p1    = torch.tensor(p1_per_ch.astype(np.float32)).view(-1, 1, 1)
+        self.denom = torch.tensor(denom).view(-1, 1, 1)
 
     def __len__(self):
         return len(self.dataset)
@@ -669,7 +765,7 @@ class NormalizedDataset(torch.utils.data.Dataset):
         img, mask = self.dataset[idx]
         if not isinstance(img, torch.Tensor):
             img = torch.tensor(img, dtype=torch.float32)
-        img = img.float() / 10000.0
+        img = ((img.float() - self.p1) / self.denom).clamp(0.0, 1.0)
         return img, mask
 
 
@@ -752,7 +848,8 @@ def _evaluate_spatial_area(
     exp_name: str,
     exp_dir: Path,
     skip_viz: bool = False,
-    channel_stats: "tuple | None" = None,  # kept for API compat, unused (fixed10k norm)
+    channel_stats: "tuple | None" = None,  # kept for API compat, unused
+    band_percentiles: "tuple | None" = None,
     no_preload: bool = False,
 ) -> "dict | None":
     """Evaluate model on one held-out spatial test area.
@@ -803,9 +900,10 @@ def _evaluate_spatial_area(
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
     if no_preload:
-        area_norm = NormalizedDataset(area_ds)
+        area_norm = NormalizedDataset(area_ds, band_percentiles=band_percentiles)
     else:
-        area_norm = PreloadedDataset(area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR)
+        area_norm = PreloadedDataset(area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR,
+                                     band_percentiles=band_percentiles)
     area_dl = DataLoader(area_norm, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
@@ -867,7 +965,7 @@ def _evaluate_spatial_area(
         pred_map, _ = run_full_inference(
             model, area_s2_filtered, area_idx_local,
             patch_size=PATCH_SIZE, stride=PATCH_SIZE,
-            channel_stats=None,
+            channel_stats=None, band_percentiles=band_percentiles,
         )
         seg_path = exp_dir / f"{area_name}_segmentation_map.png"
         save_segmentation_map(
@@ -958,6 +1056,14 @@ def run_experiment(
     log.info(f"  {description}")
     log.info(f"{'='*65}\n")
 
+    # ── Per-band percentile stats (computed once from all training files) ─────
+    _perc_cache_dir = Path(data_dir) if data_dir else PROCESSED_DIR
+    _perc_cache = _perc_cache_dir / "band_percentiles.npz"
+    _all_train_s2 = []
+    for yr in TRAIN_YEARS:
+        _all_train_s2.extend(_s2_for_year(s2_processed, yr))
+    band_percentiles = load_or_compute_band_percentiles(_all_train_s2, _perc_cache)
+
     # ── Year-based dataset split ──────────────────────────────────────────────
     train_year_datasets_raw = []   # RasterPatchDataset — for _patch_weights (needs _cdl etc.)
     train_year_datasets     = []   # PreloadedDataset  — for DataLoader
@@ -983,9 +1089,10 @@ def run_experiment(
         log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
         train_year_datasets_raw.append(ds_raw)
         if no_preload:
-            train_year_datasets.append(NormalizedDataset(ds_raw))
+            train_year_datasets.append(NormalizedDataset(ds_raw, band_percentiles=band_percentiles))
         else:
-            preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR)
+            preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR,
+                                         band_percentiles=band_percentiles)
             train_year_datasets.append(preloaded)
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
@@ -1344,7 +1451,7 @@ def run_experiment(
             gt_map, _    = load_gt_remap(str(test_cdl))
             pred_map, _  = run_full_inference(
                 model, test_s2_filtered, test_idx_local, patch_size=PATCH_SIZE, stride=PATCH_SIZE,
-                channel_stats=None,
+                channel_stats=None, band_percentiles=band_percentiles,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             save_segmentation_map(
@@ -1359,7 +1466,7 @@ def run_experiment(
             pred_map, _ = run_full_inference(
                 model, primary_s2_filtered, primary_idx_local,
                 patch_size=PATCH_SIZE, stride=PATCH_SIZE,
-                channel_stats=None,
+                channel_stats=None, band_percentiles=band_percentiles,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             save_segmentation_map(
@@ -1376,6 +1483,7 @@ def run_experiment(
             area_r = _evaluate_spatial_area(
                 model, area, band_names_list, exp_name, exp_dir,
                 skip_viz=skip_viz, channel_stats=None, no_preload=no_preload,
+                band_percentiles=band_percentiles,
             )
             if area_r is not None:
                 spatial_results[area["name"]] = area_r
@@ -1535,10 +1643,11 @@ def upload_models_to_gdrive(run_name, model_files):
 
 
 def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256,
-                       channel_stats=None):
+                       channel_stats=None, band_percentiles=None):
     """Tiled inference — reads one window at a time, never loads full rasters.
-    Normalisation: fixed /10000. channel_stats param kept for API compat but ignored.
+    Normalisation: per-band 1st/99th percentile → [0, 1] clipped.
     """
+    assert band_percentiles is not None, "band_percentiles required"
     with rasterio.open(s2_paths[0]) as src:
         H, W    = src.height, src.width
         profile = dict(src.profile)
@@ -1549,6 +1658,10 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
     n_cols   = (W + stride - 1) // stride
     total    = n_rows * n_cols
     K        = len(band_indices)
+
+    p1_per_ch, p99_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
+    denom_per_ch = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
+    p1_per_ch    = p1_per_ch.astype(np.float32)
 
     model.eval()
     done = 0
@@ -1572,7 +1685,7 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
                         bands.append(arr)
 
                     patch = np.concatenate(bands, axis=0)[band_indices]  # (K, ph, pw)
-                    patch = patch / 10000.0
+                    patch = np.clip((patch - p1_per_ch[:, None, None]) / denom_per_ch[:, None, None], 0.0, 1.0)
 
                     # Pad to patch_size if at border
                     if ph < patch_size or pw < patch_size:
@@ -2190,11 +2303,19 @@ if __name__ == "__main__":
         model = build_model(arch, in_ch, NUM_CLASSES)
         model.load_state_dict(ckpt["model_state_dict"])
         log.info(f"Loaded checkpoint: {ckpt_path}  arch={arch}  in_ch={in_ch}")
+        # Load percentile stats from cache (must exist from prior training run)
+        _perc_cache = _dd / "band_percentiles.npz"
+        if not _perc_cache.exists():
+            log.error(f"--eval-only requires band_percentiles.npz at {_perc_cache}; run training first")
+            sys.exit(1)
+        _d = np.load(str(_perc_cache))
+        _bp = (_d["p1"].astype(np.float32), _d["p99"].astype(np.float32))
         with mlflow.start_run(run_name=f"{exp_name}_eval"):
             mlflow.set_tag("eval_only", "true")
             mlflow.set_tag("checkpoint", str(ckpt_path))
             for area in SPATIAL_TEST_AREAS:
-                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir, channel_stats=None)
+                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir,
+                                       channel_stats=None, band_percentiles=_bp)
         sys.exit(0)
 
     top_k_list = args.top_k or [None]
