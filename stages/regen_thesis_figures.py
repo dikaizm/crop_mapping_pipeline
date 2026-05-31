@@ -192,10 +192,7 @@ def fig_ndvi_per_class(s2_files: list[Path], cdl_path: Path, out_path: Path):
     fig, ax = plt.subplots(figsize=(12, 5))
     for cid in KEEP_CLASSES:
         name = CDL_CLASS_NAMES.get(cid, str(cid))
-        color = None
-        if cid in USDA_CDL_COLORS:
-            r, g, b = USDA_CDL_COLORS[cid]
-            color = (r / 255, g / 255, b / 255)
+        color = USDA_CDL_COLORS.get(cid, None)
         ax.plot(range(len(dates)), per_class[cid], marker="o", label=name, color=color, lw=1.5)
     ax.set_xticks(range(len(dates)))
     ax.set_xticklabels([d.replace("2024_", "") for d in dates], rotation=45, ha="right")
@@ -274,8 +271,7 @@ def fig_cdl_label_map(cdl_path: Path, out_path: Path):
     legend_labels = ["Background"]
     for i, cid in enumerate(KEEP_CLASSES, start=1):
         display[cdl == cid] = i
-        r, g, b = USDA_CDL_COLORS.get(cid, (200, 200, 200))
-        legend_colors.append(f"#{r:02x}{g:02x}{b:02x}")
+        legend_colors.append(USDA_CDL_COLORS.get(cid, "#c8c8c8"))
         legend_labels.append(CDL_CLASS_NAMES.get(cid, str(cid)))
     cmap = ListedColormap(legend_colors)
     norm = BoundaryNorm(np.arange(-0.5, len(legend_colors) + 0.5, 1), cmap.N)
@@ -308,8 +304,7 @@ def fig_cdl_class_distribution(cdl_path: Path, out_path: Path, top_n: int = 20):
         area_ha = count * px_area_m2 / 1e4
         names.append(USDA_CDL_NAMES.get(int(cid), f"ID {cid}"))
         areas_ha.append(area_ha)
-        r, g, b = USDA_CDL_COLORS.get(int(cid), (150, 150, 150))
-        colors.append(f"#{r:02x}{g:02x}{b:02x}")
+        colors.append(USDA_CDL_COLORS.get(int(cid), "#969696"))
 
     fig, ax = plt.subplots(figsize=(10, 8))
     y = np.arange(len(names))
