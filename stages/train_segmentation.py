@@ -72,7 +72,8 @@ from crop_mapping_pipeline.config import (
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import (
     build_wce, build_phenology, build_focal_tversky,
-    build_dynamic_balanced, build_recall, PhenologyAwareLoss,
+    build_dynamic_balanced, build_recall, build_boundary_weighted,
+    PhenologyAwareLoss,
 )
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
@@ -1268,6 +1269,12 @@ def run_experiment(
             num_classes=NUM_CLASSES, momentum=0.9, init_recall=0.0,
         ).to(DEVICE)
         log.info("  Loss=recall — RecallLoss (EMA recall weighting, momentum=0.9)")
+    elif loss == "boundary_weighted":
+        criterion = build_boundary_weighted(
+            num_classes=NUM_CLASSES, beta=0.9999, fallback_weight=2.0,
+            boundary_weight=3.0, dilation_kernel=5,
+        ).to(DEVICE)
+        log.info("  Loss=boundary_weighted — Dynamic Balanced + boundary upweighting (3×, dilation=5px)")
     else:
         criterion = build_wce(class_weights_tensor.to(DEVICE))
         log.info("  Loss=wce — WeightedCrossEntropy")
@@ -2492,14 +2499,16 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--loss",
-        choices=["wce", "phenology", "focal_tversky", "dynamic_balanced", "recall"],
+        choices=["wce", "phenology", "focal_tversky", "dynamic_balanced", "recall",
+                 "boundary_weighted"],
         default="wce",
         help=(
             "Loss function: wce (default, WeightedCrossEntropy), "
             "phenology (NDVI-dormancy weighting), "
             "focal_tversky (FocalCE+FocalTversky, median-freq weights), "
             "dynamic_balanced (per-batch Cui+2019 weights), "
-            "recall (EMA per-class recall weighting)"
+            "recall (EMA per-class recall weighting), "
+            "boundary_weighted (dynamic_balanced + boundary pixel 3× upweight)"
         ),
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
