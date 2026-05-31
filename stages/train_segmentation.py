@@ -1594,7 +1594,7 @@ def run_experiment(
                 test_dl, test_r["preds"], test_r["labels"],
                 band_names_list, exp_dir, exp_name,
             )
-            mlflow.log_artifacts(str(patch_dir), artifact_path="test/patches")
+            mlflow.log_artifacts(str(patch_dir), artifact_path="test_patches")
 
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",
