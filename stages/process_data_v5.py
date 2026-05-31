@@ -48,7 +48,7 @@ from crop_mapping_pipeline.config import (
     GDRIVE_OAUTH_TOKEN,
 )
 from crop_mapping_pipeline.utils.constants import USDA_CDL_NAMES
-from crop_mapping_pipeline.utils.label import label_filtering
+from crop_mapping_pipeline.utils.label import label_filtering, majority_filter_labels
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +157,8 @@ def assign_nodata(in_path: str, out_path: str, overwrite: bool = False) -> str:
 
 def process_cdl(cdl_raw_path: str, s2_ref_path: str,
                 out_reprojected: str, out_filtered: str,
-                overwrite: bool = False) -> None:
+                overwrite: bool = False,
+                majority_kernel: int = 3) -> None:
     if Path(out_reprojected).exists() and not overwrite:
         log.info("  CDL reprojected already exists: %s", Path(out_reprojected).name)
     else:
@@ -192,11 +193,18 @@ def process_cdl(cdl_raw_path: str, s2_ref_path: str,
         log.info("  CDL filtered already exists: %s", Path(out_filtered).name)
     else:
         log.info("  Filtering CDL → %d classes", len(KEEP_CLASSES))
+        _tmp_filtered = str(out_filtered) + ".tmp.tif"
         label_filtering(
             in_path      = out_reprojected,
-            out_path     = out_filtered,
+            out_path     = _tmp_filtered,
             keep_classes = KEEP_CLASSES,
         )
+        if majority_kernel and majority_kernel > 1:
+            log.info("  Applying majority filter (k=%d) to CDL labels", majority_kernel)
+            majority_filter_labels(_tmp_filtered, out_filtered, kernel_size=majority_kernel)
+            Path(_tmp_filtered).unlink(missing_ok=True)
+        else:
+            Path(_tmp_filtered).rename(out_filtered)
         log.info("  CDL filtered: %s", Path(out_filtered).name)
 
 
