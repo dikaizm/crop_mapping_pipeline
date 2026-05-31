@@ -1862,32 +1862,39 @@ def save_test_patch_visualizations(
     n_patches = len(patch_coords)
     ps        = patch_coords[0][2] if patch_coords else PATCH_SIZE
 
-    # Load B4/B3/B2 for every patch from every date → float16 to cap RAM
-    # Shape: (n_patches, n_dates, 3, ps, ps)
-    log.info(f"  Loading RGB median for {n_patches} test patches across {len(s2_processed)} dates...")
-    rgb_stack = np.full((n_patches, len(s2_processed), 3, ps, ps), np.nan, dtype=np.float16)
-    for fi, path in enumerate(s2_processed):
-        try:
-            with rasterio.open(path) as src:
-                for pi, (row, col, _) in enumerate(patch_coords):
-                    win = _rwin.Window(col, row, ps, ps)
-                    arr = src.read([b4_rast, b3_rast, b2_rast], window=win).astype(np.float16)
-                    arr[arr == S2_NODATA] = np.nan
-                    rgb_stack[pi, fi] = arr
-        except Exception as e:
-            log.warning(f"  RGB skip {Path(path).name}: {e}")
+    # Cache: keyed on seed + n_patches (split is deterministic — same for every experiment)
+    _cache_dir  = Path(s2_processed[0]).parent
+    _cache_path = _cache_dir / f"rgb_median_patches_seed{SEED}_n{n_patches}.npy"
 
-    # Median across dates → (n_patches, 3, ps, ps)
-    rgb_medians = np.nanmedian(rgb_stack.astype(np.float32), axis=1)
-    del rgb_stack
+    if _cache_path.exists():
+        log.info(f"  Patch RGB cache hit → {_cache_path.name}")
+        rgb_medians = np.load(str(_cache_path))
+    else:
+        log.info(f"  Building RGB median for {n_patches} test patches across {len(s2_processed)} dates...")
+        rgb_stack = np.full((n_patches, len(s2_processed), 3, ps, ps), np.nan, dtype=np.float16)
+        for fi, path in enumerate(s2_processed):
+            try:
+                with rasterio.open(path) as src:
+                    for pi, (row, col, _) in enumerate(patch_coords):
+                        win = _rwin.Window(col, row, ps, ps)
+                        arr = src.read([b4_rast, b3_rast, b2_rast], window=win).astype(np.float16)
+                        arr[arr == S2_NODATA] = np.nan
+                        rgb_stack[pi, fi] = arr
+            except Exception as e:
+                log.warning(f"  RGB skip {Path(path).name}: {e}")
 
-    # Percentile normalisation
-    for ci, bi in enumerate(norm_indices):
-        lo, hi = float(p1_arr[bi]), float(p99_arr[bi])
-        if hi > lo:
-            rgb_medians[:, ci] = (rgb_medians[:, ci] - lo) / (hi - lo)
-    rgb_medians = np.nan_to_num(rgb_medians, nan=0.0)
-    rgb_medians = np.clip(rgb_medians, 0, 1)   # (n_patches, 3, ps, ps)
+        rgb_medians = np.nanmedian(rgb_stack.astype(np.float32), axis=1)  # (n, 3, ps, ps)
+        del rgb_stack
+
+        for ci, bi in enumerate(norm_indices):
+            lo, hi = float(p1_arr[bi]), float(p99_arr[bi])
+            if hi > lo:
+                rgb_medians[:, ci] = (rgb_medians[:, ci] - lo) / (hi - lo)
+        rgb_medians = np.nan_to_num(rgb_medians, nan=0.0)
+        rgb_medians = np.clip(rgb_medians, 0, 1)
+
+        np.save(str(_cache_path), rgb_medians)
+        log.info(f"  Patch RGB cached → {_cache_path.name}")
 
     n_panels = 4
 
@@ -1916,7 +1923,7 @@ def save_test_patch_visualizations(
             fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
 
             axes[0].imshow(rgb)
-            axes[0].set_title("Median Composite\n(B4/B3/B2, viz only)", fontsize=11, fontweight="bold")
+            axes[0].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=11, fontweight="bold")
             axes[0].axis("off")
 
             axes[1].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
@@ -1945,24 +1952,23 @@ def save_test_patch_visualizations(
 
 
 def _load_rgb_for_viz(s2_paths, band_percentiles, downsample=4):
-    """Pixel-wise median composite of B4/B3/B2 across all dates for clean true-color viz.
+    """Pixel-wise median composite of B4/B3/B2. Cached to disk — computed once per data dir."""
+    cache_path = Path(s2_paths[0]).parent / f"rgb_median_composite_ds{downsample}.npy"
+    if cache_path.exists():
+        log.info(f"  RGB composite cache hit → {cache_path.name}")
+        return np.load(str(cache_path))
 
-    Median naturally removes cloud/shadow outliers. Returns (H//ds, W//ds, 3)
-    float32 [0,1] or None on failure.
-    """
-    b4 = S2_BAND_NAMES.index("B4") + 1   # rasterio 1-based
+    log.info(f"  Building RGB median composite from {len(s2_paths)} dates...")
+    b4 = S2_BAND_NAMES.index("B4") + 1
     b3 = S2_BAND_NAMES.index("B3") + 1
     b2 = S2_BAND_NAMES.index("B2") + 1
-    band_rasterio = [b4, b3, b2]
-    band_norm_idx = [S2_BAND_NAMES.index("B4"),
-                     S2_BAND_NAMES.index("B3"),
-                     S2_BAND_NAMES.index("B2")]
+    band_norm_idx = [S2_BAND_NAMES.index("B4"), S2_BAND_NAMES.index("B3"), S2_BAND_NAMES.index("B2")]
 
-    stack = []   # list of (3, H, W) arrays
+    stack = []
     for path in s2_paths:
         try:
             with rasterio.open(path) as src:
-                arr = src.read(band_rasterio).astype(np.float32)   # (3, H, W)
+                arr = src.read([b4, b3, b2]).astype(np.float32)
             arr[arr == S2_NODATA] = np.nan
             arr[~np.isfinite(arr)] = np.nan
             stack.append(arr)
@@ -1972,20 +1978,20 @@ def _load_rgb_for_viz(s2_paths, band_percentiles, downsample=4):
     if not stack:
         return None
 
-    # Pixel-wise median across dates → (3, H, W), ignores NaN
     composite = np.nanmedian(np.stack(stack, axis=0), axis=0)   # (3, H, W)
-
     p1, p99 = band_percentiles
     for ci, bi in enumerate(band_norm_idx):
         lo, hi = float(p1[bi]), float(p99[bi])
         if hi > lo:
             composite[ci] = (composite[ci] - lo) / (hi - lo)
-
     composite = np.nan_to_num(composite, nan=0.0)
     composite = np.clip(composite, 0, 1)
     composite = composite[:, ::downsample, ::downsample]
-    return np.transpose(composite, (1, 2, 0))   # (H, W, 3)
-    return None
+    result = np.transpose(composite, (1, 2, 0))   # (H, W, 3)
+
+    np.save(str(cache_path), result)
+    log.info(f"  RGB composite cached → {cache_path.name}")
+    return result
 
 
 def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_img=None):
@@ -2005,7 +2011,7 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
     panel = 0
     if rgb_img is not None:
         axes[panel].imshow(rgb_img)
-        axes[panel].set_title("Median Composite\n(B4/B3/B2, viz only)", fontsize=12, fontweight="bold")
+        axes[panel].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=12, fontweight="bold")
         axes[panel].axis("off")
         panel += 1
 
