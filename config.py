@@ -18,12 +18,16 @@ LOGS_DIR         = PROJECT_ROOT / "logs"
 PRELOAD_CACHE_DIR = PROCESSED_DIR / "preload_cache"
 PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# S2 data organised by role, not year
-S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "train"   # main training area (all dates, flat)
+# S2 data organised by year for temporal generalisation
+# Train: 2024 dates over study area
+# Test:  2025 dates over same area (temporal hold-out)
+S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "2024"    # 2024 training dates (flat)
+S2_TEST_DIR  = PROCESSED_DIR / "s2" / "2025"    # 2025 hold-out dates
 S2_PROCESSED_DIR = S2_TRAIN_DIR                  # backwards-compat alias
 
-CDL_TRAIN  = CDL_DIR / "cdl_train.tif"
-CDL_BY_YEAR = {"2024": CDL_TRAIN}        # legacy lookup used internally
+CDL_TRAIN  = CDL_DIR / "cdl_train.tif"           # CDL for train year (2024)
+CDL_TEST   = CDL_DIR / "cdl_2025.tif"            # CDL for test  year (2025)
+CDL_BY_YEAR = {"2024": CDL_TRAIN, "2025": CDL_TEST}
 
 # ── S2 metadata ────────────────────────────────────────────────────────────────
 S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
@@ -107,30 +111,29 @@ MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
 MLFLOW_EXPERIMENT_TRAIN_SPATIAL      = "cropmap_segmentation_s2_spatial"
 MLFLOW_EXPERIMENT_TRAIN_SAME_AREA    = "cropmap_segmentation_s2_same_area"
 MLFLOW_EXPERIMENT_TRAIN_V6_SPATIAL   = "cropmap_segmentation_s2_v6_spatial"
+MLFLOW_EXPERIMENT_TRAIN_V6_TEMPORAL  = "cropmap_segmentation_s2_v6_temporal"
 
 # ── GSI scoring hyperparameters ───────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 
-# ── Spatial test areas (held-out geography, same year as TRAIN_YEARS) ─────────
-# S2 files: data/processed/s2/test_a/*.tif  (same dates/bands as train area)
-# CDL files: data/processed/cdl/cdl_test_a.tif
+# ── Hold-out test areas (re-used for temporal generalisation) ────────────────
+# This branch uses the same study area but a different year for evaluation:
+#   train: data/processed/s2/2024/*.tif  + cdl_2024.tif
+#   test:  data/processed/s2/2025/*.tif  + cdl_2025.tif
+# Variable name SPATIAL_TEST_AREAS retained for code compatibility — the entry
+# is a temporal hold-out (same geography, different year).
 SPATIAL_TEST_AREAS = [
     {
-        "name":   "test_a",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_a",
-        "cdl":    CDL_DIR / "cdl_test_a.tif",
-    },
-    {
-        "name":   "test_b",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_b",
-        "cdl":    CDL_DIR / "cdl_test_b.tif",
+        "name":   "test_2025",
+        "s2_dir": PROCESSED_DIR / "s2" / "2025",
+        "cdl":    CDL_DIR / "cdl_2025.tif",
     },
 ]
 
 # ── Training hyperparameters ───────────────────────────────────────────────────
 TRAIN_YEARS    = ["2024"]
-TEST_YEAR      = "2024"
+TEST_YEAR      = "2025"
 PATCH_SIZE     = 256
 STRIDE         = 256
 MIN_VALID_FRAC = 0.1

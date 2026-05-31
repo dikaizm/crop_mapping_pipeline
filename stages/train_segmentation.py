@@ -1890,17 +1890,18 @@ def main(
     if data_dir:
         global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
         data_dir = Path(data_dir)
-        S2_TRAIN_DIR     = data_dir / "s2" / "train"
+        # Temporal split: train on 2024, test on 2025 (same area)
+        S2_TRAIN_DIR     = data_dir / "s2" / "2024"
         S2_PROCESSED_DIR = S2_TRAIN_DIR
         CDL_TRAIN        = data_dir / "cdl" / "cdl_train.tif"
-        CDL_BY_YEAR      = {"2024": CDL_TRAIN}
+        _cdl_test_2025   = data_dir / "cdl" / "cdl_2025.tif"
+        CDL_BY_YEAR      = {"2024": CDL_TRAIN, "2025": _cdl_test_2025}
         MODELS_DIR       = data_dir / "models"
         FIGURES_DIR      = data_dir / "figures"
         SPATIAL_TEST_AREAS = [
-            {"name": "test_a", "s2_dir": data_dir / "s2" / "test_a", "cdl": data_dir / "cdl" / "cdl_test_a.tif"},
-            {"name": "test_b", "s2_dir": data_dir / "s2" / "test_b", "cdl": data_dir / "cdl" / "cdl_test_b.tif"},
+            {"name": "test_2025", "s2_dir": data_dir / "s2" / "2025", "cdl": _cdl_test_2025},
         ]
-        log.info(f"Data dir overridden to {data_dir}")
+        log.info(f"Data dir overridden to {data_dir} (temporal: train=2024, test=2025)")
 
     s2_processed = sorted(
         glob(str(S2_TRAIN_DIR / "*_processed.tif")) +
@@ -2394,14 +2395,14 @@ if __name__ == "__main__":
         if args.data_dir:
             global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
             _dd = Path(args.data_dir)
-            S2_TRAIN_DIR     = _dd / "s2" / "train"
+            # Temporal split: train on 2024, test on 2025 (same area)
+            S2_TRAIN_DIR     = _dd / "s2" / "2024"
             S2_PROCESSED_DIR = S2_TRAIN_DIR
             CDL_TRAIN        = _dd / "cdl" / "cdl_train.tif"
             MODELS_DIR       = _dd / "models"
             FIGURES_DIR      = _dd / "figures"
             SPATIAL_TEST_AREAS = [
-                {"name": "test_a", "s2_dir": _dd / "s2" / "test_a", "cdl": _dd / "cdl" / "cdl_test_a.tif"},
-                {"name": "test_b", "s2_dir": _dd / "s2" / "test_b", "cdl": _dd / "cdl" / "cdl_test_b.tif"},
+                {"name": "test_2025", "s2_dir": _dd / "s2" / "2025", "cdl": _dd / "cdl" / "cdl_2025.tif"},
             ]
         ckpt = torch.load(ckpt_path, map_location=DEVICE)
         arch = ckpt.get("architecture", (args.arch or ["segformer"])[0])
