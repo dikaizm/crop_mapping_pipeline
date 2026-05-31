@@ -1605,11 +1605,11 @@ def run_experiment(
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
         if iou_csv.exists():
-            mlflow.log_artifact(str(iou_csv), artifact_path="test")
+            mlflow.log_artifact(str(iou_csv))
         if cm_path.exists():
-            mlflow.log_artifact(str(cm_path), artifact_path="test")
+            mlflow.log_artifact(str(cm_path))
         if seg_path is not None:
-            mlflow.log_artifact(str(seg_path), artifact_path="test")
+            mlflow.log_artifact(str(seg_path))
 
         # Training log
         run_log_handler.flush()
