@@ -1596,7 +1596,8 @@ def run_experiment(
             log.info(f"  Saving per-patch test visualizations for {exp_name}...")
             patch_dir = save_test_patch_visualizations(
                 test_dl, test_r["preds"], test_r["labels"],
-                band_names_list, exp_dir, exp_name,
+                s2_processed, test_ds, train_year_datasets_raw,
+                band_percentiles, exp_dir, exp_name,
             )
             mlflow.log_artifacts(str(patch_dir), artifact_path="test_patches")
 
@@ -1817,74 +1818,77 @@ def load_gt_remap(cdl_path):
     return gt.astype(np.uint8), profile
 
 
-def _pick_rgb_channels(band_names_list):
-    """Pick best (r, g, b) channel indices and label for visualization.
-
-    Priority:
-      1. True color B4/B3/B2 — prefer the date closest to July 15 (peak season)
-      2. False color CIR B8/B4/B3 — same date preference
-      3. First 3 available channels (last resort)
-    Returns (r_ch, g_ch, b_ch, label).
-    """
-    import re as _re
-    from datetime import date as _date
-
-    TARGET = _date(2000, 7, 15)  # peak season anchor (year ignored)
-
-    def _candidates(band_suffix):
-        """Return list of (abs_day_dist_from_July15, channel_idx) for all matching channels."""
-        result = []
-        for i, n in enumerate(band_names_list):
-            if n.endswith(band_suffix):
-                m = _re.match(r"(\d{4})-(\d{2})-(\d{2})_", n)
-                if m:
-                    mo, da = int(m.group(2)), int(m.group(3))
-                    dist = abs((mo - 7) * 30 + (da - 15))
-                else:
-                    dist = 999
-                result.append((dist, i))
-        return sorted(result)
-
-    b4_cands = _candidates("_B4")
-    if b4_cands:
-        # Pick the date closest to July 15 for B4, then find B3/B2 from same date prefix
-        _, r_ch = b4_cands[0]
-        date_prefix = band_names_list[r_ch].rsplit("_", 1)[0]  # e.g. "2024-07-30"
-        g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
-        b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B2"), None)
-        if g_ch is not None and b_ch is not None:
-            return r_ch, g_ch, b_ch, f"True Color B4/B3/B2\n({date_prefix}, viz only)"
-
-    # CIR fallback: B8/B4/B3 from best date
-    b8_cands = _candidates("_B8")
-    if b8_cands:
-        _, r_ch = b8_cands[0]
-        date_prefix = band_names_list[r_ch].rsplit("_", 1)[0]
-        g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B4"), None)
-        b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
-        if g_ch is not None and b_ch is not None:
-            return r_ch, g_ch, b_ch, f"False Color CIR B8/B4/B3\n({date_prefix}, viz only)"
-
-    # Last resort: first 3 channels
-    n = len(band_names_list)
-    if n >= 3:
-        return 0, 1, 2, f"Composite ({band_names_list[0]} / {band_names_list[1]} / {band_names_list[2]})"
-    return 0, 0, 0, "Grayscale"
-
-
 def save_test_patch_visualizations(
     test_dl,
     preds_tensor,
     labels_tensor,
-    band_names_list,
+    s2_processed,
+    test_ds,
+    raw_datasets,
+    band_percentiles,
     exp_dir,
     exp_name,
 ):
-    """Save individual test patch PNGs: Color Composite / Ground Truth / Prediction / Correct-Incorrect."""
+    """Save individual test patch PNGs: Median Composite / Ground Truth / Prediction / Correct-Incorrect.
+
+    RGB (B4/B3/B2) is loaded directly from raw S2 tifs as a pixel-wise median
+    across all dates — independent of which bands were selected for the model.
+    """
+    import rasterio.windows as _rwin
+
     patch_dir = exp_dir / "test_patches"
     patch_dir.mkdir(exist_ok=True)
 
-    r_ch, g_ch, b_ch, rgb_label = _pick_rgb_channels(band_names_list)
+    b4_rast      = S2_BAND_NAMES.index("B4") + 1   # rasterio 1-based
+    b3_rast      = S2_BAND_NAMES.index("B3") + 1
+    b2_rast      = S2_BAND_NAMES.index("B2") + 1
+    norm_indices = [S2_BAND_NAMES.index("B4"), S2_BAND_NAMES.index("B3"), S2_BAND_NAMES.index("B2")]
+    p1_arr, p99_arr = band_percentiles
+
+    # Build patch (row, col) list in test_dl iteration order
+    cum_sizes = [0]
+    for ds_raw in raw_datasets:
+        cum_sizes.append(cum_sizes[-1] + len(ds_raw.patches))
+
+    patch_coords = []
+    for j in range(len(test_ds)):
+        flat_idx = test_ds.indices[j]
+        for i in range(len(raw_datasets)):
+            if cum_sizes[i] <= flat_idx < cum_sizes[i + 1]:
+                row, col = raw_datasets[i].patches[flat_idx - cum_sizes[i]]
+                patch_coords.append((row, col, raw_datasets[i].patch_size))
+                break
+
+    n_patches = len(patch_coords)
+    ps        = patch_coords[0][2] if patch_coords else PATCH_SIZE
+
+    # Load B4/B3/B2 for every patch from every date → float16 to cap RAM
+    # Shape: (n_patches, n_dates, 3, ps, ps)
+    log.info(f"  Loading RGB median for {n_patches} test patches across {len(s2_processed)} dates...")
+    rgb_stack = np.full((n_patches, len(s2_processed), 3, ps, ps), np.nan, dtype=np.float16)
+    for fi, path in enumerate(s2_processed):
+        try:
+            with rasterio.open(path) as src:
+                for pi, (row, col, _) in enumerate(patch_coords):
+                    win = _rwin.Window(col, row, ps, ps)
+                    arr = src.read([b4_rast, b3_rast, b2_rast], window=win).astype(np.float16)
+                    arr[arr == S2_NODATA] = np.nan
+                    rgb_stack[pi, fi] = arr
+        except Exception as e:
+            log.warning(f"  RGB skip {Path(path).name}: {e}")
+
+    # Median across dates → (n_patches, 3, ps, ps)
+    rgb_medians = np.nanmedian(rgb_stack.astype(np.float32), axis=1)
+    del rgb_stack
+
+    # Percentile normalisation
+    for ci, bi in enumerate(norm_indices):
+        lo, hi = float(p1_arr[bi]), float(p99_arr[bi])
+        if hi > lo:
+            rgb_medians[:, ci] = (rgb_medians[:, ci] - lo) / (hi - lo)
+    rgb_medians = np.nan_to_num(rgb_medians, nan=0.0)
+    rgb_medians = np.clip(rgb_medians, 0, 1)   # (n_patches, 3, ps, ps)
+
     n_panels = 4
 
     error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])
@@ -1900,9 +1904,9 @@ def save_test_patch_visualizations(
     patch_idx = 0
     for imgs_batch, _ in test_dl:
         for b in range(imgs_batch.shape[0]):
-            img  = imgs_batch[b].numpy()              # (C, H, W)
             pred = preds_tensor[patch_idx].numpy()    # (H, W)
             gt   = labels_tensor[patch_idx].numpy()   # (H, W)
+            rgb  = np.transpose(rgb_medians[patch_idx], (1, 2, 0))  # (H, W, 3)
 
             error = np.zeros_like(gt, dtype=np.uint8)
             crop_mask = gt > 0
@@ -1910,31 +1914,22 @@ def save_test_patch_visualizations(
             error[crop_mask & (pred != gt)] = 2
 
             fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
-            panel = 0
 
-            rgb = np.stack([img[r_ch], img[g_ch], img[b_ch]], axis=-1)
-            lo, hi = np.percentile(rgb, 2), np.percentile(rgb, 98)
-            if hi > lo:
-                rgb = (rgb - lo) / (hi - lo)
-            rgb = np.clip(rgb, 0, 1)
-            axes[panel].imshow(rgb)
-            axes[panel].set_title(rgb_label, fontsize=11, fontweight="bold")
-            axes[panel].axis("off")
-            panel += 1
+            axes[0].imshow(rgb)
+            axes[0].set_title("Median Composite\n(B4/B3/B2, viz only)", fontsize=11, fontweight="bold")
+            axes[0].axis("off")
 
-            axes[panel].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
-            axes[panel].set_title("Ground Truth",    fontsize=11, fontweight="bold")
-            axes[panel].axis("off")
-            panel += 1
+            axes[1].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[1].set_title("Ground Truth",    fontsize=11, fontweight="bold")
+            axes[1].axis("off")
 
-            axes[panel].imshow(pred,  cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
-            axes[panel].set_title("Prediction",      fontsize=11, fontweight="bold")
-            axes[panel].axis("off")
-            panel += 1
+            axes[2].imshow(pred,  cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[2].set_title("Prediction",      fontsize=11, fontweight="bold")
+            axes[2].axis("off")
 
-            axes[panel].imshow(error, cmap=error_cmap, norm=error_norm, interpolation="nearest")
-            axes[panel].set_title("Correct / Incorrect", fontsize=11, fontweight="bold")
-            axes[panel].axis("off")
+            axes[3].imshow(error, cmap=error_cmap, norm=error_norm, interpolation="nearest")
+            axes[3].set_title("Correct / Incorrect", fontsize=11, fontweight="bold")
+            axes[3].axis("off")
 
             fig.legend(handles=crop_legend + error_legend, loc="lower center",
                        ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
