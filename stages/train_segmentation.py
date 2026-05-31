@@ -1950,49 +1950,46 @@ def save_test_patch_visualizations(
 
 
 def _load_rgb_for_viz(s2_paths, band_percentiles, downsample=4):
-    """Load peak-season date RGB (B4/B3/B2) from S2 tif list for visualization.
+    """Pixel-wise median composite of B4/B3/B2 across all dates for clean true-color viz.
 
-    Picks the date closest to July 15. Returns (H//ds, W//ds, 3) float32 [0,1]
-    or None on failure.
+    Median naturally removes cloud/shadow outliers. Returns (H//ds, W//ds, 3)
+    float32 [0,1] or None on failure.
     """
-    import re as _re
-    from datetime import date as _date
+    b4 = S2_BAND_NAMES.index("B4") + 1   # rasterio 1-based
+    b3 = S2_BAND_NAMES.index("B3") + 1
+    b2 = S2_BAND_NAMES.index("B2") + 1
+    band_rasterio = [b4, b3, b2]
+    band_norm_idx = [S2_BAND_NAMES.index("B4"),
+                     S2_BAND_NAMES.index("B3"),
+                     S2_BAND_NAMES.index("B2")]
 
-    TARGET = _date(2000, 7, 15)
-    b4_idx = S2_BAND_NAMES.index("B4")  # 0-based
-
-    def _date_dist(path):
-        m = _re.search(r"(\d{4})-(\d{2})-(\d{2})", Path(path).name)
-        if m:
-            mo, da = int(m.group(2)), int(m.group(3))
-            return abs((mo - 7) * 30 + (da - 15))
-        return 999
-
-    # Sort by distance to July 15, pick closest
-    sorted_paths = sorted(s2_paths, key=_date_dist)
-    for path in sorted_paths:
+    stack = []   # list of (3, H, W) arrays
+    for path in s2_paths:
         try:
             with rasterio.open(path) as src:
-                # rasterio bands are 1-based; S2_BAND_NAMES order → B4=idx4, B3=idx3, B2=idx2
-                b4 = S2_BAND_NAMES.index("B4") + 1
-                b3 = S2_BAND_NAMES.index("B3") + 1
-                b2 = S2_BAND_NAMES.index("B2") + 1
-                rgb = src.read([b4, b3, b2]).astype(np.float32)   # (3, H, W)
-            rgb[rgb == S2_NODATA] = np.nan
-            rgb[~np.isfinite(rgb)] = np.nan
-            p1, p99 = band_percentiles
-            for ci, bi in enumerate([S2_BAND_NAMES.index("B4"),
-                                      S2_BAND_NAMES.index("B3"),
-                                      S2_BAND_NAMES.index("B2")]):
-                lo, hi = float(p1[bi]), float(p99[bi])
-                if hi > lo:
-                    rgb[ci] = (rgb[ci] - lo) / (hi - lo)
-            rgb = np.nan_to_num(rgb, nan=0.0)
-            rgb = np.clip(rgb, 0, 1)
-            rgb = rgb[:, ::downsample, ::downsample]
-            return np.transpose(rgb, (1, 2, 0))   # (H, W, 3)
+                arr = src.read(band_rasterio).astype(np.float32)   # (3, H, W)
+            arr[arr == S2_NODATA] = np.nan
+            arr[~np.isfinite(arr)] = np.nan
+            stack.append(arr)
         except Exception as e:
-            log.warning(f"  RGB load failed for {Path(path).name}: {e}")
+            log.warning(f"  RGB skip {Path(path).name}: {e}")
+
+    if not stack:
+        return None
+
+    # Pixel-wise median across dates → (3, H, W), ignores NaN
+    composite = np.nanmedian(np.stack(stack, axis=0), axis=0)   # (3, H, W)
+
+    p1, p99 = band_percentiles
+    for ci, bi in enumerate(band_norm_idx):
+        lo, hi = float(p1[bi]), float(p99[bi])
+        if hi > lo:
+            composite[ci] = (composite[ci] - lo) / (hi - lo)
+
+    composite = np.nan_to_num(composite, nan=0.0)
+    composite = np.clip(composite, 0, 1)
+    composite = composite[:, ::downsample, ::downsample]
+    return np.transpose(composite, (1, 2, 0))   # (H, W, 3)
     return None
 
 
