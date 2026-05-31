@@ -1853,7 +1853,7 @@ def _pick_rgb_channels(band_names_list):
         g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
         b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B2"), None)
         if g_ch is not None and b_ch is not None:
-            return r_ch, g_ch, b_ch, f"True Color ({date_prefix})"
+            return r_ch, g_ch, b_ch, f"True Color B4/B3/B2\n({date_prefix}, viz only)"
 
     # CIR fallback: B8/B4/B3 from best date
     b8_cands = _candidates("_B8")
@@ -1863,7 +1863,7 @@ def _pick_rgb_channels(band_names_list):
         g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B4"), None)
         b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
         if g_ch is not None and b_ch is not None:
-            return r_ch, g_ch, b_ch, f"False Color CIR ({date_prefix})"
+            return r_ch, g_ch, b_ch, f"False Color CIR B8/B4/B3\n({date_prefix}, viz only)"
 
     # Last resort: first 3 channels
     n = len(band_names_list)
@@ -2010,7 +2010,7 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
     panel = 0
     if rgb_img is not None:
         axes[panel].imshow(rgb_img)
-        axes[panel].set_title("True Color (B4/B3/B2)", fontsize=12, fontweight="bold")
+        axes[panel].set_title("Median Composite\n(B4/B3/B2, viz only)", fontsize=12, fontweight="bold")
         axes[panel].axis("off")
         panel += 1
 
