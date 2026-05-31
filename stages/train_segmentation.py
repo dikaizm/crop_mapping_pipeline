@@ -1565,10 +1565,12 @@ def run_experiment(
                 channel_stats=None, band_percentiles=band_percentiles,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
+            rgb_img = _load_rgb_for_viz(test_s2_filtered, band_percentiles, downsample=4)
             save_segmentation_map(
                 pred_map, gt_map,
                 title=f"{exp_name} — Test Segmentation ({TEST_YEAR})",
                 save_path=str(seg_path),
+                rgb_img=rgb_img,
             )
             del pred_map, gt_map
         elif not skip_viz and primary_s2_filtered is not None:
@@ -1580,10 +1582,12 @@ def run_experiment(
                 channel_stats=None, band_percentiles=band_percentiles,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
+            rgb_img = _load_rgb_for_viz(primary_s2_filtered, band_percentiles, downsample=4)
             save_segmentation_map(
                 pred_map, gt_map,
                 title=f"{exp_name} — Segmentation Map ({TRAIN_YEARS[0]})",
                 save_path=str(seg_path),
+                rgb_img=rgb_img,
             )
             del pred_map, gt_map
 
@@ -1813,6 +1817,61 @@ def load_gt_remap(cdl_path):
     return gt.astype(np.uint8), profile
 
 
+def _pick_rgb_channels(band_names_list):
+    """Pick best (r, g, b) channel indices and label for visualization.
+
+    Priority:
+      1. True color B4/B3/B2 — prefer the date closest to July 15 (peak season)
+      2. False color CIR B8/B4/B3 — same date preference
+      3. First 3 available channels (last resort)
+    Returns (r_ch, g_ch, b_ch, label).
+    """
+    import re as _re
+    from datetime import date as _date
+
+    TARGET = _date(2000, 7, 15)  # peak season anchor (year ignored)
+
+    def _candidates(band_suffix):
+        """Return list of (abs_day_dist_from_July15, channel_idx) for all matching channels."""
+        result = []
+        for i, n in enumerate(band_names_list):
+            if n.endswith(band_suffix):
+                m = _re.match(r"(\d{4})-(\d{2})-(\d{2})_", n)
+                if m:
+                    mo, da = int(m.group(2)), int(m.group(3))
+                    dist = abs((mo - 7) * 30 + (da - 15))
+                else:
+                    dist = 999
+                result.append((dist, i))
+        return sorted(result)
+
+    b4_cands = _candidates("_B4")
+    if b4_cands:
+        # Pick the date closest to July 15 for B4, then find B3/B2 from same date prefix
+        _, r_ch = b4_cands[0]
+        date_prefix = band_names_list[r_ch].rsplit("_", 1)[0]  # e.g. "2024-07-30"
+        g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
+        b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B2"), None)
+        if g_ch is not None and b_ch is not None:
+            return r_ch, g_ch, b_ch, f"True Color ({date_prefix})"
+
+    # CIR fallback: B8/B4/B3 from best date
+    b8_cands = _candidates("_B8")
+    if b8_cands:
+        _, r_ch = b8_cands[0]
+        date_prefix = band_names_list[r_ch].rsplit("_", 1)[0]
+        g_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B4"), None)
+        b_ch = next((i for i, n in enumerate(band_names_list) if n == f"{date_prefix}_B3"), None)
+        if g_ch is not None and b_ch is not None:
+            return r_ch, g_ch, b_ch, f"False Color CIR ({date_prefix})"
+
+    # Last resort: first 3 channels
+    n = len(band_names_list)
+    if n >= 3:
+        return 0, 1, 2, f"Composite ({band_names_list[0]} / {band_names_list[1]} / {band_names_list[2]})"
+    return 0, 0, 0, "Grayscale"
+
+
 def save_test_patch_visualizations(
     test_dl,
     preds_tensor,
@@ -1821,22 +1880,12 @@ def save_test_patch_visualizations(
     exp_dir,
     exp_name,
 ):
-    """Save individual test patch PNGs: True Color / Ground Truth / Prediction / Correct-Incorrect."""
+    """Save individual test patch PNGs: Color Composite / Ground Truth / Prediction / Correct-Incorrect."""
     patch_dir = exp_dir / "test_patches"
     patch_dir.mkdir(exist_ok=True)
 
-    # Find RGB channel indices (first occurrence of _B4, _B3, _B2)
-    def _find_ch(suffix):
-        for i, n in enumerate(band_names_list):
-            if n.endswith(suffix):
-                return i
-        return None
-
-    r_ch = _find_ch("_B4")
-    g_ch = _find_ch("_B3")
-    b_ch = _find_ch("_B2")
-    has_rgb = all(c is not None for c in [r_ch, g_ch, b_ch])
-    n_panels = 4 if has_rgb else 3
+    r_ch, g_ch, b_ch, rgb_label = _pick_rgb_channels(band_names_list)
+    n_panels = 4
 
     error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])
     error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
@@ -1863,16 +1912,15 @@ def save_test_patch_visualizations(
             fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
             panel = 0
 
-            if has_rgb:
-                rgb = np.stack([img[r_ch], img[g_ch], img[b_ch]], axis=-1)
-                lo, hi = np.percentile(rgb, 2), np.percentile(rgb, 98)
-                if hi > lo:
-                    rgb = (rgb - lo) / (hi - lo)
-                rgb = np.clip(rgb, 0, 1)
-                axes[panel].imshow(rgb)
-                axes[panel].set_title("True Color (RGB)", fontsize=11, fontweight="bold")
-                axes[panel].axis("off")
-                panel += 1
+            rgb = np.stack([img[r_ch], img[g_ch], img[b_ch]], axis=-1)
+            lo, hi = np.percentile(rgb, 2), np.percentile(rgb, 98)
+            if hi > lo:
+                rgb = (rgb - lo) / (hi - lo)
+            rgb = np.clip(rgb, 0, 1)
+            axes[panel].imshow(rgb)
+            axes[panel].set_title(rgb_label, fontsize=11, fontweight="bold")
+            axes[panel].axis("off")
+            panel += 1
 
             axes[panel].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
             axes[panel].set_title("Ground Truth",    fontsize=11, fontweight="bold")
@@ -1901,28 +1949,85 @@ def save_test_patch_visualizations(
     return patch_dir
 
 
-def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
+def _load_rgb_for_viz(s2_paths, band_percentiles, downsample=4):
+    """Load peak-season date RGB (B4/B3/B2) from S2 tif list for visualization.
+
+    Picks the date closest to July 15. Returns (H//ds, W//ds, 3) float32 [0,1]
+    or None on failure.
+    """
+    import re as _re
+    from datetime import date as _date
+
+    TARGET = _date(2000, 7, 15)
+    b4_idx = S2_BAND_NAMES.index("B4")  # 0-based
+
+    def _date_dist(path):
+        m = _re.search(r"(\d{4})-(\d{2})-(\d{2})", Path(path).name)
+        if m:
+            mo, da = int(m.group(2)), int(m.group(3))
+            return abs((mo - 7) * 30 + (da - 15))
+        return 999
+
+    # Sort by distance to July 15, pick closest
+    sorted_paths = sorted(s2_paths, key=_date_dist)
+    for path in sorted_paths:
+        try:
+            with rasterio.open(path) as src:
+                # rasterio bands are 1-based; S2_BAND_NAMES order → B4=idx4, B3=idx3, B2=idx2
+                b4 = S2_BAND_NAMES.index("B4") + 1
+                b3 = S2_BAND_NAMES.index("B3") + 1
+                b2 = S2_BAND_NAMES.index("B2") + 1
+                rgb = src.read([b4, b3, b2]).astype(np.float32)   # (3, H, W)
+            rgb[rgb == S2_NODATA] = np.nan
+            rgb[~np.isfinite(rgb)] = np.nan
+            p1, p99 = band_percentiles
+            for ci, bi in enumerate([S2_BAND_NAMES.index("B4"),
+                                      S2_BAND_NAMES.index("B3"),
+                                      S2_BAND_NAMES.index("B2")]):
+                lo, hi = float(p1[bi]), float(p99[bi])
+                if hi > lo:
+                    rgb[ci] = (rgb[ci] - lo) / (hi - lo)
+            rgb = np.nan_to_num(rgb, nan=0.0)
+            rgb = np.clip(rgb, 0, 1)
+            rgb = rgb[:, ::downsample, ::downsample]
+            return np.transpose(rgb, (1, 2, 0))   # (H, W, 3)
+        except Exception as e:
+            log.warning(f"  RGB load failed for {Path(path).name}: {e}")
+    return None
+
+
+def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_img=None):
     pred_ds = pred_map[::downsample, ::downsample]
     gt_ds   = gt_map[::downsample, ::downsample]
 
-    # Error map: 0=background, 1=correct crop, 2=incorrect crop
     error = np.zeros_like(gt_ds, dtype=np.uint8)
     crop_mask = gt_ds > 0
-    error[crop_mask & (pred_ds == gt_ds)] = 1   # correct
-    error[crop_mask & (pred_ds != gt_ds)] = 2   # incorrect
-    error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])  # bg / correct / incorrect
+    error[crop_mask & (pred_ds == gt_ds)] = 1
+    error[crop_mask & (pred_ds != gt_ds)] = 2
+    error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])
     error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
 
-    fig, axes = plt.subplots(1, 3, figsize=(22, 8))
-    axes[0].imshow(gt_ds,   cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
-    axes[0].set_title("Ground Truth (CDL)", fontsize=12, fontweight="bold")
-    axes[0].axis("off")
-    axes[1].imshow(pred_ds, cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
-    axes[1].set_title("Prediction",         fontsize=12, fontweight="bold")
-    axes[1].axis("off")
-    axes[2].imshow(error,   cmap=error_cmap, norm=error_norm, interpolation="nearest")
-    axes[2].set_title("Correct / Incorrect", fontsize=12, fontweight="bold")
-    axes[2].axis("off")
+    n_panels = 4 if rgb_img is not None else 3
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 8))
+
+    panel = 0
+    if rgb_img is not None:
+        axes[panel].imshow(rgb_img)
+        axes[panel].set_title("True Color (B4/B3/B2)", fontsize=12, fontweight="bold")
+        axes[panel].axis("off")
+        panel += 1
+
+    axes[panel].imshow(gt_ds,   cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
+    axes[panel].set_title("Ground Truth (CDL)", fontsize=12, fontweight="bold")
+    axes[panel].axis("off")
+    panel += 1
+    axes[panel].imshow(pred_ds, cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
+    axes[panel].set_title("Prediction",         fontsize=12, fontweight="bold")
+    axes[panel].axis("off")
+    panel += 1
+    axes[panel].imshow(error,   cmap=error_cmap, norm=error_norm, interpolation="nearest")
+    axes[panel].set_title("Correct / Incorrect", fontsize=12, fontweight="bold")
+    axes[panel].axis("off")
 
     crop_patches = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
                     for i in range(1, NUM_CLASSES)]
