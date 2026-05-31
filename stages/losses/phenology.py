@@ -1,4 +1,4 @@
-"""Loss v2 — Phenology-Aware Loss.
+"""Phenology-Aware Loss (key: ``phenology``).
 
 Extends WeightedCrossEntropy with a dynamic per-pixel weight modifier:
 for labeled crop pixels whose NDVI falls below a dormancy threshold, the
@@ -57,7 +57,7 @@ class PhenologyAwareLoss(nn.Module):
         return (loss * weights).mean()
 
 
-def build_loss_v2(class_weights_tensor, band_names_list):
+def build_phenology(class_weights_tensor, band_names_list):
     """Build a PhenologyAwareLoss by locating B4/B8 in band_names_list.
 
     Args:
