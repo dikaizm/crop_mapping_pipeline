@@ -1296,7 +1296,7 @@ def run_experiment(
             "train_patches":  n_train,
             "val_patches":    n_val,
             "test_patches":   n_test,
-            "split":          "same_area_70_15_15",
+            "split":          "same_area_70_10_20",
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),

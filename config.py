@@ -123,8 +123,8 @@ BATCH_SIZE     = 8
 MAX_EPOCHS     = 150
 EARLY_STOP     = 20
 EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
-VAL_FRAC       = 0.15      # fraction of patches → val (random split)
-TEST_FRAC      = 0.15      # fraction of patches → same-area test split (70/15/15)
+VAL_FRAC       = 0.10      # fraction of patches → val (random split)
+TEST_FRAC      = 0.20      # fraction of patches → same-area test split (70/10/20)
 SEED           = 42
 
 ARCH_CFG = {
