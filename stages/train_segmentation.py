@@ -1587,6 +1587,15 @@ def run_experiment(
             )
             del pred_map, gt_map
 
+        # Per-patch test visualizations
+        if not skip_viz and test_r is not None and test_dl is not None:
+            log.info(f"  Saving per-patch test visualizations for {exp_name}...")
+            patch_dir = save_test_patch_visualizations(
+                test_dl, test_r["preds"], test_r["labels"],
+                band_names_list, exp_dir, exp_name,
+            )
+            mlflow.log_artifacts(str(patch_dir), artifact_path="test/patches")
+
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",
             model_files=[best_ckpt, last_ckpt],
@@ -1596,11 +1605,11 @@ def run_experiment(
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
         if iou_csv.exists():
-            mlflow.log_artifact(str(iou_csv))
+            mlflow.log_artifact(str(iou_csv), artifact_path="test")
         if cm_path.exists():
-            mlflow.log_artifact(str(cm_path))
+            mlflow.log_artifact(str(cm_path), artifact_path="test")
         if seg_path is not None:
-            mlflow.log_artifact(str(seg_path))
+            mlflow.log_artifact(str(seg_path), artifact_path="test")
 
         # Training log
         run_log_handler.flush()
@@ -1802,6 +1811,94 @@ def load_gt_remap(cdl_path):
         profile = dict(src.profile)
     gt = REMAP_LUT[np.clip(cdl, 0, 255)]
     return gt.astype(np.uint8), profile
+
+
+def save_test_patch_visualizations(
+    test_dl,
+    preds_tensor,
+    labels_tensor,
+    band_names_list,
+    exp_dir,
+    exp_name,
+):
+    """Save individual test patch PNGs: True Color / Ground Truth / Prediction / Correct-Incorrect."""
+    patch_dir = exp_dir / "test_patches"
+    patch_dir.mkdir(exist_ok=True)
+
+    # Find RGB channel indices (first occurrence of _B4, _B3, _B2)
+    def _find_ch(suffix):
+        for i, n in enumerate(band_names_list):
+            if n.endswith(suffix):
+                return i
+        return None
+
+    r_ch = _find_ch("_B4")
+    g_ch = _find_ch("_B3")
+    b_ch = _find_ch("_B2")
+    has_rgb = all(c is not None for c in [r_ch, g_ch, b_ch])
+    n_panels = 4 if has_rgb else 3
+
+    error_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222"])
+    error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
+    crop_legend = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
+                   for i in range(1, NUM_CLASSES)]
+    error_legend = [
+        mpatches.Patch(color="#22cc44", label="Correct"),
+        mpatches.Patch(color="#ee2222", label="Incorrect"),
+        mpatches.Patch(color="#d0d0d0", label="Background"),
+    ]
+
+    patch_idx = 0
+    for imgs_batch, _ in test_dl:
+        for b in range(imgs_batch.shape[0]):
+            img  = imgs_batch[b].numpy()              # (C, H, W)
+            pred = preds_tensor[patch_idx].numpy()    # (H, W)
+            gt   = labels_tensor[patch_idx].numpy()   # (H, W)
+
+            error = np.zeros_like(gt, dtype=np.uint8)
+            crop_mask = gt > 0
+            error[crop_mask & (pred == gt)] = 1
+            error[crop_mask & (pred != gt)] = 2
+
+            fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+            panel = 0
+
+            if has_rgb:
+                rgb = np.stack([img[r_ch], img[g_ch], img[b_ch]], axis=-1)
+                lo, hi = np.percentile(rgb, 2), np.percentile(rgb, 98)
+                if hi > lo:
+                    rgb = (rgb - lo) / (hi - lo)
+                rgb = np.clip(rgb, 0, 1)
+                axes[panel].imshow(rgb)
+                axes[panel].set_title("True Color (RGB)", fontsize=11, fontweight="bold")
+                axes[panel].axis("off")
+                panel += 1
+
+            axes[panel].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[panel].set_title("Ground Truth",    fontsize=11, fontweight="bold")
+            axes[panel].axis("off")
+            panel += 1
+
+            axes[panel].imshow(pred,  cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[panel].set_title("Prediction",      fontsize=11, fontweight="bold")
+            axes[panel].axis("off")
+            panel += 1
+
+            axes[panel].imshow(error, cmap=error_cmap, norm=error_norm, interpolation="nearest")
+            axes[panel].set_title("Correct / Incorrect", fontsize=11, fontweight="bold")
+            axes[panel].axis("off")
+
+            fig.legend(handles=crop_legend + error_legend, loc="lower center",
+                       ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
+                       bbox_to_anchor=(0.5, -0.02), frameon=True)
+            plt.suptitle(f"{exp_name} — Test Patch {patch_idx:04d}", fontsize=12, y=1.02)
+            plt.tight_layout()
+            plt.savefig(str(patch_dir / f"patch_{patch_idx:04d}.png"), dpi=100, bbox_inches="tight")
+            plt.close()
+            patch_idx += 1
+
+    log.info(f"  Saved {patch_idx} test patch PNGs → {patch_dir}")
+    return patch_dir
 
 
 def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
