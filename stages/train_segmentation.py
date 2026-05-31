@@ -476,16 +476,70 @@ def _patch_weights(datasets: list) -> np.ndarray:
 # ── Augmentation wrapper ───────────────────────────────────────────────────────
 
 class AugmentedSubset(torch.utils.data.Dataset):
-    """Wraps a Subset and applies geometric + spectral augmentations to (img, mask)."""
+    """Wraps a Subset and applies geometric + spectral augmentations to (img, mask).
 
-    def __init__(self, subset):
-        self.subset = subset
+    Spectral augmentation is *per-band* (B1..B12) not per-channel. All channels
+    belonging to the same S2 band (e.g., all B4 dates) share the same scale and
+    offset within one augmentation. This is physically faithful — atmospheric
+    scattering, sensor calibration, and BRDF effects are band-specific but
+    time-consistent for a fixed sensor.
+
+    Designed to improve spatial generalisation by simulating cross-area
+    reflectance variation (different atmospheric/illumination conditions in
+    held-out areas).
+
+    Args:
+        subset:        underlying torch Dataset / Subset producing (img, mask).
+        band_indices:  global band index per channel of img — used to map each
+                       channel to its S2 band (B1..B12). If None, falls back to
+                       per-channel augmentation.
+        band_scale:    per-band multiplicative scale range (default ±15%).
+        band_offset:   per-band additive offset range on normalised reflectance
+                       (default ±5%, simulates haze/aerosol).
+        brightness:    global multiplicative scale applied to all channels
+                       (default ±10%, simulates illumination).
+        gamma:         per-band gamma correction range (1±0.15), simulates
+                       nonlinear sensor/atmosphere response.
+        noise_std:     additive Gaussian noise sigma (default 0.05).
+        drop_p:        per-channel random dropout probability (default 0.05).
+        erase_p:       random erasing probability (default 0.5).
+    """
+
+    def __init__(self, subset, band_indices=None,
+                 band_scale=0.15, band_offset=0.05, brightness=0.10,
+                 gamma=0.15, noise_std=0.05, drop_p=0.05, erase_p=0.5):
+        self.subset      = subset
+        self.band_scale  = band_scale
+        self.band_offset = band_offset
+        self.brightness  = brightness
+        self.gamma_range = gamma
+        self.noise_std   = noise_std
+        self.drop_p      = drop_p
+        self.erase_p     = erase_p
+
+        # Pre-compute per-channel → per-band lookup (LongTensor, K,)
+        if band_indices is not None:
+            ch2band = np.asarray(
+                [int(bi) % N_BANDS_PER_DATE for bi in band_indices],
+                dtype=np.int64,
+            )
+            self.ch2band = torch.from_numpy(ch2band)   # (K,)
+            self.n_bands = N_BANDS_PER_DATE
+        else:
+            self.ch2band = None
+            self.n_bands = None
 
     def __len__(self):
         return len(self.subset)
 
+    def _per_channel_from_band(self, per_band_vals):
+        """Expand per-band values (n_bands,) → per-channel (K, 1, 1) via lookup."""
+        if self.ch2band is None:
+            raise RuntimeError("band_indices not set; per-band augmentation unavailable")
+        return per_band_vals[self.ch2band].view(-1, 1, 1)
+
     def __getitem__(self, idx):
-        img, mask = self.subset[idx]   # img: (C,H,W) float32 z-score, mask: (H,W) long
+        img, mask = self.subset[idx]   # img: (C,H,W) float [0,1] (percentile-normalised), mask: (H,W)
 
         # ── Geometric ────────────────────────────────────────────────────────
         if torch.rand(1).item() > 0.5:
@@ -499,26 +553,47 @@ class AugmentedSubset(torch.utils.data.Dataset):
             img  = torch.rot90(img,  k, [-2, -1])
             mask = torch.rot90(mask, k, [-2, -1])
 
-        # ── Spectral jitter: per-channel scale ∈ [0.9,1.1] + offset ∈ [-0.1,0.1] ──
         C = img.shape[0]
-        scale  = 0.9 + 0.2 * torch.rand(C, 1, 1)
-        offset = (torch.rand(C, 1, 1) - 0.5) * 0.2
-        img = img * scale + offset
 
-        # ── Random channel dropout (p=0.05 per channel) ──────────────────────
-        drop_mask = (torch.rand(C, 1, 1) > 0.05).float()
-        img = img * drop_mask
+        # ── Per-band spectral augmentation ──────────────────────────────────
+        if self.ch2band is not None:
+            # Per-band scale: simulates atmospheric/sensor variation per wavelength
+            band_scale  = 1.0 + (torch.rand(self.n_bands) - 0.5) * 2.0 * self.band_scale
+            band_offset = (torch.rand(self.n_bands) - 0.5) * 2.0 * self.band_offset
+            scale       = self._per_channel_from_band(band_scale)
+            offset      = self._per_channel_from_band(band_offset)
+            img = img * scale + offset
 
-        # ── Gaussian noise std=0.05 ───────────────────────────────────────────
-        img = img + torch.randn_like(img) * 0.05
+            # Per-band gamma: nonlinear response variation
+            band_gamma = 1.0 + (torch.rand(self.n_bands) - 0.5) * 2.0 * self.gamma_range
+            gamma      = self._per_channel_from_band(band_gamma)
+            img = img.clamp(min=0.0).pow(gamma)
+        else:
+            # Fallback per-channel (no band_indices supplied)
+            scale  = 1.0 + (torch.rand(C, 1, 1) - 0.5) * 2.0 * self.band_scale
+            offset = (torch.rand(C, 1, 1) - 0.5) * 2.0 * self.band_offset
+            img = img * scale + offset
 
-        # ── Random erasing (~10–20% patch area) ──────────────────────────────
-        if torch.rand(1).item() < 0.5:
-            H, W    = img.shape[-2], img.shape[-1]
-            rh      = int(H * (0.1 + 0.1 * torch.rand(1).item()))
-            rw      = int(W * (0.1 + 0.1 * torch.rand(1).item()))
-            r0      = torch.randint(0, H - rh + 1, (1,)).item()
-            c0      = torch.randint(0, W - rw + 1, (1,)).item()
+        # ── Global brightness (illumination simulation) ─────────────────────
+        brightness = 1.0 + (torch.rand(1).item() - 0.5) * 2.0 * self.brightness
+        img = img * brightness
+
+        # ── Per-channel random dropout ──────────────────────────────────────
+        if self.drop_p > 0:
+            drop_mask = (torch.rand(C, 1, 1) > self.drop_p).float()
+            img = img * drop_mask
+
+        # ── Gaussian noise ──────────────────────────────────────────────────
+        if self.noise_std > 0:
+            img = img + torch.randn_like(img) * self.noise_std
+
+        # ── Random erasing ──────────────────────────────────────────────────
+        if torch.rand(1).item() < self.erase_p:
+            H, W = img.shape[-2], img.shape[-1]
+            rh   = int(H * (0.1 + 0.1 * torch.rand(1).item()))
+            rw   = int(W * (0.1 + 0.1 * torch.rand(1).item()))
+            r0   = torch.randint(0, H - rh + 1, (1,)).item()
+            c0   = torch.randint(0, W - rw + 1, (1,)).item()
             img[:, r0:r0 + rh, c0:c0 + rw] = 0.0
 
         return img, mask
@@ -1145,7 +1220,10 @@ def run_experiment(
         num_samples=n_train,
         replacement=True,
     )
-    aug_train_ds = AugmentedSubset(train_ds)
+    # Band indices threaded through to enable per-band (vs per-channel) spectral
+    # augmentation. For per-year dict, use the primary year's indices.
+    _aug_bi = primary_idx_local if isinstance(band_indices, dict) else band_indices
+    aug_train_ds = AugmentedSubset(train_ds, band_indices=_aug_bi)
     train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
     val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True) if test_ds is not None else None
