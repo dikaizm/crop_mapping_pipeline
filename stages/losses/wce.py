@@ -1,4 +1,4 @@
-"""Loss v1 — Weighted Cross-Entropy.
+"""Weighted Cross-Entropy loss (key: ``wce``).
 
 Standard nn.CrossEntropyLoss with inverse-frequency class weights.
 Used as the baseline loss for all Exp A / B / C runs.
@@ -7,7 +7,7 @@ Used as the baseline loss for all Exp A / B / C runs.
 import torch.nn as nn
 
 
-def build_loss_v1(class_weights_tensor):
+def build_wce(class_weights_tensor):
     """Return WeightedCrossEntropy criterion.
 
     Args:

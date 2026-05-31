@@ -1,35 +1,41 @@
-"""Versioned loss functions for Stage 3 training.
+"""Named loss functions for Stage 3 training.
 
-    v1 — WeightedCrossEntropy             (baseline; static inverse-frequency weights)
-    v2 — PhenologyAwareLoss               (NDVI dormancy weighting)
-    v3 — FocalCE + FocalTversky           (Effective-Number weights; spatial generalisation)
-    v4 — DynamicEffectiveClassBalanced    (per-batch Cui+2019 weights; RS-specific)
-    v5 — RecallLoss                       (EMA per-class recall weighting; hard-class mining)
+CLI key (``--loss``) → description
+    wce               — WeightedCrossEntropy        (baseline; inverse-freq weights)
+    phenology         — PhenologyAwareLoss          (NDVI dormancy weighting)
+    focal_tversky     — FocalCE + FocalTversky      (median-freq weights;
+                                                     spatial generalisation)
+    dynamic_balanced  — DynamicEffectiveClassBalanced (per-batch Cui+2019 weights)
+    recall            — RecallLoss                  (EMA per-class recall weighting)
 
 Usage:
     from crop_mapping_pipeline.stages.losses import (
-        build_loss_v1, build_loss_v2, build_loss_v3,
-        build_loss_v4, build_loss_v5,
+        build_wce, build_phenology, build_focal_tversky,
+        build_dynamic_balanced, build_recall,
     )
 """
 
-from crop_mapping_pipeline.stages.losses.v1 import build_loss_v1
-from crop_mapping_pipeline.stages.losses.v2 import PhenologyAwareLoss, build_loss_v2
-from crop_mapping_pipeline.stages.losses.v3 import (
+from crop_mapping_pipeline.stages.losses.wce              import build_wce
+from crop_mapping_pipeline.stages.losses.phenology        import (
+    PhenologyAwareLoss, build_phenology,
+)
+from crop_mapping_pipeline.stages.losses.focal_tversky    import (
     FocalCEPlusFocalTversky, FocalCELoss, FocalTverskyLoss,
-    effective_number_weights, build_loss_v3,
+    effective_number_weights, build_focal_tversky,
 )
-from crop_mapping_pipeline.stages.losses.v4 import (
-    DynamicEffectiveClassBalancedLoss, build_loss_v4,
+from crop_mapping_pipeline.stages.losses.dynamic_balanced import (
+    DynamicEffectiveClassBalancedLoss, build_dynamic_balanced,
 )
-from crop_mapping_pipeline.stages.losses.v5 import RecallLoss, build_loss_v5
+from crop_mapping_pipeline.stages.losses.recall           import (
+    RecallLoss, build_recall,
+)
 
 __all__ = [
-    "build_loss_v1",
-    "build_loss_v2",
-    "build_loss_v3",
-    "build_loss_v4",
-    "build_loss_v5",
+    "build_wce",
+    "build_phenology",
+    "build_focal_tversky",
+    "build_dynamic_balanced",
+    "build_recall",
     "PhenologyAwareLoss",
     "FocalCEPlusFocalTversky",
     "FocalCELoss",

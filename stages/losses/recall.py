@@ -1,4 +1,4 @@
-"""Loss v5 — Recall Loss for Semantic Segmentation.
+"""Recall Loss for Semantic Segmentation (key: ``recall``).
 
 Weights cross-entropy loss per class by instantaneous recall w_c = 1 - R_c,
 where R_c is the per-class recall computed from batch predictions. Classes the
@@ -9,7 +9,7 @@ The loss "changes gradually between standard CE and inverse-frequency
 weighted CE" as training progresses, avoiding the excessive false-positive
 problem of always using the maximum minority-class weight.
 
-Key advantage over v1 (static inverse-freq CE):
+Key advantage over wce (static inverse-freq CE):
 - Responds to actual model behaviour during training, not train-set prior.
 - If model stops predicting Walnuts in test_b, Walnuts weight spikes
   automatically in the next batch — without knowing test-set distribution.
@@ -96,8 +96,8 @@ class RecallLoss(nn.Module):
                                weight=w, ignore_index=self.ignore_index)
 
 
-def build_loss_v5(num_classes, momentum=0.9,
-                  init_recall=0.0, ignore_index=-100):
+def build_recall(num_classes, momentum=0.9,
+                 init_recall=0.0, ignore_index=-100):
     """Build RecallLoss.
 
     Args:

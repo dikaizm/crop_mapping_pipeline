@@ -1,13 +1,13 @@
-"""Loss v4 — Dynamic Effective Class Balanced Loss.
+"""Dynamic Effective Class Balanced Loss (key: ``dynamic_balanced``).
 
 Extends Cui et al. 2019 effective-number weighting to be computed per batch
 rather than from static global train-set counts. Per-batch pixel counts are
 used to derive effective-number weights dynamically, so the loss adapts as
 class distribution shifts within mini-batches.
 
-Key difference from v3 (static weights):
-- v3 weights computed once from full CDL raster before training
-- v4 weights recomputed every forward pass from current batch pixel counts
+Key difference from focal_tversky (static weights):
+- focal_tversky weights computed once from full CDL raster before training
+- dynamic_balanced weights recomputed every forward pass from batch counts
 
 This adapts to class distributions encountered during training and is less
 sensitive to train/test prior shift.
@@ -90,8 +90,8 @@ class DynamicEffectiveClassBalancedLoss(nn.Module):
                                weight=w, ignore_index=self.ignore_index)
 
 
-def build_loss_v4(num_classes, beta=0.9999,
-                  fallback_weight=2.0, ignore_index=-100):
+def build_dynamic_balanced(num_classes, beta=0.9999,
+                           fallback_weight=2.0, ignore_index=-100):
     """Build DynamicEffectiveClassBalancedLoss.
 
     Args:

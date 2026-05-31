@@ -1,4 +1,4 @@
-"""Loss v3 — Focal CE + Focal Tversky for spatial generalisation.
+"""Focal CE + Focal Tversky loss (key: ``focal_tversky``).
 
 Designed for class imbalance AND class-prior shift between train and held-out
 areas (raw_v6 test_b has ~0% Rice while train has 14.6%).
@@ -155,11 +155,11 @@ class FocalCEPlusFocalTversky(nn.Module):
              + self.ft_w * self.focal_tv(logits, target)
 
 
-def build_loss_v3(class_weights_tensor=None, class_counts=None,
-                  weight_mode="median_freq", beta=None,
-                  gamma_focal=2.0, tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
-                  ce_weight=0.6, ft_weight=0.4):
-    """Build v3 compound loss.
+def build_focal_tversky(class_weights_tensor=None, class_counts=None,
+                        weight_mode="median_freq", beta=None,
+                        gamma_focal=2.0, tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
+                        ce_weight=0.6, ft_weight=0.4):
+    """Build the focal_tversky compound loss.
 
     Pass class_counts (preferred — applies build_class_weights with weight_mode)
     or a pre-computed class_weights_tensor (fallback).

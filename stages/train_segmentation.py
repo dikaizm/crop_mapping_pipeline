@@ -71,8 +71,8 @@ from crop_mapping_pipeline.config import (
 )
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import (
-    build_loss_v1, build_loss_v2, build_loss_v3,
-    build_loss_v4, build_loss_v5, PhenologyAwareLoss,
+    build_wce, build_phenology, build_focal_tversky,
+    build_dynamic_balanced, build_recall, PhenologyAwareLoss,
 )
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
@@ -1079,8 +1079,8 @@ def run_experiment(
     description,
     s2_processed,
     class_weights_tensor,
-    class_counts=None,      # required for v3 effective-number weights
-    loss_version="v1",      # "v1" = WeightedCE | "v2" = PhenologyAware | "v3" = FocalCE+FocalTversky
+    class_counts=None,      # required for focal_tversky effective-number weights
+    loss="wce",             # "wce" | "phenology" | "focal_tversky" | "dynamic_balanced" | "recall"
     force=False,
     skip_viz=False,
     no_preload=False,       # skip disk preload cache; use on-the-fly z-score normalisation
@@ -1241,36 +1241,36 @@ def run_experiment(
         optimizer, total_iters=MAX_EPOCHS, power=0.9
     )
 
-    # ── Loss function (versioned) ──────────────────────────────────────────
-    if loss_version == "v2":
-        criterion, red_idx, nir_idx = build_loss_v2(
+    # ── Loss function (named) ──────────────────────────────────────────────
+    if loss == "phenology":
+        criterion, red_idx, nir_idx = build_phenology(
             class_weights_tensor.to(DEVICE), band_names_list
         )
         log.info(
-            f"  Loss v2 — PhenologyAwareLoss "
+            f"  Loss=phenology — PhenologyAwareLoss "
             f"(Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})"
         )
-    elif loss_version == "v3":
-        criterion = build_loss_v3(
+    elif loss == "focal_tversky":
+        criterion = build_focal_tversky(
             class_counts=class_counts,
             beta=0.999, gamma_focal=2.0,
             tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
             ce_weight=0.6, ft_weight=0.4,
         ).to(DEVICE)
-        log.info("  Loss v3 — FocalCE + FocalTversky (Effective-Number weights, β=0.999)")
-    elif loss_version == "v4":
-        criterion = build_loss_v4(
+        log.info("  Loss=focal_tversky — FocalCE + FocalTversky (median-freq weights)")
+    elif loss == "dynamic_balanced":
+        criterion = build_dynamic_balanced(
             num_classes=NUM_CLASSES, beta=0.9999, fallback_weight=2.0,
         ).to(DEVICE)
-        log.info("  Loss v4 — Dynamic Effective Class Balanced (per-batch, β=0.9999)")
-    elif loss_version == "v5":
-        criterion = build_loss_v5(
+        log.info("  Loss=dynamic_balanced — Dynamic Effective Class Balanced (per-batch, β=0.9999)")
+    elif loss == "recall":
+        criterion = build_recall(
             num_classes=NUM_CLASSES, momentum=0.9, init_recall=0.0,
         ).to(DEVICE)
-        log.info("  Loss v5 — Recall Loss (EMA recall weighting, momentum=0.9)")
+        log.info("  Loss=recall — RecallLoss (EMA recall weighting, momentum=0.9)")
     else:
-        criterion = build_loss_v1(class_weights_tensor.to(DEVICE))
-        log.info("  Loss v1 — WeightedCrossEntropy")
+        criterion = build_wce(class_weights_tensor.to(DEVICE))
+        log.info("  Loss=wce — WeightedCrossEntropy")
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
 
@@ -1290,7 +1290,7 @@ def run_experiment(
             "weight_decay":   cfg["weight_decay"],
             "optimizer":      "AdamW",
             "lr_scheduler":   "PolynomialLR(power=0.9)",
-            "loss":           f"loss_{loss_version}",
+            "loss":           loss,
             "train_years":    str(TRAIN_YEARS),
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
@@ -1301,6 +1301,7 @@ def run_experiment(
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),
         })
+        mlflow.set_tag("loss",       loss)
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
 
@@ -1867,7 +1868,7 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4):
 def main(
     exps=None,
     archs=None,
-    loss_version="v1",
+    loss="wce",
     force=False,
     data_dir=None,
     skip_viz=False,
@@ -2196,9 +2197,10 @@ def main(
                 "train_years":  str(TRAIN_YEARS),
                 "test_year":    TEST_YEAR,
                 "description":  cfg_entry.description,
-                "loss_version": loss_version,
+                "loss":         loss,
                 **({"top_k": top_k} if top_k else {}),
             })
+            mlflow.set_tag("loss", loss)
             log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
             for arch, band_idx, band_names, description, extra_kw in arch_runs:
                 exp_name = f"exp_{exp_key}_k{top_k}_{arch}" if top_k else f"exp_{exp_key}_{arch}"
@@ -2211,7 +2213,7 @@ def main(
                     s2_processed=s2_processed,
                     class_weights_tensor=cw_tensor,
                     class_counts=cw_counts,
-                    loss_version=loss_version,
+                    loss=loss,
                     force=force,
                     skip_viz=skip_viz,
                     no_preload=args.no_preload,
@@ -2316,8 +2318,16 @@ if __name__ == "__main__":
         help="Which architectures to run (default: all)",
     )
     parser.add_argument(
-        "--loss-version", choices=["v1", "v2", "v3", "v4", "v5"], default="v1",
-        help="Loss function version: v1=WeightedCrossEntropy (default), v2=PhenologyAwareLoss",
+        "--loss",
+        choices=["wce", "phenology", "focal_tversky", "dynamic_balanced", "recall"],
+        default="wce",
+        help=(
+            "Loss function: wce (default, WeightedCrossEntropy), "
+            "phenology (NDVI-dormancy weighting), "
+            "focal_tversky (FocalCE+FocalTversky, median-freq weights), "
+            "dynamic_balanced (per-batch Cui+2019 weights), "
+            "recall (EMA per-class recall weighting)"
+        ),
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz",   action="store_true", help="Skip full-image visualization")
@@ -2437,7 +2447,7 @@ if __name__ == "__main__":
         main(
             exps=args.exp,
             archs=args.arch,
-            loss_version=args.loss_version,
+            loss=args.loss,
             force=args.force,
             data_dir=args.data_dir,
             skip_viz=args.skip_viz,

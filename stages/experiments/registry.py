@@ -32,7 +32,7 @@ class ExperimentConfig:
     description:       str
     band_indices:      Any           # list[int] or dict{yr: (list[int], list[str])}
     band_names:        list          # reference-year channel names
-    default_loss:      str  = "v1"  # "v1" | "v2" | "v3" | "v4" | "v5"
+    default_loss:      str  = "wce"  # "wce" | "phenology" | "focal_tversky" | "dynamic_balanced" | "recall"
     mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_V6_TEMPORAL
     extra_kw:          dict = field(default_factory=dict)
 
