@@ -107,26 +107,11 @@ MLFLOW_EXPERIMENT_TRAIN_6CLASS      = "cropmap_segmentation_s2_6class"
 MLFLOW_EXPERIMENT_TRAIN_SPATIAL      = "cropmap_segmentation_s2_spatial"
 MLFLOW_EXPERIMENT_TRAIN_SAME_AREA    = "cropmap_segmentation_s2_same_area"
 MLFLOW_EXPERIMENT_TRAIN_V6_SPATIAL   = "cropmap_segmentation_s2_v6_spatial"
+MLFLOW_EXPERIMENT_TRAIN_V6_SAME_AREA = "cropmap_segmentation_s2_v6_same_area"
 
 # ── GSI scoring hyperparameters ───────────────────────────────────────────────
 SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
-
-# ── Spatial test areas (held-out geography, same year as TRAIN_YEARS) ─────────
-# S2 files: data/processed/s2/test_a/*.tif  (same dates/bands as train area)
-# CDL files: data/processed/cdl/cdl_test_a.tif
-SPATIAL_TEST_AREAS = [
-    {
-        "name":   "test_a",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_a",
-        "cdl":    CDL_DIR / "cdl_test_a.tif",
-    },
-    {
-        "name":   "test_b",
-        "s2_dir": PROCESSED_DIR / "s2" / "test_b",
-        "cdl":    CDL_DIR / "cdl_test_b.tif",
-    },
-]
 
 # ── Training hyperparameters ───────────────────────────────────────────────────
 TRAIN_YEARS    = ["2024"]
@@ -139,7 +124,7 @@ MAX_EPOCHS     = 150
 EARLY_STOP     = 20
 EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
 VAL_FRAC       = 0.15      # fraction of patches → val (random split)
-TEST_FRAC      = 0.0       # 0 = no same-area test split; test_a/test_b are the actual test sets
+TEST_FRAC      = 0.15      # fraction of patches → same-area test split (70/15/15)
 SEED           = 42
 
 ARCH_CFG = {

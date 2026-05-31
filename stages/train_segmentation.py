@@ -63,7 +63,7 @@ from crop_mapping_pipeline.config import (
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA,
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
-    TRAIN_YEARS, TEST_YEAR, SPATIAL_TEST_AREAS,
+    TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, TEST_FRAC, SEED, ARCH_CFG,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
@@ -1197,8 +1197,8 @@ def run_experiment(
 
     gen = torch.Generator().manual_seed(SEED)
 
-    # Split: train / val  (+optional same-area test when TEST_FRAC > 0)
-    # When TEST_FRAC=0: test_a/test_b spatial areas are the actual test sets.
+    # Split: train / val / test  (same-area random split, TEST_FRAC > 0)
+    # When TEST_FRAC=0: test evaluation is skipped (no spatial test areas in this branch).
     n_total = len(train_val_ds)
     n_val   = max(1, int(VAL_FRAC * n_total))
     n_test  = max(1, int(TEST_FRAC * n_total)) if TEST_FRAC > 0 else 0
@@ -1230,7 +1230,7 @@ def run_experiment(
     if n_test > 0:
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (same-area random split)")
     else:
-        log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (test via test_a/test_b spatial areas)")
+        log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (no test split — TEST_FRAC=0)")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
     model     = build_model(arch, in_channels, NUM_CLASSES)
@@ -1296,7 +1296,7 @@ def run_experiment(
             "train_patches":  n_train,
             "val_patches":    n_val,
             "test_patches":   n_test,
-            "split":          "random_3way",
+            "split":          "same_area_70_15_15",
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),
@@ -1453,7 +1453,7 @@ def run_experiment(
             log.info("  Evaluating on held-out test set (same area, random split)...")
             test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
         else:
-            log.info("  No same-area test split — skipping; test results from test_a/test_b below")
+            log.info("  No same-area test split — TEST_FRAC=0; skipping test evaluation")
             test_r = None
 
         _base_metrics = {
@@ -1587,18 +1587,6 @@ def run_experiment(
             )
             del pred_map, gt_map
 
-        # ── Spatial test area evaluation ──────────────────────────────────────
-        spatial_results = {}
-        log.info(f"  Running spatial test on {len(SPATIAL_TEST_AREAS)} held-out area(s)...")
-        for area in SPATIAL_TEST_AREAS:
-            area_r = _evaluate_spatial_area(
-                model, area, band_names_list, exp_name, exp_dir,
-                skip_viz=skip_viz, channel_stats=None, no_preload=no_preload,
-                band_percentiles=band_percentiles,
-            )
-            if area_r is not None:
-                spatial_results[area["name"]] = area_r
-
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",
             model_files=[best_ckpt, last_ckpt],
@@ -1636,13 +1624,7 @@ def run_experiment(
         summary["test_miou"] = round(test_r["miou"], 4) if not np.isnan(test_r["miou"]) else float("nan")
         summary["test_mf1"]  = round(test_r["mf1"],  4) if not np.isnan(test_r["mf1"])  else float("nan")
         summary["test_oa"]   = round(test_r["oa"],   4) if not np.isnan(test_r["oa"])   else float("nan")
-    for aname, ar in spatial_results.items():
-        summary[f"{aname}_miou"] = round(ar["miou"], 4)
-        summary[f"{aname}_oa"]   = round(ar["oa"],   4)
-
-    if spatial_results:
-        spatial_str = "  ".join(f"{n}={r['miou']:.4f}" for n, r in spatial_results.items())
-    elif test_r is not None:
+    if test_r is not None:
         spatial_str = f"test_mIoU={test_r['miou']:.4f}"
     else:
         spatial_str = "(no test set)"
@@ -1888,7 +1870,7 @@ def main(
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
+        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
         data_dir = Path(data_dir)
         S2_TRAIN_DIR     = data_dir / "s2" / "train"
         S2_PROCESSED_DIR = S2_TRAIN_DIR
@@ -1896,10 +1878,6 @@ def main(
         CDL_BY_YEAR      = {"2024": CDL_TRAIN}
         MODELS_DIR       = data_dir / "models"
         FIGURES_DIR      = data_dir / "figures"
-        SPATIAL_TEST_AREAS = [
-            {"name": "test_a", "s2_dir": data_dir / "s2" / "test_a", "cdl": data_dir / "cdl" / "cdl_test_a.tif"},
-            {"name": "test_b", "s2_dir": data_dir / "s2" / "test_b", "cdl": data_dir / "cdl" / "cdl_test_b.tif"},
-        ]
         log.info(f"Data dir overridden to {data_dir}")
 
     s2_processed = sorted(
@@ -2223,9 +2201,8 @@ def main(
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
         summary_df  = pd.DataFrame(all_results)
-        # Sort by best available test metric: same-area test, else test_a, else val
         sort_col = next(
-            (c for c in ("test_miou", "test_a_miou", "test_b_miou", "best_val_miou") if c in summary_df.columns),
+            (c for c in ("test_miou", "best_val_miou") if c in summary_df.columns),
             None,
         )
         if sort_col:
@@ -2235,8 +2212,7 @@ def main(
         log.info("\n=== Experiment Summary ===")
         cols = [c for c in [
             "exp_name", "arch", "in_channels",
-            "best_val_miou", "test_miou", "test_oa",
-            "test_a_miou", "test_b_miou",
+            "best_val_miou", "test_miou", "test_mf1", "test_oa",
             "total_epochs",
         ] if c in summary_df.columns]
         log.info("\n" + summary_df[cols].to_string(index=False))
@@ -2400,17 +2376,13 @@ if __name__ == "__main__":
             log.error(f"Checkpoint not found: {ckpt_path}")
             sys.exit(1)
         if args.data_dir:
-            global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, SPATIAL_TEST_AREAS
+            global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
             _dd = Path(args.data_dir)
             S2_TRAIN_DIR     = _dd / "s2" / "train"
             S2_PROCESSED_DIR = S2_TRAIN_DIR
             CDL_TRAIN        = _dd / "cdl" / "cdl_train.tif"
             MODELS_DIR       = _dd / "models"
             FIGURES_DIR      = _dd / "figures"
-            SPATIAL_TEST_AREAS = [
-                {"name": "test_a", "s2_dir": _dd / "s2" / "test_a", "cdl": _dd / "cdl" / "cdl_test_a.tif"},
-                {"name": "test_b", "s2_dir": _dd / "s2" / "test_b", "cdl": _dd / "cdl" / "cdl_test_b.tif"},
-            ]
         ckpt = torch.load(ckpt_path, map_location=DEVICE)
         arch = ckpt.get("architecture", (args.arch or ["segformer"])[0])
         in_ch = ckpt["in_channels"]
@@ -2427,12 +2399,7 @@ if __name__ == "__main__":
             sys.exit(1)
         _d = np.load(str(_perc_cache))
         _bp = (_d["p1"].astype(np.float32), _d["p99"].astype(np.float32))
-        with mlflow.start_run(run_name=f"{exp_name}_eval"):
-            mlflow.set_tag("eval_only", "true")
-            mlflow.set_tag("checkpoint", str(ckpt_path))
-            for area in SPATIAL_TEST_AREAS:
-                _evaluate_spatial_area(model, area, band_names, exp_name, exp_dir,
-                                       channel_stats=None, band_percentiles=_bp)
+        log.info("--eval-only: no spatial test areas in same-area-split branch")
         sys.exit(0)
 
     top_k_list = args.top_k or [None]
