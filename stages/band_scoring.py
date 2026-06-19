@@ -103,10 +103,14 @@ def configure_data_dir(data_dir: str | None) -> None:
 
 
 def _glob_s2_train() -> list[str]:
-    """Glob S2 files from flat train/ dir."""
+    """Glob S2 files from flat train/ dir, then drop low-validity dates
+    (same filter as the training pipeline → standalone selection stays consistent)."""
+    from crop_mapping_pipeline.stages.valid_dates import filter_valid_s2_dates
     files = sorted(glob(str(S2_TRAIN_DIR / "*_processed.tif")) + glob(str(S2_TRAIN_DIR / "S2H_*.tif")))
-    seen = set()
-    return [p for p in files if not (p in seen or seen.add(p))]
+    seen  = set()
+    files = [p for p in files if not (p in seen or seen.add(p))]
+    valid, _ = filter_valid_s2_dates(files, cache_dir=S2_TRAIN_DIR)
+    return valid
 
 
 def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, int]]:

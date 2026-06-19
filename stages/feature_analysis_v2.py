@@ -152,11 +152,15 @@ def get_stage2_output_path(selector: str) -> pathlib.Path:
 
 
 def _glob_s2_year(yr: str) -> list[str]:
-    """Glob S2 files from flat train dir (yr param kept for API compat)."""
+    """Glob S2 files from flat train dir (yr param kept for API compat), then drop
+    low-validity dates (same filter as training → standalone selection stays consistent)."""
+    from crop_mapping_pipeline.stages.valid_dates import filter_valid_s2_dates
     d = S2_PROCESSED_DIR
     files = sorted(glob(str(d / "*_processed.tif")) + glob(str(d / "S2H_*.tif")))
-    seen = set()
-    return [p for p in files if not (p in seen or seen.add(p))]
+    seen  = set()
+    files = [p for p in files if not (p in seen or seen.add(p))]
+    valid, _ = filter_valid_s2_dates(files, cache_dir=d)
+    return valid
 
 
 def build_band_name_to_idx(s2_files: list[str]) -> tuple[list[str], dict[str, int]]:

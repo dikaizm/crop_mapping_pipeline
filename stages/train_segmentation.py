@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import json
+import tempfile
 import hashlib
 import argparse
 import logging
@@ -61,7 +62,7 @@ from crop_mapping_pipeline.config import (
     PROCESSED_DIR, PRELOAD_CACHE_DIR,
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
-    REMAP_LUT, S2_NODATA,
+    REMAP_LUT, S2_NODATA, S2_MIN_VALID_FRAC,
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
@@ -79,7 +80,7 @@ from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
 
 log = logging.getLogger(__name__)
-DEVICE = get_device()
+DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
 
 
 def _check_gdrive_token() -> None:
@@ -1072,6 +1073,10 @@ def _evaluate_spatial_area(
 
 # ── Main experiment runner ────────────────────────────────────────────────────
 
+# Set by --eval-only in __main__: path to a checkpoint to evaluate instead of training.
+EVAL_ONLY_CKPT = None
+
+
 def run_experiment(
     exp_name,
     arch,
@@ -1090,12 +1095,21 @@ def run_experiment(
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    exp_dir       = MODELS_DIR / f"{exp_name}_{run_timestamp}"
-    best_ckpt     = exp_dir / "best_model.pth"
-    last_ckpt     = exp_dir / "last_model.pth"
-    exp_dir.mkdir(parents=True, exist_ok=True)
+    eval_only     = EVAL_ONLY_CKPT is not None
+    if eval_only:
+        # Write outputs (patch PNGs + test_patch_metrics.csv) to a local dir;
+        # load weights from the provided checkpoint path.
+        exp_dir   = MODELS_DIR / f"{exp_name}_evalonly_{run_timestamp}"
+        best_ckpt = Path(EVAL_ONLY_CKPT)
+        last_ckpt = best_ckpt
+        exp_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        exp_dir   = MODELS_DIR / f"{exp_name}_{run_timestamp}"
+        best_ckpt = exp_dir / "best_model.pth"
+        last_ckpt = exp_dir / "last_model.pth"
+        exp_dir.mkdir(parents=True, exist_ok=True)
 
-    if not force and best_ckpt.exists():
+    if not eval_only and not force and best_ckpt.exists():
         log.info(f"Checkpoint exists — skipping {exp_name}  (use --force to re-run)")
         return None
 
@@ -1225,9 +1239,12 @@ def run_experiment(
     # augmentation. For per-year dict, use the primary year's indices.
     _aug_bi = primary_idx_local if isinstance(band_indices, dict) else band_indices
     aug_train_ds = AugmentedSubset(train_ds, band_indices=_aug_bi)
-    train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True, drop_last=True)
-    val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True)
-    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=4, pin_memory=True) if test_ds is not None else None
+    # In --eval-only with on-the-fly (no-preload) datasets, workers can't pickle open
+    # rasterio handles under macOS spawn; use 0 workers (single test pass, speed is fine).
+    _nw = 0 if eval_only else 4
+    train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=_nw, pin_memory=True, drop_last=True)
+    val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=_nw, pin_memory=True)
+    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=_nw, pin_memory=True) if test_ds is not None else None
     if n_test > 0:
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (same-area random split)")
     else:
@@ -1322,7 +1339,10 @@ def run_experiment(
         history                = []
         t_start    = time.time()
 
-        for epoch in range(MAX_EPOCHS):
+        if eval_only:
+            log.info(f"  [--eval-only] Skipping training — evaluating checkpoint {best_ckpt}")
+
+        for epoch in ([] if eval_only else range(MAX_EPOCHS)):
             t_ep = time.time()
 
             model.train()
@@ -1455,6 +1475,9 @@ def run_experiment(
         # ── Test evaluation (held-out same-area split, only when TEST_FRAC > 0) ─
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
+        if eval_only:
+            best_miou = ckpt.get("best_miou", best_miou)
+            log.info(f"  [--eval-only] Loaded checkpoint (reported best_val_miou={best_miou:.4f})")
 
         if test_dl is not None:
             log.info("  Evaluating on held-out test set (same area, random split)...")
@@ -1519,6 +1542,23 @@ def run_experiment(
                 log.info(f"  {name:<20} {cdl_id:>6}  {iou_s:>7}")
             log.info(f"  {'-'*38}")
             log.info(f"  {'mIoU':<20} {'':>6}  {test_r['miou']:>7.4f}")
+
+        # ── eval-only: write per-patch viz + metrics CSV, then stop ────────────
+        # (skips training-only artifacts: history/curve/seg-map regen/gdrive upload)
+        if eval_only:
+            if test_r is not None and test_dl is not None:
+                log.info(f"  [--eval-only] Saving per-patch test visualizations + metrics CSV for {exp_name}...")
+                save_test_patch_visualizations(
+                    test_dl, test_r["preds"], test_r["labels"],
+                    s2_processed, test_ds, train_year_datasets_raw,
+                    band_percentiles, exp_dir, exp_name,
+                )
+                log.info(f"  [--eval-only] Outputs written to {exp_dir}")
+            else:
+                log.warning("  [--eval-only] No test split available — nothing to write")
+            log.removeHandler(run_log_handler)
+            run_log_handler.close()
+            return None
 
         # ── Artifacts ─────────────────────────────────────────────────────────
 
@@ -1915,6 +1955,8 @@ def save_test_patch_visualizations(
         mpatches.Patch(color="#d0d0d0", label="Background"),
     ]
 
+    patch_metrics = []
+
     patch_idx = 0
     for imgs_batch, _ in test_dl:
         for b in range(imgs_batch.shape[0]):
@@ -1926,6 +1968,30 @@ def save_test_patch_visualizations(
             crop_mask = gt > 0
             error[crop_mask & (pred == gt)] = 1
             error[crop_mask & (pred != gt)] = 2
+
+            # ── Per-patch metrics (exact, from pred vs gt arrays) ──────────────
+            n_fg        = int(crop_mask.sum())
+            n_correctfg = int((crop_mask & (pred == gt)).sum())
+            fg_acc      = (n_correctfg / n_fg) if n_fg > 0 else float("nan")
+            overall_acc = float((pred == gt).mean())
+            # mean IoU over foreground classes present in gt or pred
+            ious = []
+            for cls in range(1, NUM_CLASSES):
+                gt_c, pr_c = (gt == cls), (pred == cls)
+                union = int((gt_c | pr_c).sum())
+                if union == 0:
+                    continue
+                ious.append(int((gt_c & pr_c).sum()) / union)
+            patch_miou  = float(np.mean(ious)) if ious else float("nan")
+            present     = sorted(int(c) for c in np.unique(gt) if c > 0)
+            patch_metrics.append({
+                "patch_idx":     patch_idx,
+                "fg_pixel_acc":  round(fg_acc, 6),
+                "overall_acc":   round(overall_acc, 6),
+                "patch_miou":    round(patch_miou, 6),
+                "n_fg_pixels":   n_fg,
+                "classes_present": "|".join(CLASS_LABELS[c] for c in present),
+            })
 
             fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
 
@@ -1955,6 +2021,22 @@ def save_test_patch_visualizations(
             patch_idx += 1
 
     log.info(f"  Saved {patch_idx} test patch PNGs → {patch_dir}")
+
+    # ── Dump per-patch metrics CSV (sorted best→worst by fg_pixel_acc) ─────────
+    if patch_metrics:
+        import csv as _csv
+        patch_metrics.sort(key=lambda r: (r["fg_pixel_acc"] != r["fg_pixel_acc"],
+                                          -(r["fg_pixel_acc"] if r["fg_pixel_acc"] == r["fg_pixel_acc"] else 0)))
+        csv_path = exp_dir / "test_patch_metrics.csv"
+        with open(csv_path, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(patch_metrics[0].keys()))
+            w.writeheader()
+            w.writerows(patch_metrics)
+        log.info(f"  Saved per-patch metrics → {csv_path}")
+        try:
+            mlflow.log_artifact(str(csv_path))
+        except Exception as e:
+            log.warning(f"  Could not log patch metrics to MLflow: {e}")
     return patch_dir
 
 
@@ -2077,15 +2159,18 @@ def main(
     # Override data directories
     # Use `global` so all module-level functions pick up the new paths at call time.
     if data_dir:
-        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
+        global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, PRELOAD_CACHE_DIR
         data_dir = Path(data_dir)
-        S2_TRAIN_DIR     = data_dir / "s2" / "train"
-        S2_PROCESSED_DIR = S2_TRAIN_DIR
-        CDL_TRAIN        = data_dir / "cdl" / "cdl_train.tif"
-        CDL_BY_YEAR      = {"2024": CDL_TRAIN}
-        MODELS_DIR       = data_dir / "models"
-        FIGURES_DIR      = data_dir / "figures"
-        log.info(f"Data dir overridden to {data_dir}")
+        S2_TRAIN_DIR      = data_dir / "s2" / "train"
+        S2_PROCESSED_DIR  = S2_TRAIN_DIR
+        CDL_TRAIN         = data_dir / "cdl" / "cdl_train.tif"
+        CDL_BY_YEAR       = {"2024": CDL_TRAIN}
+        MODELS_DIR        = data_dir / "models"
+        FIGURES_DIR       = data_dir / "figures"
+        _pcd = data_dir / "preload_cache"
+        if _pcd.exists():
+            PRELOAD_CACHE_DIR = _pcd     # reuse training preload cache (correct normalisation)
+        log.info(f"Data dir overridden to {data_dir}  (preload_cache={PRELOAD_CACHE_DIR})")
 
     s2_processed = sorted(
         glob(str(S2_TRAIN_DIR / "*_processed.tif")) +
@@ -2097,11 +2182,13 @@ def main(
     if not s2_processed:
         raise FileNotFoundError(f"No processed S2 files in {S2_TRAIN_DIR}")
 
-    # ── Validate TIF files — drop corrupt and empty-data files ────────────
-    # Cache result to s2_validation_cache.json; invalidated when file set changes.
+    # ── Validate TIF files — drop corrupt, empty, and low-validity dates ──────
+    # Drops acquisitions whose valid-pixel fraction < S2_MIN_VALID_FRAC (config),
+    # e.g. high-cloud/partial-capture dates. Cache invalidated when the file set
+    # OR the threshold changes.
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    MIN_VALID_FRAC_FILE = 0.01
+    MIN_VALID_FRAC_FILE = S2_MIN_VALID_FRAC
     VALIDATION_WIN      = 512
 
     _val_cache_path = S2_TRAIN_DIR / "s2_validation_cache.json"
@@ -2113,7 +2200,7 @@ def main(
         try:
             with open(_val_cache_path) as f:
                 c = json.load(f)
-            if c.get("files_key") == _val_cache_key:
+            if c.get("files_key") == _val_cache_key and c.get("threshold") == MIN_VALID_FRAC_FILE:
                 return c
         except Exception:
             pass
@@ -2174,6 +2261,7 @@ def main(
             with open(_val_cache_path, "w") as f:
                 json.dump({
                     "files_key": _val_cache_key,
+                    "threshold": MIN_VALID_FRAC_FILE,
                     "valid":     [Path(p).name for p in valid_s2],
                     "corrupt":   [Path(p).name for p, _ in corrupt],
                     "no_data":   [[Path(p).name, frac] for p, frac in no_data],
@@ -2191,11 +2279,11 @@ def main(
             "Re-download:  python stages/fetch_data_v2.py --processed --years <year> --overwrite"
         )
     if no_data:
-        log.warning(f"Excluding {len(no_data)} file(s) with <{MIN_VALID_FRAC_FILE*100:.0f}% valid pixels (no capture):")
+        log.warning(f"Excluding {len(no_data)} date(s) below {MIN_VALID_FRAC_FILE*100:.0f}% valid pixels (high cloud / partial capture):")
         for p, frac in no_data:
             log.warning(f"  {Path(p).name}  ({frac*100:.2f}% valid)")
     s2_processed = valid_s2
-    log.info(f"{len(s2_processed)} S2 files valid for training ({len(no_data)} empty excluded)")
+    log.info(f"{len(s2_processed)} S2 dates valid for training ({len(no_data)} low-validity excluded, threshold={MIN_VALID_FRAC_FILE*100:.0f}%)")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -2580,36 +2668,19 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.eval_only:
+        # Route through the normal --exp/--top-k/--arch path so the deterministic
+        # same-area split + correct band selection are rebuilt; run_experiment then
+        # skips training, loads this checkpoint, and runs test eval + per-patch viz.
         ckpt_path = Path(args.eval_only)
         if not ckpt_path.exists():
             log.error(f"Checkpoint not found: {ckpt_path}")
             sys.exit(1)
-        if args.data_dir:
-            global S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR
-            _dd = Path(args.data_dir)
-            S2_TRAIN_DIR     = _dd / "s2" / "train"
-            S2_PROCESSED_DIR = S2_TRAIN_DIR
-            CDL_TRAIN        = _dd / "cdl" / "cdl_train.tif"
-            MODELS_DIR       = _dd / "models"
-            FIGURES_DIR      = _dd / "figures"
-        ckpt = torch.load(ckpt_path, map_location=DEVICE)
-        arch = ckpt.get("architecture", (args.arch or ["segformer"])[0])
-        in_ch = ckpt["in_channels"]
-        band_names = ckpt.get("band_names", [])
-        exp_name = ckpt_path.parent.name
-        exp_dir  = ckpt_path.parent
-        model = build_model(arch, in_ch, NUM_CLASSES)
-        model.load_state_dict(ckpt["model_state_dict"])
-        log.info(f"Loaded checkpoint: {ckpt_path}  arch={arch}  in_ch={in_ch}")
-        # Load percentile stats from cache (must exist from prior training run)
-        _perc_cache = _dd / "band_percentiles.npz"
-        if not _perc_cache.exists():
-            log.error(f"--eval-only requires band_percentiles.npz at {_perc_cache}; run training first")
-            sys.exit(1)
-        _d = np.load(str(_perc_cache))
-        _bp = (_d["p1"].astype(np.float32), _d["p99"].astype(np.float32))
-        log.info("--eval-only: no spatial test areas in same-area-split branch")
-        sys.exit(0)
+        EVAL_ONLY_CKPT = str(ckpt_path)
+        # Keep all MLflow logging local (do not pollute the tracking server with eval runs).
+        _eval_mlruns = Path(tempfile.mkdtemp(prefix="evalonly_mlruns_"))
+        mlflow.set_tracking_uri(f"file://{_eval_mlruns}")
+        log.info(f"--eval-only: MLflow → local {_eval_mlruns} (server untouched)")
+        log.info(f"--eval-only: evaluating {ckpt_path}")
 
     top_k_list = args.top_k or [None]
     for k in top_k_list:

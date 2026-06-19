@@ -9,7 +9,7 @@ produces figures at thesis_v6/figures/:
   s2_ndvi_per_class.png      — NDVI per crop class across 25 dates
   s2_spectral_profile.png    — per-band mean reflectance at 3 dates
   s2_data_coverage.png       — valid-pixel % per date
-  cdl_label_map.png          — CDL 2024 map (6 crops + background)
+  cdl_label_map.png          — CDL 2024 map (8 crops + background)
   cdl_class_distribution_area.png — top-20 CDL class area bar chart
 
 Usage:
@@ -263,7 +263,7 @@ def fig_data_coverage(s2_files: list[Path], out_path: Path):
 
 
 def fig_cdl_label_map(cdl_path: Path, out_path: Path):
-    """CDL 2024 map with 6 crops + background."""
+    """CDL 2024 map with 8 crops + background."""
     cdl = _load_cdl(cdl_path, ds_factor=4)
     # Build colormap from KEEP_CLASSES
     display = np.zeros_like(cdl, dtype=np.int32)

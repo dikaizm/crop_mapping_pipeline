@@ -29,20 +29,28 @@ CDL_BY_YEAR = {"2024": CDL_TRAIN}        # legacy lookup used internally
 S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 N_BANDS_PER_DATE = len(S2_BAND_NAMES)
 S2_NODATA        = -9999.0
+# Per-date scene-usability threshold: drop downloaded date TIFs whose valid-pixel
+# fraction (non-nodata, finite) falls below this. Follows the CalCROP21 grid-curation
+# criterion (>=50% non-unknown pixels). Excludes residual high-cloud/partial-capture
+# dates (e.g. 2024-01-31 = 14.8% valid, 2024-12-11 = 4.8%) from selection + training.
+S2_MIN_VALID_FRAC = 0.50
 # 9 vegetation bands used for Exp A and B (excludes coastal B1 and redundant B8A)
 VEGE_BANDS       = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B11", "B12"]
 
 # ── CDL classes ────────────────────────────────────────────────────────────────
-# 6-class experiment: keep only major crops (IoU > 0.4, coverage > 4%).
-# Dropped to background: Sunflower(6), Other Hay(37), Grapes(69), Pistachios(204).
-# Fallow/Idle Cropland (61) → background (class 0); not in KEEP_CLASSES
-KEEP_CLASSES = [3, 24, 36, 54, 75, 76]  # Rice, Winter Wheat, Alfalfa, Tomatoes, Almonds, Walnuts
+# v6.1: CalCROP21-style selection — keep every crop class with >= 1,000,000 pixels
+# in the study area (10 m grid, 2024 reprojected CDL). 8 crops pass the threshold.
+# Counts (10 m px): Rice 6.18M, Almonds 4.62M, Tomatoes 2.83M, Walnuts 2.17M,
+#   Winter Wheat 1.74M, Grapes 1.59M, Corn 1.48M, Alfalfa 1.06M.
+# Below threshold → background: Pistachios(204) 0.57M, Prunes(210) 0.54M,
+#   Sunflower(6) 0.50M, Safflower(33) 0.43M, …  Fallow/Idle(61) → background.
+KEEP_CLASSES = [1, 3, 24, 36, 54, 69, 75, 76]  # Corn, Rice, WinterWheat, Alfalfa, Tomatoes, Grapes, Almonds, Walnuts
 CLASS_REMAP  = {cls_id: i + 1 for i, cls_id in enumerate(KEEP_CLASSES)}
-NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 7: 0=bg + 1–6=crops
+NUM_CLASSES  = len(KEEP_CLASSES) + 1   # 9: 0=bg + 1–8=crops
 
 CDL_CLASS_NAMES = {
-    3:  "Rice",    24: "Winter Wheat",  36: "Alfalfa",
-    54: "Tomatoes", 75: "Almonds",      76: "Walnuts",
+    1:  "Corn",      3:  "Rice",     24: "Winter Wheat",  36: "Alfalfa",
+    54: "Tomatoes",  69: "Grapes",   75: "Almonds",       76: "Walnuts",
 }
 
 REMAP_LUT = np.zeros(256, dtype=np.int64)

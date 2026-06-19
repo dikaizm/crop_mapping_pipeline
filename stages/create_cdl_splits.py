@@ -1,7 +1,7 @@
 """Create per-area CDL files for train / test_a / test_b.
 
 Each area's CDL is reprojected and clipped to match that area's S2 grid,
-then filtered to KEEP_CLASSES (6 classes).
+then filtered to KEEP_CLASSES (8 crops, v6.1 >=1M-px selection).
 
 Outputs:
   <processed>/cdl/cdl_train.tif
