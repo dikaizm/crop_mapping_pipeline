@@ -1,11 +1,10 @@
 """Experiment registry for Stage 3 training.
 
-Five experiments:
-  single_date    — peak NDVI date, ALL bands (baseline, no band selection)
-  naive_mt_gsi   — 4 phenological dates, GSI band selection
-  naive_mt_rf    — 4 phenological dates, RF band selection
-  gsi            — multi-temporal, GSI-direct top-K channels
-  rf             — multi-temporal, RF-importance top-K channels
+Four experiments:
+  single_date — peak NDVI date, ALL bands (single-date baseline)
+  naive_mt    — 4 phenological dates, ALL VEGE_BANDS (multi-temporal baseline, no selection)
+  gsi         — multi-temporal, GSI-direct top-K channels
+  rf          — multi-temporal, RF-importance top-K channels (multi-class MDI)
 
 To add an experiment:
   1. Build its band indices in main() of train_segmentation.py
@@ -38,11 +37,10 @@ class ExperimentConfig:
 
 
 def build_registry(
-    single_date_idx      = None,  single_date_names      = None,  single_date_key = None,
-    naive_mt_idx         = None,  naive_mt_names         = None,  phenol_map      = None,
-    naive_mt_rf_idx      = None,  naive_mt_rf_names      = None,
-    gsi_idx              = None,  gsi_names              = None,
-    rf_idx               = None,  rf_names               = None,
+    single_date_idx = None,  single_date_names = None,  single_date_key = None,
+    naive_mt_idx    = None,  naive_mt_names    = None,  phenol_map      = None,
+    gsi_idx         = None,  gsi_names         = None,
+    rf_idx          = None,  rf_names          = None,
 ) -> dict[str, ExperimentConfig]:
     """Build and return the experiment registry.
 
@@ -59,19 +57,11 @@ def build_registry(
         )
 
     if naive_mt_idx is not None:
-        reg["naive_mt_gsi"] = ExperimentConfig(
-            key         = "naive_mt_gsi",
-            description = f"4 phenological dates {list(phenol_map.values())}, GSI bands — {len(naive_mt_idx)}ch",
+        reg["naive_mt"] = ExperimentConfig(
+            key         = "naive_mt",
+            description = f"4 phenological dates {list(phenol_map.values())}, all VEGE_BANDS (baseline) — {len(naive_mt_idx)}ch",
             band_indices= naive_mt_idx,
             band_names  = naive_mt_names,
-        )
-
-    if naive_mt_rf_idx is not None:
-        reg["naive_mt_rf"] = ExperimentConfig(
-            key         = "naive_mt_rf",
-            description = f"4 phenological dates {list(phenol_map.values())}, RF bands — {len(naive_mt_rf_idx)}ch",
-            band_indices= naive_mt_rf_idx,
-            band_names  = naive_mt_rf_names,
         )
 
     if gsi_idx is not None:

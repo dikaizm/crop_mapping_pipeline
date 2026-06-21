@@ -6,8 +6,8 @@ Six experiment configurations × 2 architectures = up to 12 training runs.
 | Config             | Dates               | Band selection | Purpose                      |
 |--------------------|---------------------|----------------|------------------------------|
 | single_date        | peak NDVI           | none (all bands)| Baseline (isolates temporal) |
-| naive_mt_gsi       | 4 phenological      | GSI            | Multi-temporal + GSI bands   |
-| naive_mt_rf        | 4 phenological      | RF             | Multi-temporal + RF bands    |
+| naive_mt           | 4 phenological      | none           | Multi-temporal baseline + GSI bands   |
+| gsi                | multi-temporal      | GSI-direct     | Proposed method + RF bands    |
 | gsi                | GSI-direct          | GSI-direct     | GSI spectral-temporal        |
 | rf                 | RF-direct           | RF-direct      | RF spectral-temporal         |
 
@@ -2492,7 +2492,7 @@ def main(
 
     # ── Base domain channels (all 9 VEGE_BANDS, no band selection) ─────────
     needs_sd  = not exps or "single_date" in exps
-    needs_nmt = not exps or "naive_mt_gsi" in exps or "naive_mt_rf" in exps
+    needs_nmt = not exps or "naive_mt" in exps
 
     sd_base_idx = sd_base_names = sd_date_key = None
     nmt_base_idx = nmt_base_names = phenol_map_base = None
@@ -2518,34 +2518,10 @@ def main(
     if not exps or "single_date" in exps:
         single_date_idx, single_date_names, single_date_key = sd_base_idx, sd_base_names, sd_date_key
 
-    # ── naive_mt_gsi (GSI — scoped to 4 phenol dates only) ──────────────
+    # ── naive_mt (4 phenological dates × ALL VEGE_BANDS — no selection) ──
     naive_mt_idx = naive_mt_names = phenol_map = None
-    if not exps or "naive_mt_gsi" in exps:
-        naive_mt_idx, naive_mt_names, phenol_map = build_naive_multitemporal_selected_indices(
-            local_date_to_idx, local_band_to_idx,
-            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            top_k=top_k, force=force,
-        )
-
-    # ── naive_mt_rf (RF — scoped to 4 phenol dates only) ────────────────
-    naive_mt_rf_idx = naive_mt_rf_names = None
-    if not exps or "naive_mt_rf" in exps:
-        rf_nmt_json = _base_dir / "rf_band_naive_mt.json"
-        # phenol_map_base guaranteed set when needs_nmt is True
-        nmt_phenol_files = [_ref_year_s2[local_date_to_idx[d]] for d in phenol_map_base.values()]
-        if not force and rf_nmt_json.exists():
-            log.info(f"rf_band naive_mt: cached → {rf_nmt_json.name}")
-        else:
-            save_rf_band_json(
-                run_rf_band_only(nmt_phenol_files, str(_ref_year_cdl), nmt_base_names),
-                rf_nmt_json,
-            )
-        naive_mt_rf_idx, naive_mt_rf_names, _ = build_naive_multitemporal_selected_indices(
-            local_date_to_idx, local_band_to_idx,
-            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            candidates_json=rf_nmt_json, top_k=top_k,
-            phenol_map=phenol_map_base,
-        )
+    if not exps or "naive_mt" in exps:
+        naive_mt_idx, naive_mt_names, phenol_map = nmt_base_idx, nmt_base_names, phenol_map_base
 
     def _find_direct_json(selector: str) -> Path:
         """Return JSON path for a direct selector.
@@ -2593,15 +2569,14 @@ def main(
 
     # ── Build experiment registry & plan ───────────────────────────────────
     all_archs = list(ARCH_CFG.keys())
-    run_exps  = exps  or ["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"]
+    run_exps  = exps  or ["single_date", "naive_mt", "gsi", "rf"]
     run_archs = archs or all_archs
 
     registry = build_registry(
-        single_date_idx=single_date_idx,           single_date_names=single_date_names,           single_date_key=sd_date_key,
-        naive_mt_idx=naive_mt_idx,                 naive_mt_names=naive_mt_names,                 phenol_map=phenol_map_base,
-        naive_mt_rf_idx=naive_mt_rf_idx,           naive_mt_rf_names=naive_mt_rf_names,
-        gsi_idx=gsi_idx,     gsi_names=gsi_names,
-        rf_idx=rf_idx,       rf_names=rf_names,
+        single_date_idx=single_date_idx, single_date_names=single_date_names, single_date_key=sd_date_key,
+        naive_mt_idx=naive_mt_idx,       naive_mt_names=naive_mt_names,       phenol_map=phenol_map,
+        gsi_idx=gsi_idx,                 gsi_names=gsi_names,
+        rf_idx=rf_idx,                   rf_names=rf_names,
     )
 
     expanded_exps = expand_exp_keys(run_exps, registry)
@@ -2767,13 +2742,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train segmentation models for band selection comparison")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
-        default=["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
+        choices=["single_date", "naive_mt", "gsi", "rf"],
+        default=["single_date", "naive_mt", "gsi", "rf"],
         help=(
-            "Experiments to run (default: all five). "
-            "single_date=peak NDVI date + ALL bands (baseline, no selection), "
-            "naive_mt_gsi=4 phenol dates + GSI bands, naive_mt_rf=4 phenol dates + RF bands, "
-            "gsi=GSI-direct, rf=RF-direct."
+            "Experiments to run (default: all four). "
+            "single_date=peak NDVI date + ALL bands (single-date baseline), "
+            "naive_mt=4 phenological dates + ALL VEGE_BANDS (multi-temporal baseline, no selection), "
+            "gsi=GSI-direct top-K, rf=RF-direct top-K (multi-class MDI)."
         ),
     )
     parser.add_argument(
