@@ -29,26 +29,42 @@ log = logging.getLogger(__name__)
 
 
 def _gsi_per_crop(df: pd.DataFrame, bandnames: list[str]) -> dict[int, pd.Series]:
-    """Per-crop binary SI_global for each channel. Returns {crop_id: Series(index=bandnames)}."""
+    """Global Separability Index per crop, per channel — Li et al. 2023 (rs15040875), eq (1)-(2).
+
+    Pairwise-then-averaged (NOT one-vs-rest):
+      eq(1)  SI_so(j,k) = |mu_s - mu_o| / (1.96 * (sigma_s + sigma_o))   crop s vs each other crop o
+      eq(2)  GSI_s(j,k) = mean over o!=s of SI_so(j,k)
+
+    Returns {crop_id: Series(index=bandnames)}.
+    """
     x_all = df[bandnames].values.astype(np.float32)
     y_all = df["class_label"].values
 
-    gsi: dict[int, pd.Series] = {}
+    # Per-crop channel-wise mean/std (one pass per crop).
+    mu:  dict[int, np.ndarray] = {}
+    std: dict[int, np.ndarray] = {}
+    valid: list[int] = []
     for crop_id in KEEP_CLASSES:
-        crop_mask = y_all == crop_id
-        rest_mask = np.isin(y_all, KEEP_CLASSES) & ~crop_mask
-        if crop_mask.sum() < 10:
-            log.warning(f"  {CDL_CLASS_NAMES[crop_id]}: only {crop_mask.sum()} samples — zeros")
-            gsi[crop_id] = pd.Series(0.0, index=bandnames)
+        m = y_all == crop_id
+        if m.sum() < 10:
+            log.warning(f"  {CDL_CLASS_NAMES[crop_id]}: only {m.sum()} samples — zeros")
             continue
-        x_c = x_all[crop_mask]
-        x_r = x_all[rest_mask]
-        # SI(j,k) = |mean_s - mean_o| / (1.96 * (std_s + std_o))  — Li et al. 2023 (rs15040875),
-        # adapted from Somers & Asner 2013 (RSE 136:14-27).
-        si = np.abs(np.nanmean(x_c, 0) - np.nanmean(x_r, 0)) / (
-            1.96 * (np.nanstd(x_c, 0) + np.nanstd(x_r, 0)) + 1e-9
-        )
-        gsi[crop_id] = pd.Series(si.astype(np.float32), index=bandnames)
+        mu[crop_id]  = np.nanmean(x_all[m], axis=0)
+        std[crop_id] = np.nanstd(x_all[m], axis=0)
+        valid.append(crop_id)
+
+    gsi: dict[int, pd.Series] = {}
+    for s in KEEP_CLASSES:
+        if s not in valid:
+            gsi[s] = pd.Series(0.0, index=bandnames)
+            continue
+        # eq(1) for s vs every other crop o, then eq(2) average across o.
+        si_pairs = [
+            np.abs(mu[s] - mu[o]) / (1.96 * (std[s] + std[o]) + 1e-9)
+            for o in valid if o != s
+        ]
+        gsi_s = np.mean(si_pairs, axis=0) if si_pairs else np.zeros(len(bandnames), dtype=np.float32)
+        gsi[s] = pd.Series(gsi_s.astype(np.float32), index=bandnames)
     return gsi
 
 
@@ -57,6 +73,7 @@ def run_gsi_direct(
     top_k: int = SELECT_TOP_K_PER_CROP,
     data_dir: str | None = None,
     out_stem: str | None = None,
+    percentile: float | None = None,
 ) -> list[str]:
     """
     years_data: [(year, s2_paths, cdl_path), ...]
@@ -100,9 +117,8 @@ def run_gsi_direct(
         gsi_yr = _gsi_per_crop(df_yr, bandnames_yr)
         extra_gsi.append((year, bandnames_yr, gsi_yr))
 
-    # ── Select top-K per crop ─────────────────────────────────────────────────
-    per_crop: dict[int, list[str]] = {}
-
+    # ── Per-crop adjusted GSI Series (multi-year MMDD averaging if extra years) ─
+    adjusted_per_crop: dict[int, pd.Series] = {}
     for crop_id in KEEP_CLASSES:
         si_primary = gsi_primary[crop_id]
 
@@ -133,24 +149,39 @@ def run_gsi_direct(
         else:
             adjusted = si_primary
 
-        # Drop NaN channels before ranking
-        adjusted = adjusted.fillna(0.0)
-        top_channels = adjusted.nlargest(top_k).index.tolist()
-        per_crop[crop_id] = top_channels
+        adjusted_per_crop[crop_id] = adjusted.fillna(0.0)
 
-        log.info(
-            f"  {CDL_CLASS_NAMES[crop_id]:20s}: top-3 = {top_channels[:3]}"
-        )
+    # ── Selection: pooled-percentile threshold (Option B) OR top-K per crop ─────
+    per_crop: dict[int, list[str]] = {}
+    if percentile is not None:
+        # Shared absolute GSI threshold = Pxx of the POOLED per-crop GSI scores.
+        # Per crop keeps channels >= thr → adaptive count (separable crops keep more).
+        pooled = np.concatenate([s.values for s in adjusted_per_crop.values()])
+        thr    = float(np.percentile(pooled, percentile))
+        log.info(f"  GSI pooled P{percentile:g} threshold = {thr:.4f}")
+        for crop_id in KEEP_CLASSES:
+            s = adjusted_per_crop[crop_id]
+            sel = s[s >= thr].sort_values(ascending=False).index.tolist()
+            per_crop[crop_id] = sel
+            log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: {len(sel)} ch (top-3 {sel[:3]})")
+    else:
+        for crop_id in KEEP_CLASSES:
+            top_channels = adjusted_per_crop[crop_id].nlargest(top_k).index.tolist()
+            per_crop[crop_id] = top_channels
+            log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: top-3 = {top_channels[:3]}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    stem      = out_stem or f"select_gsi_direct_k{top_k}"
+    stem = out_stem or (
+        f"select_gsi_direct_p{percentile:g}" if percentile is not None
+        else f"select_gsi_direct_k{top_k}"
+    )
     base_dir  = Path(data_dir) if data_dir else SELECT_GSI_DIRECT_JSON.parent
     json_path = base_dir / f"{stem}.json"
     txt_path  = base_dir / f"{stem}_bands.txt"
 
     union = save_selection(
         per_crop, json_path, txt_path,
-        selector="gsi_direct", top_k=top_k,
+        selector="gsi_direct", top_k=top_k, percentile=percentile,
         meta={"years": [yr for yr, _, _ in years_data], "primary_year": primary_year,
               "n_primary_channels": len(primary_bandnames)},
     )

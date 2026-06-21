@@ -737,7 +737,8 @@ _DOMAIN_SCOPED_SELECTORS = {"single_date_gsi", "single_date_rf", "naive_mt_gsi",
 
 def main(force: bool = False, data_dir: str = None, output_dir: str = None,
          stage: str = "all", selector: str = "cnn",
-         mlflow_exp: str | None = None, top_k_values: list[int] | None = None) -> None:
+         mlflow_exp: str | None = None, top_k_values: list[int] | None = None,
+         percentile_values: list[float] | None = None) -> None:
     global _MLFLOW_EXPERIMENT_OVERRIDE, KEEP_CLASSES, CDL_CLASS_NAMES
     if mlflow_exp == "v3":
         _MLFLOW_EXPERIMENT_OVERRIDE = MLFLOW_EXPERIMENT_TRAIN_V3
@@ -835,12 +836,26 @@ def main(force: bool = False, data_dir: str = None, output_dir: str = None,
                 f"--selector must be one of {sorted(list(_DIRECT_OUTPUT_MAP) + list(_DOMAIN_SCOPED_SELECTORS))} "
                 f"for --stage select, got {selector!r}"
             )
-        ks = top_k_values or [SELECT_TOP_K_PER_CROP]
         fn = run_gsi_direct if selector == "gsi_direct" else run_rf_direct
         years_data = get_stage1_inputs()
         # output_dir overrides where JSONs are written; data_dir controls S2/CDL input only
         out_base = Path(output_dir) if output_dir else (Path(data_dir) if data_dir else _DIRECT_OUTPUT_MAP[selector][0].parent)
         out_base.mkdir(parents=True, exist_ok=True)
+
+        if percentile_values:
+            for p in percentile_values:
+                stem     = f"select_{selector}_p{p:g}"
+                json_out = out_base / f"{stem}.json"
+                if not force and json_out.exists():
+                    log.info(f"  P{p:g}: output exists ({json_out.name}) — skipping (--force to re-run)")
+                    continue
+                log.info(f"  Running {selector} percentile={p:g} ...")
+                fn(years_data, percentile=p, data_dir=str(out_base), out_stem=stem)
+                log.info(f"  P{p:g} complete → {json_out}")
+            log.info(f"Direct selection ({selector}) percentile sweep complete: P={percentile_values}")
+            return
+
+        ks = top_k_values or [SELECT_TOP_K_PER_CROP]
         for k in ks:
             stem     = f"select_{selector}_k{k}"
             json_out = out_base / f"{stem}.json"
@@ -877,6 +892,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     parser.add_argument("--top-k", type=int, nargs="+", default=None, metavar="K",
                         help="Top-K per crop for --stage select sweep (e.g. --top-k 5 10 15 20 30)")
+    parser.add_argument("--percentile", type=float, nargs="+", default=None, metavar="P",
+                        help="Pooled-percentile threshold(s) for --stage select sweep "
+                             "(per-class union, writes select_*_p{P}.json). Mutually exclusive with --top-k. "
+                             "E.g. --percentile 70 75 80 85 90 95")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory (S2/CDL input)")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for selection output JSONs (--stage select only); defaults to --data-dir")
     parser.add_argument("--mlflow-exp", choices=["v3"], default=None,
@@ -898,10 +917,13 @@ def configure_logging() -> None:
 
 def cli(argv=None) -> None:
     args = build_parser().parse_args(argv)
+    if args.top_k and args.percentile:
+        build_parser().error("--top-k and --percentile are mutually exclusive — pick one selection mode.")
     configure_logging()
     main(force=args.force, data_dir=args.data_dir, output_dir=args.output_dir,
          stage=args.stage, selector=args.selector,
-         mlflow_exp=args.mlflow_exp, top_k_values=args.top_k)
+         mlflow_exp=args.mlflow_exp, top_k_values=args.top_k,
+         percentile_values=args.percentile)
 
 
 if __name__ == "__main__":

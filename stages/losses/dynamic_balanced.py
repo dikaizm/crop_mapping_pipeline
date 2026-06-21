@@ -1,24 +1,27 @@
-"""Dynamic Effective Class Balanced Loss (key: ``dynamic_balanced``).
+"""Dynamic Effective Class Balanced Cross-Entropy (DECB-CE) — key: ``dynamic_balanced``.
 
-Extends Cui et al. 2019 effective-number weighting to be computed per batch
-rather than from static global train-set counts. Per-batch pixel counts are
-used to derive effective-number weights dynamically, so the loss adapts as
-class distribution shifts within mini-batches.
+Faithful implementation of the DECB weighting method of Zhou et al. (2023),
+"A Dynamic Effective Class Balanced Approach for Remote Sensing Imagery Semantic
+Segmentation of Imbalanced Data", Remote Sensing 15(7):1768, eqs (11),(14),(15).
 
-Key difference from focal_tversky (static weights):
-- focal_tversky weights computed once from full CDL raster before training
-- dynamic_balanced weights recomputed every forward pass from batch counts
+Per batch (a batch acts as a sample subspace):
+  n_batch  = total valid pixels in the batch
+  β_batch  = (1/(10^p + 1))^(1/n_batch)                          [eq (15), on n_batch]
+  E_nbatch = (1 - 1/(10^p+1)) / (1 - β_batch)                    [eq (11)/(7)]
+  for each class i with batch count n_i:
+      if n_i < E_nbatch:                    # minority class
+          β_i  = (1/(10^p+1))^(1/n_i)                            [eq (15)]
+          E_ni = (1 - 1/(10^p+1)) / (1 - β_i)                    [eq (5)/(11)]
+          W_i  = 1 - E_ni / n_batch                              [eq (14), minority]
+      else:                                 # majority class
+          W_i  = 1 - n_i / n_batch                               [eq (14), majority]
+  weights W_i applied to standard cross-entropy.
 
-This adapts to class distributions encountered during training and is less
-sensitive to train/test prior shift.
+The "dynamic" aspect is the per-class β derived from that class's batch count
+(eq 15) — NOT a fixed β. p>=3 (default 3 → 10^3+1 = 1001), matching the paper.
 
-Reference:
-  Zhang et al. 2023 — "A Dynamic Effective Class Balanced Approach for
-  Remote Sensing Imagery Semantic Segmentation of Imbalanced Data"
-  Remote Sensing 15(7), MDPI. https://doi.org/10.3390/rs15071768
-
-  Cui et al. 2019 — "Class-Balanced Loss Based on Effective Number of Samples"
-  CVPR. https://arxiv.org/abs/1901.05555
+Cui et al. (2019) "Class-Balanced Loss Based on Effective Number of Samples"
+(CVPR) is the origin of the effective-number concept that Zhou et al. build on.
 """
 
 import torch
@@ -27,80 +30,67 @@ import torch.nn.functional as F
 
 
 class DynamicEffectiveClassBalancedLoss(nn.Module):
-    """Cross-entropy with per-batch effective-number class weights.
-
-    For each forward pass:
-      1. Count pixels per class n_c in the batch.
-      2. Effective number: E_c = (1 - β^n_c) / (1 - β).
-      3. Weight: w_c = 1 / E_c, normalised to mean = 1.
-      4. Apply as class weights to cross-entropy.
-
-    Classes absent in the batch receive weight = fallback_weight (default 2.0,
-    ensuring unseen classes are still penalised when predicted).
+    """DECB-CE (Zhou et al. 2023). Per-batch, per-class dynamic effective-number weights.
 
     Args:
-        num_classes:      Total number of classes (including background).
-        beta:             Effective-number smoothing factor. 0.9999 works well
-                          for batch-scale pixel counts (thousands per class).
-        fallback_weight:  Weight assigned to classes with n_c = 0 in batch.
-        ignore_index:     Label index to ignore (default -100).
+        num_classes:     Total number of classes (including background).
+        p:               Effective-space hyperparameter; 10^p + 1 controls the
+                         dynamic β (paper uses p>=3; default 3 → 1001).
+        fallback_weight: Weight for classes absent from the batch (n_i = 0).
+        ignore_index:    Label index to ignore (default -100).
     """
 
-    def __init__(self, num_classes, beta=0.9999,
-                 fallback_weight=2.0, ignore_index=-100):
+    def __init__(self, num_classes, p=3, fallback_weight=1.0, ignore_index=-100):
         super().__init__()
         self.num_classes     = num_classes
-        self.beta            = beta
+        self.base            = 1.0 / (10 ** p + 1)   # 1/(10^p + 1), e.g. 1/1001
         self.fallback_weight = fallback_weight
         self.ignore_index    = ignore_index
 
     def forward(self, logits, target):
-        """
-        Args:
-            logits: (B, C, H, W) float
-            target: (B, H, W)    long
-        """
+        """logits: (B, C, H, W) float ; target: (B, H, W) long."""
         C    = self.num_classes
-        beta = self.beta
+        base = self.base
+        dev  = logits.device
 
-        # --- per-batch pixel counts per class ---
-        flat   = target.view(-1)
-        counts = torch.zeros(C, dtype=torch.float32, device=logits.device)
+        flat    = target.view(-1)
+        valid   = flat != self.ignore_index
+        n_batch = valid.sum().float().clamp(min=1.0)
+
+        counts = torch.zeros(C, dtype=torch.float32, device=dev)
         for c in range(C):
-            if c != self.ignore_index:
-                counts[c] = (flat == c).sum().float()
+            counts[c] = (flat == c).sum().float()
 
-        # --- effective-number weights ---
-        # E_c = (1 - β^n_c) / (1 - β);  w_c = 1/E_c
-        # For n_c=0: E_c→0 → assign fallback weight directly.
-        one_minus_beta    = 1.0 - beta
-        beta_pow          = torch.pow(torch.tensor(beta, device=logits.device), counts)
-        eff_num           = (1.0 - beta_pow).clamp(min=1e-12) / one_minus_beta
-        w                 = one_minus_beta / (1.0 - beta_pow).clamp(min=1e-12)
+        # Effective sample-subspace size of the batch (eq 11):
+        #   β_batch = base^(1/n_batch);  E_nbatch = (1-base)/(1-β_batch)
+        beta_batch = base ** (1.0 / n_batch)
+        E_nbatch   = (1.0 - base) / (1.0 - beta_batch).clamp(min=1e-12)
 
-        absent            = counts == 0
-        w[absent]         = self.fallback_weight
+        w = torch.empty(C, dtype=torch.float32, device=dev)
+        for c in range(C):
+            n_i = counts[c]
+            if n_i <= 0:
+                w[c] = self.fallback_weight
+            elif n_i < E_nbatch:                       # minority (eq 14, top)
+                beta_i = base ** (1.0 / n_i)
+                E_ni   = (1.0 - base) / (1.0 - beta_i).clamp(min=1e-12)
+                w[c]   = 1.0 - E_ni / n_batch
+            else:                                      # majority (eq 14, bottom)
+                w[c]   = 1.0 - n_i / n_batch
 
-        # normalise to mean = 1 (excluding absent classes from normalisation)
-        present_w         = w[~absent]
-        if present_w.numel() > 0:
-            w[~absent]    = w[~absent] / present_w.mean()
-
-        return F.cross_entropy(logits, target,
-                               weight=w, ignore_index=self.ignore_index)
+        w = w.clamp(min=1e-6)
+        return F.cross_entropy(logits, target, weight=w,
+                               ignore_index=self.ignore_index)
 
 
-def build_dynamic_balanced(num_classes, beta=0.9999,
-                           fallback_weight=2.0, ignore_index=-100):
-    """Build DynamicEffectiveClassBalancedLoss.
+def build_dynamic_balanced(num_classes, p=3, fallback_weight=1.0, ignore_index=-100,
+                           **_legacy):
+    """Build DECB-CE loss (Zhou et al. 2023).
 
-    Args:
-        num_classes:     Number of output classes.
-        beta:            Effective-number beta (0.9999 for batch-pixel scale).
-        fallback_weight: Weight for classes absent from batch.
-        ignore_index:    Label to ignore.
+    Accepts and ignores legacy kwargs (e.g. ``beta``) for backward compatibility
+    with older call sites; β is now dynamic per-class and not a fixed parameter.
     """
     return DynamicEffectiveClassBalancedLoss(
-        num_classes=num_classes, beta=beta,
+        num_classes=num_classes, p=p,
         fallback_weight=fallback_weight, ignore_index=ignore_index,
     )

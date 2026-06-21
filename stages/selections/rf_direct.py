@@ -34,6 +34,7 @@ def run_rf_direct(
     top_k: int = SELECT_TOP_K_PER_CROP,
     data_dir: str | None = None,
     out_stem: str | None = None,
+    percentile: float | None = None,
 ) -> list[str]:
     """
     years_data: [(year, s2_paths, cdl_path), ...]
@@ -65,6 +66,7 @@ def run_rf_direct(
 
     # ── Per-crop RF on primary year + band-averaging across extra years ────────
     per_crop: dict[int, list[str]] = {}
+    adjusted_per_crop: dict[int, pd.Series] = {}
 
     for crop_id in KEEP_CLASSES:
         crop_name = CDL_CLASS_NAMES[crop_id]
@@ -83,6 +85,7 @@ def run_rf_direct(
         if n_pos < 10:
             log.warning(f"  {crop_name}: only {n_pos} positive samples — skipping RF, using zeros")
             per_crop[crop_id] = []
+            adjusted_per_crop[crop_id] = pd.Series(0.0, index=primary_bandnames)
             continue
 
         # Handle NaN: replace with column median
@@ -169,19 +172,36 @@ def run_rf_direct(
         else:
             adjusted = importance_primary
 
-        top_channels = adjusted.nlargest(top_k).index.tolist()
-        per_crop[crop_id] = top_channels
-        log.info(f"  {crop_name:20s}: top-3 = {top_channels[:3]}")
+        adjusted_per_crop[crop_id] = adjusted.fillna(0.0)
+
+    # ── Selection: pooled-percentile threshold (Option B) OR top-K per crop ─────
+    if percentile is not None:
+        pooled = np.concatenate([s.values for s in adjusted_per_crop.values()])
+        thr    = float(np.percentile(pooled, percentile))
+        log.info(f"  RF pooled P{percentile:g} threshold = {thr:.6f}")
+        for crop_id in KEEP_CLASSES:
+            s = adjusted_per_crop[crop_id]
+            sel = s[s >= thr].sort_values(ascending=False).index.tolist()
+            per_crop[crop_id] = sel
+            log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: {len(sel)} ch (top-3 {sel[:3]})")
+    else:
+        for crop_id in KEEP_CLASSES:
+            top_channels = adjusted_per_crop[crop_id].nlargest(top_k).index.tolist()
+            per_crop[crop_id] = top_channels
+            log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: top-3 = {top_channels[:3]}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    stem      = out_stem or f"select_rf_direct_k{top_k}"
+    stem = out_stem or (
+        f"select_rf_direct_p{percentile:g}" if percentile is not None
+        else f"select_rf_direct_k{top_k}"
+    )
     base_dir  = Path(data_dir) if data_dir else SELECT_RF_DIRECT_JSON.parent
     json_path = base_dir / f"{stem}.json"
     txt_path  = base_dir / f"{stem}_bands.txt"
 
     union = save_selection(
         per_crop, json_path, txt_path,
-        selector="rf_direct", top_k=top_k,
+        selector="rf_direct", top_k=top_k, percentile=percentile,
         meta={"years": [yr for yr, _, _ in years_data], "primary_year": primary_year,
               "n_primary_channels": n_channels, "rf_n_estimators": RF_N_ESTIMATORS},
     )

@@ -2,7 +2,7 @@
 
 Combines two complementary weighting strategies:
 
-1. **Dynamic effective-class-balance** (Cui et al. 2019 / Zhang et al. 2023):
+1. **Dynamic effective-class-balance** (Cui et al. 2019 / Zhou et al. 2023):
    Per-batch pixel counts → effective-number weights → class-level CE weight.
    Handles pixel-count class imbalance (Rice vs. Walnuts).
 
@@ -26,7 +26,7 @@ References:
   Cui et al. 2019 — "Class-Balanced Loss Based on Effective Number of Samples"
   CVPR. https://arxiv.org/abs/1901.05555
 
-  Zhang et al. 2023 — "A Dynamic Effective Class Balanced Approach for
+  Zhou et al. 2023 — "A Dynamic Effective Class Balanced Approach for
   Remote Sensing Imagery Semantic Segmentation of Imbalanced Data"
   Remote Sensing 15(7). https://doi.org/10.3390/rs15071768
 """

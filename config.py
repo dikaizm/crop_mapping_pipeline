@@ -83,6 +83,9 @@ GDRIVE_PROCESSED_S2_FOLDER_IDS = {
     "2023": "1loxQTczrQ_oje6D3dYxzcU-Eo_tPNfnl",
     "2024": "1Dp--kFrQfqFS7C9osEREy9EZKt7KnN_4",
 }
+# v6.1 processed S2 (single-year 2024, single parent folder containing s2/ + cdl/).
+GDRIVE_PROCESSED_S2_V6_FOLDER_ID  = "1efS4GdRy-RmMrWIs3d2KJ2B4o-2f_mws"
+GDRIVE_PROCESSED_S2_V6_FOLDER_IDS = {"2024": GDRIVE_PROCESSED_S2_V6_FOLDER_ID}
 GDRIVE_PROCESSED_CDL_FOLDER_ID_V5 = "1L2vIVTJAuWCpLY9g4wmsWcAF6pXPZsnY"
 GDRIVE_RAW_CDL_FOLDER_ID           = ""   # optional GDrive fallback; USDA NASS used by default
 CDL_DOWNLOAD_URLS = {

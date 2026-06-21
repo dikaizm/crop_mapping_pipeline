@@ -1,12 +1,11 @@
 """Experiment registry for Stage 3 training.
 
-Six experiments:
-  single_date_gsi     — peak NDVI date, GSI band selection
-  single_date_rf      — peak NDVI date, RF band selection
-  naive_multitemporal — 4 phenological dates, GSI band selection
-  naive_mt_rf         — 4 phenological dates, RF band selection
-  gsi                 — multi-temporal, GSI-direct top-K channels
-  rf                  — multi-temporal, RF-importance top-K channels
+Five experiments:
+  single_date    — peak NDVI date, ALL bands (baseline, no band selection)
+  naive_mt_gsi   — 4 phenological dates, GSI band selection
+  naive_mt_rf    — 4 phenological dates, RF band selection
+  gsi            — multi-temporal, GSI-direct top-K channels
+  rf             — multi-temporal, RF-importance top-K channels
 
 To add an experiment:
   1. Build its band indices in main() of train_segmentation.py
@@ -40,7 +39,6 @@ class ExperimentConfig:
 
 def build_registry(
     single_date_idx      = None,  single_date_names      = None,  single_date_key = None,
-    single_date_rf_idx   = None,  single_date_rf_names   = None,
     naive_mt_idx         = None,  naive_mt_names         = None,  phenol_map      = None,
     naive_mt_rf_idx      = None,  naive_mt_rf_names      = None,
     gsi_idx              = None,  gsi_names              = None,
@@ -53,19 +51,11 @@ def build_registry(
     reg: dict[str, ExperimentConfig] = {}
 
     if single_date_idx is not None:
-        reg["single_date_gsi"] = ExperimentConfig(
-            key         = "single_date_gsi",
-            description = f"Single-date {single_date_key}, GSI bands — {len(single_date_idx)}ch",
+        reg["single_date"] = ExperimentConfig(
+            key         = "single_date",
+            description = f"Single-date {single_date_key}, all bands (baseline) — {len(single_date_idx)}ch",
             band_indices= single_date_idx,
             band_names  = single_date_names,
-        )
-
-    if single_date_rf_idx is not None:
-        reg["single_date_rf"] = ExperimentConfig(
-            key         = "single_date_rf",
-            description = f"Single-date {single_date_key}, RF bands — {len(single_date_rf_idx)}ch",
-            band_indices= single_date_rf_idx,
-            band_names  = single_date_rf_names,
         )
 
     if naive_mt_idx is not None:

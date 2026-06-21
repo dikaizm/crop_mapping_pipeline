@@ -88,6 +88,7 @@ def save_selection(
     selector: str,
     top_k: int,
     meta: dict | None = None,
+    percentile: float | None = None,
 ) -> list[str]:
     """Compute union of per-crop channels, save JSON + TXT, return union list."""
     seen: dict[str, None] = {}
@@ -103,6 +104,8 @@ def save_selection(
         "run_ts":       datetime.now().strftime("%Y%m%d-%H%M%S"),
         "selector":     selector,
         "top_k":        top_k,
+        "percentile":   percentile,
+        "selection_mode": "percentile" if percentile is not None else "top_k",
         "n_union":      len(union),
         "per_crop":     {str(k): v for k, v in per_crop.items()},
         "union_channels": union,

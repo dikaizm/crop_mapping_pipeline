@@ -5,8 +5,7 @@ Six experiment configurations × 2 architectures = up to 12 training runs.
 
 | Config             | Dates               | Band selection | Purpose                      |
 |--------------------|---------------------|----------------|------------------------------|
-| single_date_gsi    | peak NDVI           | GSI            | Domain temporal + GSI bands  |
-| single_date_rf     | peak NDVI           | RF             | Domain temporal + RF bands   |
+| single_date        | peak NDVI           | none (all bands)| Baseline (isolates temporal) |
 | naive_mt_gsi       | 4 phenological      | GSI            | Multi-temporal + GSI bands   |
 | naive_mt_rf        | 4 phenological      | RF             | Multi-temporal + RF bands    |
 | gsi                | GSI-direct          | GSI-direct     | GSI spectral-temporal        |
@@ -171,7 +170,6 @@ from crop_mapping_pipeline.stages.experiments import (
     parse_date,
     build_local_band_map,
     build_single_date_indices,
-    build_single_date_selected_indices,
     build_naive_multitemporal_indices,
     build_naive_multitemporal_selected_indices,
     build_registry,
@@ -2249,6 +2247,7 @@ def main(
     data_dir=None,
     skip_viz=False,
     top_k=None,
+    percentile=None,
     batch_size=None,
     epochs=None,
 ):
@@ -2405,7 +2404,7 @@ def main(
     _base_dir = Path(data_dir) if data_dir else PROCESSED_DIR
 
     # ── Base domain channels (all 9 VEGE_BANDS, no band selection) ─────────
-    needs_sd  = not exps or "single_date_gsi" in exps or "single_date_rf" in exps
+    needs_sd  = not exps or "single_date" in exps
     needs_nmt = not exps or "naive_mt_gsi" in exps or "naive_mt_rf" in exps
 
     sd_base_idx = sd_base_names = sd_date_key = None
@@ -2425,35 +2424,12 @@ def main(
         )
         nmt_base_idx, nmt_base_names, phenol_map_base = nmt_base
 
-    # ── single_date_gsi (GSI — scoped to peak date only) ─────────────────
+    # ── single_date (peak NDVI date × ALL bands — conventional baseline) ──
+    # No band selection: isolates the temporal variable against the multi-temporal
+    # configurations. GSI/RF are not applied here.
     single_date_idx = single_date_names = single_date_key = None
-    if not exps or "single_date_gsi" in exps:
-        single_date_idx, single_date_names, single_date_key = build_single_date_selected_indices(
-            local_date_to_idx, local_band_to_idx,
-            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            top_k=top_k, force=force,
-            best_date=sd_date_key,   # reuse peak date from build_single_date_indices
-        )
-
-    # ── single_date (RF — scoped to peak date only) ───────────────────────
-    single_date_rf_idx = single_date_rf_names = None
-    if not exps or "single_date_rf" in exps:
-        rf_sd_json = _base_dir / "rf_band_single_date.json"
-        # sd_date_key guaranteed set when needs_sd is True (single_date_rf implies it)
-        sd_peak_file = _ref_year_s2[local_date_to_idx[sd_date_key]]
-        if not force and rf_sd_json.exists():
-            log.info(f"rf_band single_date: cached → {rf_sd_json.name}")
-        else:
-            save_rf_band_json(
-                run_rf_band_only([sd_peak_file], str(_ref_year_cdl), sd_base_names),
-                rf_sd_json,
-            )
-        single_date_rf_idx, single_date_rf_names, _ = build_single_date_selected_indices(
-            local_date_to_idx, local_band_to_idx,
-            s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
-            candidates_json=rf_sd_json, top_k=top_k,
-            best_date=sd_date_key,
-        )
+    if not exps or "single_date" in exps:
+        single_date_idx, single_date_names, single_date_key = sd_base_idx, sd_base_names, sd_date_key
 
     # ── naive_mt_gsi (GSI — scoped to 4 phenol dates only) ──────────────
     naive_mt_idx = naive_mt_names = phenol_map = None
@@ -2485,8 +2461,14 @@ def main(
         )
 
     def _find_direct_json(selector: str) -> Path:
-        """Return JSON path for a direct selector; falls back to largest k if exact k missing."""
+        """Return JSON path for a direct selector.
+
+        Percentile mode → select_{selector}_p{P}.json (final selection, no subset).
+        Top-K mode      → select_{selector}_k{K}.json (falls back to largest k + subset).
+        """
         base = Path(data_dir) if data_dir else SELECT_GSI_DIRECT_JSON.parent
+        if percentile is not None:
+            return base / f"select_{selector}_p{percentile:g}.json"
         if top_k:
             exact = base / f"select_{selector}_k{top_k}.json"
             if exact.exists():
@@ -2497,23 +2479,26 @@ def main(
                 return candidates[-1]
         return base / f"select_{selector}_k{SELECT_TOP_K_PER_CROP}.json"
 
+    # In percentile mode the JSON union is already the final selection → no subset_k.
+    _subset = None if percentile is not None else top_k
+
     gsi_idx = gsi_names = None
     if not exps or "gsi" in exps:
         gsi_json = _find_direct_json("gsi_direct")
         gsi_idx, gsi_names = build_direct_indices(
             gsi_json, mmdd_to_date, local_band_to_idx,
-            selector_name="gsi", subset_k=top_k,
+            selector_name="gsi", subset_k=_subset,
         )
-        log.info(f"gsi (k={top_k or 'all'}): {len(gsi_idx)} channels")
+        log.info(f"gsi ({'P'+format(percentile,'g') if percentile is not None else 'k='+str(top_k or 'all')}): {len(gsi_idx)} channels")
 
     rf_idx = rf_names = None
     if not exps or "rf" in exps:
         rf_json = _find_direct_json("rf_direct")
         rf_idx, rf_names = build_direct_indices(
             rf_json, mmdd_to_date, local_band_to_idx,
-            selector_name="rf", subset_k=top_k,
+            selector_name="rf", subset_k=_subset,
         )
-        log.info(f"rf (k={top_k or 'all'}): {len(rf_idx)} channels")
+        log.info(f"rf ({'P'+format(percentile,'g') if percentile is not None else 'k='+str(top_k or 'all')}): {len(rf_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor, cw_counts = compute_class_weights(return_counts=True)
@@ -2521,12 +2506,11 @@ def main(
 
     # ── Build experiment registry & plan ───────────────────────────────────
     all_archs = list(ARCH_CFG.keys())
-    run_exps  = exps  or ["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"]
+    run_exps  = exps  or ["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"]
     run_archs = archs or all_archs
 
     registry = build_registry(
         single_date_idx=single_date_idx,           single_date_names=single_date_names,           single_date_key=sd_date_key,
-        single_date_rf_idx=single_date_rf_idx,     single_date_rf_names=single_date_rf_names,
         naive_mt_idx=naive_mt_idx,                 naive_mt_names=naive_mt_names,                 phenol_map=phenol_map_base,
         naive_mt_rf_idx=naive_mt_rf_idx,           naive_mt_rf_names=naive_mt_rf_names,
         gsi_idx=gsi_idx,     gsi_names=gsi_names,
@@ -2574,7 +2558,9 @@ def main(
             f"across architectures. train_years={TRAIN_YEARS}, test_year={TEST_YEAR}.",
         )
         n_ch = len(arch_runs[0][1]) if arch_runs[0][1] else 0
-        parent_run_name = f"exp_{exp_key}_k{top_k}_{timestamp}" if top_k else f"exp_{exp_key}_{timestamp}"
+        _sel_sfx = (f"_p{percentile:g}" if percentile is not None
+                    else (f"_k{top_k}" if top_k else ""))
+        parent_run_name = f"exp_{exp_key}{_sel_sfx}_{timestamp}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
             mlflow.log_params({
                 "experiment":   f"exp_{exp_key}",
@@ -2584,6 +2570,7 @@ def main(
                 "description":  cfg_entry.description,
                 "loss":         loss,
                 **({"top_k": top_k} if top_k else {}),
+                **({"percentile": percentile} if percentile is not None else {}),
                 **_get_hardware_info(),
             })
             mlflow.set_tag(
@@ -2594,7 +2581,7 @@ def main(
             )
             log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
             for arch, band_idx, band_names, description, extra_kw in arch_runs:
-                exp_name = f"exp_{exp_key}_k{top_k}_{arch}" if top_k else f"exp_{exp_key}_{arch}"
+                exp_name = f"exp_{exp_key}{_sel_sfx}_{arch}"
                 result = run_experiment(
                     exp_name=exp_name,
                     arch=arch,
@@ -2692,11 +2679,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train segmentation models for band selection comparison")
     parser.add_argument(
         "--exp", nargs="+",
-        choices=["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
-        default=["single_date_gsi", "single_date_rf", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
+        choices=["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
+        default=["single_date", "naive_mt_gsi", "naive_mt_rf", "gsi", "rf"],
         help=(
-            "Experiments to run (default: all six). "
-            "single_date_gsi=peak NDVI + GSI bands, single_date_rf=peak NDVI + RF bands, "
+            "Experiments to run (default: all five). "
+            "single_date=peak NDVI date + ALL bands (baseline, no selection), "
             "naive_mt_gsi=4 phenol dates + GSI bands, naive_mt_rf=4 phenol dates + RF bands, "
             "gsi=GSI-direct, rf=RF-direct."
         ),
@@ -2741,6 +2728,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--top-k", type=int, nargs="+", default=None, metavar="K",
         help="Top-K value(s) to sweep (loads select_gsi/rf_direct_k{K}.json per k). E.g. --top-k 5 10 15 20 30",
+    )
+    parser.add_argument(
+        "--percentile", type=float, nargs="+", default=None, metavar="P",
+        help="Percentile threshold(s) to sweep for gsi/rf direct selection "
+             "(loads select_gsi/rf_direct_p{P}.json per P). Pooled-percentile, per-class union. "
+             "Mutually exclusive with --top-k. E.g. --percentile 70 75 80 85 90 95",
     )
     parser.add_argument(
         "--batch-size", type=int, default=None, metavar="N",
@@ -2803,11 +2796,21 @@ if __name__ == "__main__":
         log.info(f"--eval-only: MLflow → local {_eval_mlruns} (server untouched)")
         log.info(f"--eval-only: evaluating {ckpt_path}")
 
-    top_k_list = args.top_k or [None]
-    for k in top_k_list:
-        if k is not None:
+    if args.top_k and args.percentile:
+        log.error("--top-k and --percentile are mutually exclusive — pick one selection mode.")
+        sys.exit(1)
+
+    if args.percentile:
+        sweep = [("percentile", p) for p in args.percentile]
+    elif args.top_k:
+        sweep = [("top_k", k) for k in args.top_k]
+    else:
+        sweep = [(None, None)]
+
+    for mode, val in sweep:
+        if mode is not None:
             log.info(f"{'='*65}")
-            log.info(f"  Top-K sweep: k={k}")
+            log.info(f"  {'Percentile' if mode=='percentile' else 'Top-K'} sweep: {mode}={val}")
             log.info(f"{'='*65}")
         main(
             exps=args.exp,
@@ -2816,7 +2819,8 @@ if __name__ == "__main__":
             force=args.force,
             data_dir=args.data_dir,
             skip_viz=args.skip_viz,
-            top_k=k,
+            top_k=val if mode == "top_k" else None,
+            percentile=val if mode == "percentile" else None,
             batch_size=args.batch_size,
             epochs=args.epochs,
         )

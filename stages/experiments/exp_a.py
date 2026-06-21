@@ -88,12 +88,12 @@ def _find_peak_ndvi_date(local_date_to_idx, s2_paths=None, cdl_path=None):
 
 def build_single_date_indices(local_date_to_idx, local_band_to_idx,
                               s2_paths=None, cdl_path=None):
-    """Single date (peak NDVI) × all 9 VEGE_BANDS."""
+    """Single date (peak NDVI) × all S2 bands — conventional baseline (no band selection)."""
     best_date = _find_peak_ndvi_date(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
     off   = local_date_to_idx[best_date] * N_BANDS_PER_DATE
-    idx   = [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
-    names = [f"{b}_{best_date}" for b in VEGE_BANDS]
-    log.info(f"single_date: {len(idx)} channels")
+    idx   = [off + S2_BAND_NAMES.index(b) for b in S2_BAND_NAMES]
+    names = [f"{b}_{best_date}" for b in S2_BAND_NAMES]
+    log.info(f"single_date: {len(idx)} channels (all {len(S2_BAND_NAMES)} bands, no selection)")
     return idx, names, best_date
 
 
