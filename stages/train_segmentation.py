@@ -850,7 +850,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
         assert band_percentiles is not None, "band_percentiles (lo, hi) required"
         assert norm_mode in NORM_MODES, f"norm_mode must be one of {NORM_MODES}"
         self._norm_mode = norm_mode
-        imgs_path, masks_path = self._cache_paths(dataset, cache_dir) if cache_dir else (None, None)
+        imgs_path, masks_path = self._cache_paths(dataset, cache_dir, norm_mode) if cache_dir else (None, None)
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
             log.info(f"  [{desc}] Cache hit → mmap {imgs_path.name}")
@@ -962,7 +962,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
             _buf_path.unlink(missing_ok=True)
 
     @staticmethod
-    def _cache_paths(dataset, cache_dir):
+    def _cache_paths(dataset, cache_dir, norm_mode):
         key = {
             "s2":             sorted(os.path.basename(str(p)) for p in dataset.s2_paths),
             "cdl":            os.path.basename(str(dataset.cdl_path)),
