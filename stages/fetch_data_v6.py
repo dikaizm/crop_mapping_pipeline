@@ -304,6 +304,123 @@ def download_cdl(folder_id: str, output_dir: str,
     return results
 
 
+def fetch_preload_cache(folder_id: str, output_dir: str,
+                        overwrite: bool = False) -> list:
+    """Download a cloud-built portable preload cache flat into output_dir.
+
+    Grabs every `preload_*.npy` + `preload_*_masks.pt` reachable from folder_id
+    (also descends into an optional `preload_cache/` subfolder). Filenames are
+    content-hash keyed by PreloadedDataset, so a matching file lands as a cache
+    hit at train time — no local rebuild. Pairs with `--build-cache-only`, which
+    builds the same files locally for upload.
+    """
+    from googleapiclient.http import MediaIoBaseDownload
+
+    service = _build_drive_service()
+    sub     = _find_subfolder(service, folder_id, "preload_cache")
+    files, _ = _list_children(service, sub if sub else folder_id)
+    cache = {n: fid for n, fid in files.items()
+             if n.startswith("preload_") and (n.endswith(".npy") or n.endswith(".pt"))}
+    if not cache:
+        log.warning("  No preload cache files (preload_*.npy / *_masks.pt) in folder %s", folder_id)
+        return []
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results, new_count, skipped, errors = [], 0, 0, 0
+    log.info("  Downloading %d preload cache file(s) → %s", len(cache), out_dir)
+
+    for fname, fid in sorted(cache.items()):
+        out_path = out_dir / fname
+        if not overwrite and out_path.exists() and out_path.stat().st_size > 0:
+            log.info("  Skip (exists): %s", fname)
+            skipped += 1
+            results.append(str(out_path))
+            continue
+        tmp = out_path.with_name(out_path.name + ".tmp")
+        try:
+            request = service.files().get_media(fileId=fid)
+            with open(tmp, "wb") as fh:
+                dl   = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = dl.next_chunk()
+                    if status:
+                        log.info("  %s: %d%%", fname, int(status.progress() * 100))
+            tmp.rename(out_path)
+            log.info("  Done: %s  (%.0f MB)", fname, out_path.stat().st_size / 1e6)
+            new_count += 1
+            results.append(str(out_path))
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            log.error("  Failed: %s (%s)", fname, exc)
+            errors += 1
+
+    log.info("  Preload cache: %d new, %d skipped, %d errors", new_count, skipped, errors)
+    return results
+
+
+def upload_preload_cache(folder_id: str, cache_dir: str,
+                         overwrite: bool = False) -> list:
+    """Upload locally-built portable preload cache files to a GDrive folder.
+
+    Pushes every `preload_*.npy` + `preload_*_masks.pt` under cache_dir. Skips
+    files already present in the folder unless overwrite=True (then replaces
+    in place via files().update). Pairs with `--build-cache-only` so a cache
+    built on one machine is reusable by `--preload-cache-gdrive` on another.
+    """
+    from googleapiclient.http import MediaFileUpload
+
+    cache_dir = Path(cache_dir)
+    local = sorted(
+        [p for p in cache_dir.glob("preload_*.npy") if p.stat().st_size > 0] +
+        [p for p in cache_dir.glob("preload_*_masks.pt") if p.stat().st_size > 0]
+    )
+    if not local:
+        log.warning("  No preload cache files to upload in %s", cache_dir)
+        return []
+
+    service       = _build_drive_service()
+    existing, _   = _list_children(service, folder_id)   # {name: id}
+    results, new_count, replaced, skipped, errors = [], 0, 0, 0, 0
+    log.info("  Uploading %d preload cache file(s) → GDrive folder %s", len(local), folder_id)
+
+    for path in local:
+        fname  = path.name
+        exists = existing.get(fname)
+        if exists and not overwrite:
+            log.info("  Skip (exists): %s", fname)
+            skipped += 1
+            results.append(fname)
+            continue
+        media = MediaFileUpload(str(path), resumable=True, chunksize=50 * 1024 * 1024)
+        try:
+            if exists:
+                req = service.files().update(fileId=exists, media_body=media)
+            else:
+                req = service.files().create(
+                    body={"name": fname, "parents": [folder_id]},
+                    media_body=media, fields="id",
+                )
+            resp = None
+            while resp is None:
+                status, resp = req.next_chunk()
+                if status:
+                    log.info("  %s: %d%%", fname, int(status.progress() * 100))
+            log.info("  Done: %s  (%.0f MB)%s", fname, path.stat().st_size / 1e6,
+                     " [replaced]" if exists else "")
+            replaced += 1 if exists else 0
+            new_count += 0 if exists else 1
+            results.append(fname)
+        except Exception as exc:
+            log.error("  Failed: %s (%s)", fname, exc)
+            errors += 1
+
+    log.info("  Preload cache upload: %d new, %d replaced, %d skipped, %d errors",
+             new_count, replaced, skipped, errors)
+    return results
+
+
 def download_date_keys(folder_id: str, output_dir: str,
                        date_keys: list, overwrite: bool = False,
                        workers: int = 2) -> list:

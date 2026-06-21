@@ -59,7 +59,7 @@ patch_artifact_logging()
 
 from crop_mapping_pipeline.config import (
     S2_TRAIN_DIR, S2_PROCESSED_DIR, CDL_BY_YEAR, CDL_TRAIN, MODELS_DIR, FIGURES_DIR, LOGS_DIR,
-    PROCESSED_DIR, PRELOAD_CACHE_DIR,
+    PROCESSED_DIR, PRELOAD_CACHE_DIR, GDRIVE_PRELOAD_CACHE_FOLDER_ID,
     S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS,
     KEEP_CLASSES, CLASS_REMAP, NUM_CLASSES, CDL_CLASS_NAMES,
     REMAP_LUT, S2_NODATA, S2_MIN_VALID_FRAC,
@@ -2272,10 +2272,21 @@ def main(
         CDL_BY_YEAR       = {"2024": CDL_TRAIN}
         MODELS_DIR        = data_dir / "models"
         FIGURES_DIR       = data_dir / "figures"
-        _pcd = data_dir / "preload_cache"
-        if _pcd.exists():
-            PRELOAD_CACHE_DIR = _pcd     # reuse training preload cache (correct normalisation)
+        PRELOAD_CACHE_DIR = data_dir / "preload_cache"   # cache lives under the data dir
+        PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         log.info(f"Data dir overridden to {data_dir}  (preload_cache={PRELOAD_CACHE_DIR})")
+
+    # ── Cloud preload cache — download a prebuilt cache instead of rebuilding ──
+    # Filenames are content-hash keyed by PreloadedDataset, so a matching file is a
+    # cache hit at train time. Skipped under --no-preload (no cache is consulted).
+    _pc_gdrive = (GDRIVE_PRELOAD_CACHE_FOLDER_ID or None) if (
+        "args" in globals() and getattr(args, "use_cloud_preload", False)) else None
+    if _pc_gdrive and not getattr(args, "no_preload", False):
+        PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        from crop_mapping_pipeline.stages.fetch_data_v6 import fetch_preload_cache
+        log.info(f"Fetching cloud preload cache from GDrive folder {_pc_gdrive} → {PRELOAD_CACHE_DIR}")
+        got = fetch_preload_cache(_pc_gdrive, str(PRELOAD_CACHE_DIR), overwrite=False)
+        log.info(f"Cloud preload cache: {len(got)} file(s) ready in {PRELOAD_CACHE_DIR}")
 
     s2_processed = sorted(
         glob(str(S2_TRAIN_DIR / "*_processed.tif")) +
@@ -2715,6 +2726,19 @@ if __name__ == "__main__":
     parser.add_argument("--build-cache-only", action="store_true",
                         help="Build PreloadedDataset cache for all selected experiments then exit without training. "
                              "Transfer the cache dir to another machine and training will use it as a cache hit.")
+    parser.add_argument(
+        "--use-cloud-preload", action="store_true",
+        help="Download the cloud-built portable preload cache (preload_*.npy + *_masks.pt) from "
+             "config.GDRIVE_PRELOAD_CACHE_FOLDER_ID into the preload_cache dir before training, "
+             "instead of rebuilding locally. Ignored with --no-preload.")
+    parser.add_argument(
+        "--upload-cache-gdrive", nargs="?", const=GDRIVE_PRELOAD_CACHE_FOLDER_ID or None,
+        default=None, metavar="FOLDER_ID",
+        help="After --build-cache-only, upload the built preload cache to this GDrive folder. "
+             "Bare flag uses config.GDRIVE_PRELOAD_CACHE_FOLDER_ID. With --build-cache-only and a "
+             "configured folder id, upload runs automatically.")
+    parser.add_argument("--no-upload-cache", action="store_true",
+                        help="Disable the automatic preload-cache upload after --build-cache-only.")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
     parser.add_argument(
@@ -2824,6 +2848,17 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             epochs=args.epochs,
         )
+
+    # ── Auto-upload preload cache after --build-cache-only ────────────────────
+    if args.build_cache_only and not args.no_upload_cache:
+        _up_folder = args.upload_cache_gdrive or GDRIVE_PRELOAD_CACHE_FOLDER_ID or None
+        if _up_folder:
+            from crop_mapping_pipeline.stages.fetch_data_v6 import upload_preload_cache
+            log.info(f"Uploading built preload cache from {PRELOAD_CACHE_DIR} → GDrive {_up_folder}")
+            up = upload_preload_cache(_up_folder, str(PRELOAD_CACHE_DIR), overwrite=False)
+            log.info(f"Preload cache upload complete: {len(up)} file(s)")
+        else:
+            log.info("No upload folder set (config.GDRIVE_PRELOAD_CACHE_FOLDER_ID empty / no --upload-cache-gdrive) — skipping upload.")
 
     if args.shutdown:
         import urllib.request, urllib.error, json as _json, time as _time
