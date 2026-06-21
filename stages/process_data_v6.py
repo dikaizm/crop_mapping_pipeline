@@ -571,15 +571,19 @@ def main(
         _v3     = GDRIVE_PROCESSED_V5_FOLDER_ID
 
         # ── CDL-only mode: skip all S2 steps, use existing processed S2 as grid ref ──
+        # S2_PROCESSED_DIR is flat (organised by role, not year) — try year subdir
+        # first for back-compat, then fall back to flat dir filtered by year.
         if cdl_only:
             existing = sorted((S2_PROCESSED_DIR / yr).glob("*_processed.tif"))
             if not existing:
-                # Fallback: some processed dirs keep the raw S2H_* naming (no _processed suffix)
-                existing = sorted((S2_PROCESSED_DIR / yr).glob("S2H_*.tif"))
-            if not existing:
                 existing = sorted((S2_PROCESSED_DIR / yr).glob("*.tif"))
             if not existing:
-                log.error("  --cdl-only: no S2 tif in %s — cannot determine grid", S2_PROCESSED_DIR / yr)
+                existing = sorted(S2_PROCESSED_DIR.glob(f"S2H_{yr}_*.tif"))
+            if not existing:
+                existing = sorted(S2_PROCESSED_DIR.glob(f"*{yr}*.tif"))
+            if not existing:
+                log.error("  --cdl-only: no S2 tif for year %s under %s — cannot determine grid",
+                          yr, S2_PROCESSED_DIR)
                 continue
             s2_ref_path = str(existing[0])
             log.info("  --cdl-only: grid ref = %s", pathlib.Path(s2_ref_path).name)
