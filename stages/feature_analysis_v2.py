@@ -738,7 +738,8 @@ _DOMAIN_SCOPED_SELECTORS = {"single_date_gsi", "single_date_rf", "naive_mt_gsi",
 def main(force: bool = False, data_dir: str = None, output_dir: str = None,
          stage: str = "all", selector: str = "cnn",
          mlflow_exp: str | None = None, top_k_values: list[int] | None = None,
-         percentile_values: list[float] | None = None) -> None:
+         percentile_values: list[float] | None = None,
+         score_threshold: float | None = None) -> None:
     global _MLFLOW_EXPERIMENT_OVERRIDE, KEEP_CLASSES, CDL_CLASS_NAMES
     if mlflow_exp == "v3":
         _MLFLOW_EXPERIMENT_OVERRIDE = MLFLOW_EXPERIMENT_TRAIN_V3
@@ -842,6 +843,18 @@ def main(force: bool = False, data_dir: str = None, output_dir: str = None,
         out_base = Path(output_dir) if output_dir else (Path(data_dir) if data_dir else _DIRECT_OUTPUT_MAP[selector][0].parent)
         out_base.mkdir(parents=True, exist_ok=True)
 
+        if score_threshold is not None:
+            stem     = f"select_{selector}_s{score_threshold:g}"
+            json_out = out_base / f"{stem}.json"
+            if not force and json_out.exists():
+                log.info(f"  score_threshold={score_threshold}: output exists ({json_out.name}) — skipping (--force to re-run)")
+            else:
+                log.info(f"  Running {selector} score_threshold={score_threshold} ...")
+                fn(years_data, score_threshold=score_threshold, data_dir=str(out_base), out_stem=stem)
+                log.info(f"  score_threshold={score_threshold} complete → {json_out}")
+            log.info(f"Direct selection ({selector}) score_threshold={score_threshold} complete.")
+            return
+
         if percentile_values:
             for p in percentile_values:
                 stem     = f"select_{selector}_p{p:g}"
@@ -894,8 +907,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Top-K per crop for --stage select sweep (e.g. --top-k 5 10 15 20 30)")
     parser.add_argument("--percentile", type=float, nargs="+", default=None, metavar="P",
                         help="Pooled-percentile threshold(s) for --stage select sweep "
-                             "(per-class union, writes select_*_p{P}.json). Mutually exclusive with --top-k. "
+                             "(per-class union, writes select_*_p{P}.json). Mutually exclusive with --top-k and --score-threshold. "
                              "E.g. --percentile 70 75 80 85 90 95")
+    parser.add_argument("--score-threshold", type=float, default=None, metavar="T",
+                        help="Per-crop normalized-score threshold for --stage select "
+                             "(normalize each crop's scores to [0,1], retain >= T, union). "
+                             "Follows Wei et al. 2023 (recommended T=0.5). "
+                             "Mutually exclusive with --top-k and --percentile.")
     parser.add_argument("--data-dir", type=str, default=None, help="Override processed data directory (S2/CDL input)")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for selection output JSONs (--stage select only); defaults to --data-dir")
     parser.add_argument("--mlflow-exp", choices=["v3"], default=None,
@@ -917,13 +935,15 @@ def configure_logging() -> None:
 
 def cli(argv=None) -> None:
     args = build_parser().parse_args(argv)
-    if args.top_k and args.percentile:
-        build_parser().error("--top-k and --percentile are mutually exclusive — pick one selection mode.")
+    n_modes = sum([bool(args.top_k), bool(args.percentile), args.score_threshold is not None])
+    if n_modes > 1:
+        build_parser().error("--top-k, --percentile, and --score-threshold are mutually exclusive — pick one.")
     configure_logging()
     main(force=args.force, data_dir=args.data_dir, output_dir=args.output_dir,
          stage=args.stage, selector=args.selector,
          mlflow_exp=args.mlflow_exp, top_k_values=args.top_k,
-         percentile_values=args.percentile)
+         percentile_values=args.percentile,
+         score_threshold=args.score_threshold)
 
 
 if __name__ == "__main__":

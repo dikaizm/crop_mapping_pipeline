@@ -92,6 +92,7 @@ def save_selection(
     top_k: int,
     meta: dict | None = None,
     percentile: float | None = None,
+    score_threshold: float | None = None,
 ) -> list[str]:
     """Compute union of per-crop channels, save JSON + TXT, return union list."""
     seen: dict[str, None] = {}
@@ -103,15 +104,23 @@ def save_selection(
     from crop_mapping_pipeline.config import CDL_CLASS_NAMES
     from datetime import datetime
 
+    if score_threshold is not None:
+        sel_mode = "score_threshold"
+    elif percentile is not None:
+        sel_mode = "percentile"
+    else:
+        sel_mode = "top_k"
+
     payload = {
-        "run_ts":       datetime.now().strftime("%Y%m%d-%H%M%S"),
-        "selector":     selector,
-        "top_k":        top_k,
-        "percentile":   percentile,
-        "selection_mode": "percentile" if percentile is not None else "top_k",
-        "n_union":      len(union),
-        "per_crop":     {str(k): v for k, v in per_crop.items()},
-        "union_channels": union,
+        "run_ts":           datetime.now().strftime("%Y%m%d-%H%M%S"),
+        "selector":         selector,
+        "top_k":            top_k,
+        "percentile":       percentile,
+        "score_threshold":  score_threshold,
+        "selection_mode":   sel_mode,
+        "n_union":          len(union),
+        "per_crop":         {str(k): v for k, v in per_crop.items()},
+        "union_channels":   union,
         **(meta or {}),
     }
 

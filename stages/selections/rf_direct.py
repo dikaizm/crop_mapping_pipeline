@@ -146,6 +146,7 @@ def run_rf_direct(
     data_dir: str | None = None,
     out_stem: str | None = None,
     percentile: float | None = None,
+    score_threshold: float | None = None,
 ) -> list[str]:
     """
     years_data: [(year, s2_paths, cdl_path), ...]
@@ -234,10 +235,24 @@ def run_rf_direct(
 
         adjusted_per_crop[crop_id] = adjusted.fillna(0.0)
 
-    # ── Selection: pooled-percentile threshold OR top-K per crop ─────────────
+    # ── Selection: score_threshold (Wei et al. 2023) / pooled-percentile / top-K ─
     per_crop: dict[int, list[str]] = {}
     thr: float | None = None
-    if percentile is not None:
+    if score_threshold is not None:
+        # Per-crop min-max normalize importances to [0,1]; retain channels >= score_threshold.
+        # Follows Wei et al. (2023): "features >= 0.5 have yielded quite results."
+        log.info(f"  RF per-crop normalized score threshold = {score_threshold}")
+        for crop_id in KEEP_CLASSES:
+            s = adjusted_per_crop[crop_id]
+            s_min, s_max = float(s.min()), float(s.max())
+            if s_max > s_min:
+                s_norm = (s - s_min) / (s_max - s_min)
+            else:
+                s_norm = pd.Series(0.0, index=s.index)
+            sel = s_norm[s_norm >= score_threshold].sort_values(ascending=False).index.tolist()
+            per_crop[crop_id] = sel
+            log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: {len(sel)} ch (norm≥{score_threshold}, top-3 {sel[:3]})")
+    elif percentile is not None:
         pooled = np.concatenate([s.values for s in adjusted_per_crop.values()])
         thr    = float(np.percentile(pooled, percentile))
         log.info(f"  RF pooled P{percentile:g} threshold = {thr:.6f}")
@@ -254,7 +269,8 @@ def run_rf_direct(
 
     # ── Save ──────────────────────────────────────────────────────────────────
     stem = out_stem or (
-        f"select_rf_direct_p{percentile:g}" if percentile is not None
+        f"select_rf_direct_s{score_threshold:g}" if score_threshold is not None
+        else f"select_rf_direct_p{percentile:g}" if percentile is not None
         else f"select_rf_direct_k{top_k}"
     )
     base_dir  = Path(data_dir) if data_dir else SELECT_RF_DIRECT_JSON.parent
@@ -264,6 +280,7 @@ def run_rf_direct(
     union = save_selection(
         per_crop, json_path, txt_path,
         selector="rf_direct_multiclass", top_k=top_k, percentile=percentile,
+        score_threshold=score_threshold,
         meta={
             "years":             [yr for yr, _, _ in years_data],
             "primary_year":      primary_year,
@@ -279,6 +296,12 @@ def run_rf_direct(
     # ── MLflow ────────────────────────────────────────────────────────────────
     duration_s = time.time() - t_start
     log.info(f"RF-direct completed in {duration_s:.1f}s")
+    if score_threshold is not None:
+        sel_mode = "score_threshold"
+    elif percentile is not None:
+        sel_mode = "percentile"
+    else:
+        sel_mode = "top_k"
     log_selection_run(
         selector="rf_direct_multiclass",
         run_name_prefix="rf_direct",
@@ -286,17 +309,18 @@ def run_rf_direct(
         union=union,
         json_path=json_path,
         params={
-            "selector":        "rf_direct_multiclass",
-            "selection_mode":  "percentile" if percentile is not None else "top_k",
-            "top_k":           top_k,
-            "percentile":      percentile,
-            "years":           str([yr for yr, _, _ in years_data]),
-            "primary_year":    primary_year,
-            "n_channels":      n_channels,
-            "n_union":         len(union),
-            "n_crops":         len(KEEP_CLASSES),
-            "rf_n_estimators": RF_N_ESTIMATORS,
-            "method":          "multiclass_rf_per_class_mdi",
+            "selector":         "rf_direct_multiclass",
+            "selection_mode":   sel_mode,
+            "top_k":            top_k,
+            "percentile":       percentile,
+            "score_threshold":  score_threshold,
+            "years":            str([yr for yr, _, _ in years_data]),
+            "primary_year":     primary_year,
+            "n_channels":       n_channels,
+            "n_union":          len(union),
+            "n_crops":          len(KEEP_CLASSES),
+            "rf_n_estimators":  RF_N_ESTIMATORS,
+            "method":           "multiclass_rf_per_class_mdi",
         },
         duration_s=duration_s,
         threshold=thr,

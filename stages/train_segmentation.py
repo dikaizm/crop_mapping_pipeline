@@ -2321,6 +2321,7 @@ def main(
     skip_viz=False,
     top_k=None,
     percentile=None,
+    score_threshold=None,
     batch_size=None,
     epochs=None,
     no_preload=False,
@@ -2526,10 +2527,13 @@ def main(
     def _find_direct_json(selector: str) -> Path:
         """Return JSON path for a direct selector.
 
-        Percentile mode → select_{selector}_p{P}.json (final selection, no subset).
-        Top-K mode      → select_{selector}_k{K}.json (falls back to largest k + subset).
+        Score-threshold mode → select_{selector}_s{T}.json (Wei et al. 2023, no subset).
+        Percentile mode      → select_{selector}_p{P}.json (final selection, no subset).
+        Top-K mode           → select_{selector}_k{K}.json (falls back to largest k + subset).
         """
         base = Path(data_dir) if data_dir else SELECT_GSI_DIRECT_JSON.parent
+        if score_threshold is not None:
+            return base / f"select_{selector}_s{score_threshold:g}.json"
         if percentile is not None:
             return base / f"select_{selector}_p{percentile:g}.json"
         if top_k:
@@ -2542,8 +2546,8 @@ def main(
                 return candidates[-1]
         return base / f"select_{selector}_k{SELECT_TOP_K_PER_CROP}.json"
 
-    # In percentile mode the JSON union is already the final selection → no subset_k.
-    _subset = None if percentile is not None else top_k
+    # score_threshold and percentile modes: JSON union is already the final selection → no subset_k.
+    _subset = None if (score_threshold is not None or percentile is not None) else top_k
 
     gsi_idx = gsi_names = None
     if not exps or "gsi" in exps:
@@ -2552,7 +2556,10 @@ def main(
             gsi_json, mmdd_to_date, local_band_to_idx,
             selector_name="gsi", subset_k=_subset,
         )
-        log.info(f"gsi ({'P'+format(percentile,'g') if percentile is not None else 'k='+str(top_k or 'all')}): {len(gsi_idx)} channels")
+        _gsi_mode = (f"s={score_threshold:g}" if score_threshold is not None
+                     else f"P{percentile:g}" if percentile is not None
+                     else f"k={top_k or 'all'}")
+        log.info(f"gsi ({_gsi_mode}): {len(gsi_idx)} channels")
 
     rf_idx = rf_names = None
     if not exps or "rf" in exps:
@@ -2561,7 +2568,10 @@ def main(
             rf_json, mmdd_to_date, local_band_to_idx,
             selector_name="rf", subset_k=_subset,
         )
-        log.info(f"rf ({'P'+format(percentile,'g') if percentile is not None else 'k='+str(top_k or 'all')}): {len(rf_idx)} channels")
+        _rf_mode = (f"s={score_threshold:g}" if score_threshold is not None
+                    else f"P{percentile:g}" if percentile is not None
+                    else f"k={top_k or 'all'}")
+        log.info(f"rf ({_rf_mode}): {len(rf_idx)} channels")
 
     # ── Class weights ──────────────────────────────────────────────────────
     cw_tensor, cw_counts = compute_class_weights(return_counts=True)
@@ -2814,7 +2824,14 @@ if __name__ == "__main__":
         "--percentile", type=float, nargs="+", default=None, metavar="P",
         help="Percentile threshold(s) to sweep for gsi/rf direct selection "
              "(loads select_gsi/rf_direct_p{P}.json per P). Pooled-percentile, per-class union. "
-             "Mutually exclusive with --top-k. E.g. --percentile 70 75 80 85 90 95",
+             "Mutually exclusive with --top-k and --score-threshold. E.g. --percentile 70 75 80 85 90 95",
+    )
+    parser.add_argument(
+        "--score-threshold", type=float, nargs="+", default=None, metavar="T",
+        help="Per-crop normalized-score threshold(s) for gsi/rf direct selection "
+             "(loads select_gsi/rf_direct_s{T}.json). Wei et al. 2023 approach: "
+             "normalize per crop to [0,1], retain >= T. Mutually exclusive with --top-k and --percentile. "
+             "E.g. --score-threshold 0.5",
     )
     parser.add_argument(
         "--batch-size", type=int, default=None, metavar="N",
@@ -2877,21 +2894,25 @@ if __name__ == "__main__":
         log.info(f"--eval-only: MLflow → local {_eval_mlruns} (server untouched)")
         log.info(f"--eval-only: evaluating {ckpt_path}")
 
-    if args.top_k and args.percentile:
-        log.error("--top-k and --percentile are mutually exclusive — pick one selection mode.")
+    n_sel_modes = sum([bool(args.top_k), bool(args.percentile), bool(args.score_threshold)])
+    if n_sel_modes > 1:
+        log.error("--top-k, --percentile, and --score-threshold are mutually exclusive — pick one.")
         sys.exit(1)
 
     if args.percentile:
         sweep = [("percentile", p) for p in args.percentile]
     elif args.top_k:
         sweep = [("top_k", k) for k in args.top_k]
+    elif args.score_threshold:
+        sweep = [("score_threshold", t) for t in args.score_threshold]
     else:
         sweep = [(None, None)]
 
     for mode, val in sweep:
         if mode is not None:
             log.info(f"{'='*65}")
-            log.info(f"  {'Percentile' if mode=='percentile' else 'Top-K'} sweep: {mode}={val}")
+            mode_label = {"percentile": "Percentile", "top_k": "Top-K", "score_threshold": "Score-threshold"}.get(mode, mode)
+            log.info(f"  {mode_label} sweep: {mode}={val}")
             log.info(f"{'='*65}")
         main(
             exps=args.exp,
@@ -2902,6 +2923,7 @@ if __name__ == "__main__":
             skip_viz=args.skip_viz,
             top_k=val if mode == "top_k" else None,
             percentile=val if mode == "percentile" else None,
+            score_threshold=val if mode == "score_threshold" else None,
             batch_size=args.batch_size,
             epochs=args.epochs,
             no_preload=args.no_preload,
