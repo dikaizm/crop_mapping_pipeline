@@ -336,6 +336,44 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
 
 
 @torch.no_grad()
+def _get_hardware_info() -> dict:
+    """CPU/GPU/RAM identity for mlflow params — static per-machine, not a metric."""
+    import platform
+
+    cpu_name = platform.processor()
+    if not cpu_name and platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.lower().startswith("model name"):
+                        cpu_name = line.split(":", 1)[1].strip()
+                        break
+        except OSError:
+            pass
+
+    info = {
+        "cpu_name":  cpu_name or "unknown",
+        "cpu_cores": os.cpu_count(),
+    }
+
+    try:
+        import psutil
+        info["ram_total_gb"] = round(psutil.virtual_memory().total / 1024**3, 1)
+    except ImportError:
+        info["ram_total_gb"] = None
+
+    if torch.cuda.is_available():
+        info["gpu_name"]      = torch.cuda.get_device_name(0)
+        info["gpu_count"]     = torch.cuda.device_count()
+        info["gpu_memory_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
+    else:
+        info["gpu_name"]      = "none"
+        info["gpu_count"]     = 0
+        info["gpu_memory_gb"] = None
+
+    return info
+
+
 def evaluate_test_set(model, loader, num_classes, device):
     model.eval()
     all_logits, all_labels = [], []
@@ -1381,6 +1419,7 @@ def run_experiment(
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),
+            **_get_hardware_info(),
         })
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
@@ -2545,6 +2584,7 @@ def main(
                 "description":  cfg_entry.description,
                 "loss":         loss,
                 **({"top_k": top_k} if top_k else {}),
+                **_get_hardware_info(),
             })
             mlflow.set_tag(
                 "mlflow.note.content",
