@@ -2323,6 +2323,9 @@ def main(
     percentile=None,
     batch_size=None,
     epochs=None,
+    no_preload=False,
+    cache_only=False,
+    norm_mode="percentile",
 ):
     global BATCH_SIZE, MAX_EPOCHS
     if batch_size:
@@ -2678,9 +2681,9 @@ def main(
                     loss=loss,
                     force=force,
                     skip_viz=skip_viz,
-                    no_preload=args.no_preload,
-                    cache_only=args.build_cache_only,
-                    norm_mode=args.norm,
+                    no_preload=no_preload,
+                    cache_only=cache_only,
+                    norm_mode=norm_mode,
                     **extra_kw,
                 )
                 if result is not None:
@@ -2926,6 +2929,9 @@ if __name__ == "__main__":
             percentile=val if mode == "percentile" else None,
             batch_size=args.batch_size,
             epochs=args.epochs,
+            no_preload=args.no_preload,
+            cache_only=args.build_cache_only,
+            norm_mode=args.norm,
         )
 
     # ── Auto-upload preload cache after --build-cache-only ────────────────────
