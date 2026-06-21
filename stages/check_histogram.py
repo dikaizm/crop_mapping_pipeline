@@ -171,7 +171,7 @@ def main():
     args = parser.parse_args()
 
     data_root = Path(args.data_dir) if args.data_dir else PROCESSED_DIR
-    train_dir = data_root / "s2" / "train"
+    train_dir = data_root / "s2" / "2024"
     fig_dir   = (Path(args.data_dir) if args.data_dir else FIGURES_DIR) / "histogram_check"
 
     test_areas = [

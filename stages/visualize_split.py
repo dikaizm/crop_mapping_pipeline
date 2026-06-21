@@ -186,7 +186,7 @@ def main():
     args = parser.parse_args()
 
     from glob import glob
-    s2_dir = Path(args.data_dir) / "s2" / "train" if args.data_dir else S2_TRAIN_DIR
+    s2_dir = Path(args.data_dir) / "s2" / "2024" if args.data_dir else S2_TRAIN_DIR
     cdl    = Path(args.data_dir) / "cdl" / "cdl_train.tif" if args.data_dir else CDL_TRAIN
     s2_paths = sorted(f for f in glob(str(s2_dir / "*.tif")) if not Path(f).name.startswith("._"))
 

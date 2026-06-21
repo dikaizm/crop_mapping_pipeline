@@ -19,7 +19,7 @@ PRELOAD_CACHE_DIR = PROCESSED_DIR / "preload_cache"
 PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # S2 data organised by role, not year
-S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "train"   # main training area (all dates, flat)
+S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "2024"   # main training area (all dates, flat; v6.1 processed S2)
 S2_PROCESSED_DIR = S2_TRAIN_DIR                  # backwards-compat alias
 
 CDL_TRAIN  = CDL_DIR / "cdl_2024_study_area_filtered.tif"   # matches process_data_v6.py output naming

@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
 AREAS = [
-    {"name": "train",  "s2_subdir": "s2/train"},
+    {"name": "train",  "s2_subdir": "s2/2024"},
     {"name": "test_a", "s2_subdir": "s2/test_a"},
     {"name": "test_b", "s2_subdir": "s2/test_b"},
 ]
