@@ -26,7 +26,7 @@ CDL_TRAIN  = CDL_DIR / "cdl_2024_study_area_filtered.tif"   # matches process_da
 CDL_BY_YEAR = {"2024": CDL_TRAIN}        # legacy lookup used internally
 
 # ── S2 metadata ────────────────────────────────────────────────────────────────
-S2_BAND_NAMES    = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
+S2_BAND_NAMES    = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]   # v6.1: 10 land bands (B1/B9/B10 atmospheric 60m excluded)
 N_BANDS_PER_DATE = len(S2_BAND_NAMES)
 S2_NODATA        = -9999.0
 # Per-date scene-usability threshold: drop downloaded date TIFs whose valid-pixel
