@@ -22,7 +22,7 @@ PRELOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 S2_TRAIN_DIR = PROCESSED_DIR / "s2" / "train"   # main training area (all dates, flat)
 S2_PROCESSED_DIR = S2_TRAIN_DIR                  # backwards-compat alias
 
-CDL_TRAIN  = CDL_DIR / "cdl_train.tif"
+CDL_TRAIN  = CDL_DIR / "cdl_2024_study_area_filtered.tif"   # matches process_data_v6.py output naming
 CDL_BY_YEAR = {"2024": CDL_TRAIN}        # legacy lookup used internally
 
 # ── S2 metadata ────────────────────────────────────────────────────────────────

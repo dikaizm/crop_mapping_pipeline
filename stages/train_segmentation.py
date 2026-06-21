@@ -2230,7 +2230,7 @@ def main(
         data_dir = Path(data_dir)
         S2_TRAIN_DIR      = data_dir / "s2" / "train"
         S2_PROCESSED_DIR  = S2_TRAIN_DIR
-        CDL_TRAIN         = data_dir / "cdl" / "cdl_train.tif"
+        CDL_TRAIN         = data_dir / "cdl" / "cdl_2024_study_area_filtered.tif"
         CDL_BY_YEAR       = {"2024": CDL_TRAIN}
         MODELS_DIR        = data_dir / "models"
         FIGURES_DIR       = data_dir / "figures"
