@@ -663,54 +663,75 @@ def main(
         if native_10m:
             log.info("  Year %s: using native 10m CDL (no resampling cleanup needed)", yr)
 
-        # Auto-download CDL from USDA NASS — stream-extract to avoid storing zip on disk
+        # Use a local zip if present (e.g. manually downloaded) — skip the network fetch.
+        # Else auto-download from USDA NASS, stream-extract to avoid storing zip on disk.
         if not cdl_raw:
-            url = CDL_DOWNLOAD_URLS_10M.get(yr) or CDL_DOWNLOAD_URLS.get(yr)
-            if url:
-                log.info("  Raw CDL for %s not found — stream-downloading from USDA NASS...", yr)
+            import zipfile, shutil
+            local_zip = cdl_dir / f"{yr}_{res_tag}_cdls.zip"
+            cdl_subdir.mkdir(parents=True, exist_ok=True)
+            tif_dest = cdl_subdir / f"{yr}_{res_tag}_cdls.tif"
+
+            if local_zip.exists():
+                log.info("  Found local zip: %s — extracting (no download)", local_zip)
                 try:
-                    import urllib.request, zipfile, io
-                    cdl_subdir.mkdir(parents=True, exist_ok=True)
-                    tif_dest = cdl_subdir / f"{yr}_{res_tag}_cdls.tif"
                     if not tif_dest.exists():
-                        log.info("  Streaming %s (no temp zip — direct extract)...", url)
-                        with urllib.request.urlopen(url) as resp:
-                            total = int(resp.headers.get("Content-Length", 0))
-                            buf = io.BytesIO()
-                            downloaded = 0
-                            chunk = 8 * 1024 * 1024  # 8 MB chunks
-                            while True:
-                                data = resp.read(chunk)
-                                if not data:
-                                    break
-                                buf.write(data)
-                                downloaded += len(data)
-                                if total:
-                                    log.info("    CDL buffer: %d%%",
-                                             downloaded * 100 // total)
-                        log.info("  Extracting from buffer (%.0f MB)...",
-                                 buf.tell() / 1e6)
-                        buf.seek(0)
-                        with zipfile.ZipFile(buf) as zf:
-                            tif_members = [m for m in zf.namelist()
-                                           if m.endswith(".tif")]
+                        with zipfile.ZipFile(local_zip) as zf:
+                            tif_members = [m for m in zf.namelist() if m.endswith(".tif")]
                             if not tif_members:
-                                raise RuntimeError("No TIF in ZIP")
+                                raise RuntimeError(f"No TIF in {local_zip}")
                             for member in tif_members:
                                 log.info("  Extracting: %s", member)
-                                src = zf.open(member)
-                                with open(tif_dest, "wb") as dst:
-                                    import shutil
+                                with zf.open(member) as src, open(tif_dest, "wb") as dst:
                                     shutil.copyfileobj(src, dst)
-                        log.info("  CDL extracted: %.0f MB",
-                                 tif_dest.stat().st_size / 1e6)
+                        log.info("  CDL extracted: %.0f MB", tif_dest.stat().st_size / 1e6)
                     else:
                         log.info("  CDL TIF already present: %s", tif_dest.name)
                     cdl_raw = str(tif_dest) if tif_dest.exists() else None
                 except Exception as exc:
-                    log.error("  CDL download/extract failed: %s", exc)
+                    log.error("  Local zip extract failed: %s", exc)
             else:
-                log.warning("  No download URL configured for CDL year %s", yr)
+                url = CDL_DOWNLOAD_URLS_10M.get(yr) or CDL_DOWNLOAD_URLS.get(yr)
+                if url:
+                    log.info("  Raw CDL for %s not found — stream-downloading from USDA NASS...", yr)
+                    try:
+                        import urllib.request, io
+                        if not tif_dest.exists():
+                            log.info("  Streaming %s (no temp zip — direct extract)...", url)
+                            with urllib.request.urlopen(url) as resp:
+                                total = int(resp.headers.get("Content-Length", 0))
+                                buf = io.BytesIO()
+                                downloaded = 0
+                                chunk = 8 * 1024 * 1024  # 8 MB chunks
+                                while True:
+                                    data = resp.read(chunk)
+                                    if not data:
+                                        break
+                                    buf.write(data)
+                                    downloaded += len(data)
+                                    if total:
+                                        log.info("    CDL buffer: %d%%",
+                                                 downloaded * 100 // total)
+                            log.info("  Extracting from buffer (%.0f MB)...",
+                                     buf.tell() / 1e6)
+                            buf.seek(0)
+                            with zipfile.ZipFile(buf) as zf:
+                                tif_members = [m for m in zf.namelist()
+                                               if m.endswith(".tif")]
+                                if not tif_members:
+                                    raise RuntimeError("No TIF in ZIP")
+                                for member in tif_members:
+                                    log.info("  Extracting: %s", member)
+                                    with zf.open(member) as src, open(tif_dest, "wb") as dst:
+                                        shutil.copyfileobj(src, dst)
+                            log.info("  CDL extracted: %.0f MB",
+                                     tif_dest.stat().st_size / 1e6)
+                        else:
+                            log.info("  CDL TIF already present: %s", tif_dest.name)
+                        cdl_raw = str(tif_dest) if tif_dest.exists() else None
+                    except Exception as exc:
+                        log.error("  CDL download/extract failed: %s", exc)
+                else:
+                    log.warning("  No download URL configured for CDL year %s", yr)
 
         cdl_filtered = None
         cdl_reprojected = None
