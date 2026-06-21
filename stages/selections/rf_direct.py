@@ -1,17 +1,19 @@
-"""RF-direct selector — single-stage, no CNN oracle, no Stage 1 prefilter.
+"""RF-direct selector — single multi-class RF, per-crop importance decomposition.
 
-Trains a binary RandomForestClassifier per crop on all (date × band) channels,
-uses Gini importance to rank channels, selects top-K per crop, outputs union.
+Follows Wei et al. (2023, Remote Sensing 15:3212):
+  - ONE multi-class RandomForestClassifier trained on all crop classes simultaneously.
+  - Per-crop importance derived by decomposing each node's Gini decrease, weighted
+    by that class's representation at the node (class-conditional MDI).
+  - Features ranked separately per crop; union selected for Stage 3.
 
 Pixel samples pooled from all training years for robust importance estimates.
 """
 
 import logging
-import tempfile
+import time
 from datetime import datetime as _dt
 from pathlib import Path
 
-import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -20,13 +22,122 @@ from crop_mapping_pipeline.config import (
     KEEP_CLASSES, CDL_CLASS_NAMES,
     SELECT_TOP_K_PER_CROP, SELECT_RF_DIRECT_JSON, SELECT_RF_DIRECT_BANDS,
     RF_N_ESTIMATORS, RF_MAX_PIXELS,
-    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
 )
 from crop_mapping_pipeline.stages.selections._utils import (
-    build_channel_names, sample_pixels, save_selection,
+    build_channel_names, sample_pixels, save_selection, log_selection_run,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _per_class_importance(
+    rf: RandomForestClassifier,
+    bandnames: list[str],
+    keep_classes: list[int],
+) -> dict[int, pd.Series]:
+    """Decompose multi-class RF Gini importance per crop class.
+
+    For class c, importance_c[j] = mean over trees of:
+        Σ_nodes_using_j  (n_c_node / n_c_root) × (n_node / N) × ΔGini_node
+
+    This class-conditional MDI reflects how much feature j contributes to
+    separating class c from all other classes within the joint multi-class tree,
+    matching the per-crop importance decomposition in Wei et al. (2023) Fig. 3.
+    """
+    classes_ = list(rf.classes_)
+    class_to_ci = {c: i for i, c in enumerate(classes_)}
+    n_features = len(bandnames)
+    n_rf_classes = len(classes_)
+
+    importances = np.zeros((n_rf_classes, n_features), dtype=np.float64)
+
+    for tree in rf.estimators_:
+        t = tree.tree_
+        feature   = t.feature           # (n_nodes,)  -2 for leaves
+        n_samp    = t.n_node_samples    # (n_nodes,)
+        value     = t.value[:, 0, :]   # (n_nodes, n_rf_classes) — raw counts
+        impurity  = t.impurity          # (n_nodes,)
+        ch_left   = t.children_left
+        ch_right  = t.children_right
+
+        root_counts = value[0]          # class sample counts at root node
+        N_root = n_samp[0]
+
+        for nid in range(t.node_count):
+            if ch_left[nid] == -1:      # leaf — no split
+                continue
+            fj = feature[nid]
+            if fj < 0:
+                continue
+
+            lid = ch_left[nid]
+            rid = ch_right[nid]
+            n_p = n_samp[nid]
+            n_l = n_samp[lid]
+            n_r = n_samp[rid]
+
+            delta_gini = (
+                impurity[nid]
+                - (n_l / n_p) * impurity[lid]
+                - (n_r / n_p) * impurity[rid]
+            )
+            if delta_gini <= 0:
+                continue
+
+            node_weight = (n_p / N_root) * delta_gini
+
+            for ci in range(n_rf_classes):
+                if root_counts[ci] == 0:
+                    continue
+                # Class share at this node relative to total class samples
+                class_share = value[nid, ci] / root_counts[ci]
+                importances[ci, fj] += class_share * node_weight
+
+    importances /= len(rf.estimators_)
+
+    # Normalise each class so importances sum to 1 (standard MDI convention)
+    for ci in range(n_rf_classes):
+        s = importances[ci].sum()
+        if s > 0:
+            importances[ci] /= s
+
+    result: dict[int, pd.Series] = {}
+    for crop_id in keep_classes:
+        if crop_id not in class_to_ci:
+            result[crop_id] = pd.Series(0.0, index=bandnames)
+            continue
+        ci = class_to_ci[crop_id]
+        result[crop_id] = pd.Series(importances[ci].astype(np.float32), index=bandnames)
+    return result
+
+
+def _train_multiclass_rf(df: pd.DataFrame, bandnames: list[str],
+                         seed: int = 42) -> RandomForestClassifier:
+    """Train one multi-class RF on df (class_label column + bandname columns)."""
+    x = df[bandnames].values.astype(np.float32)
+    y = df["class_label"].values.astype(int)
+
+    # Cap total pixels
+    if len(y) > RF_MAX_PIXELS:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(y), RF_MAX_PIXELS, replace=False)
+        x, y = x[idx], y[idx]
+
+    # Impute NaN with column median
+    col_medians = np.nanmedian(x, axis=0)
+    x = np.where(np.isnan(x), col_medians, x)
+
+    rf = RandomForestClassifier(
+        n_estimators  = RF_N_ESTIMATORS,
+        class_weight  = "balanced",
+        oob_score     = True,
+        n_jobs        = -1,
+        random_state  = seed,
+    )
+    rf.fit(x, y)
+    log.info(f"  Multi-class RF trained — OOB accuracy: {rf.oob_score_:.3f}  "
+             f"classes: {list(rf.classes_)}  n_samples: {len(y)}")
+    return rf
 
 
 def run_rf_direct(
@@ -39,12 +150,14 @@ def run_rf_direct(
     """
     years_data: [(year, s2_paths, cdl_path), ...]
       Primary year (first) supplies channel names for output.
-      All years contribute pixel samples — RF trained on pooled pixels.
-      Extra-year channels are scored separately and averaged at band level
-      to inform primary-year channel ranking.
+      All years contribute pixel samples for MMDD-level importance averaging.
     Returns union channel list.
+
+    Follows Wei et al. (2023): single multi-class RF, per-crop importance
+    decomposed via class-conditional MDI from the joint tree structure.
     """
-    log.info("RF-direct: scoring all channels via RF importance, no prefilter")
+    t_start = time.time()
+    log.info("RF-direct (multi-class): scoring all channels, no prefilter")
     log.info(f"  years={[yr for yr, _, _ in years_data]}  top_k={top_k}  n_trees={RF_N_ESTIMATORS}")
 
     primary_year, primary_s2, primary_cdl = years_data[0]
@@ -52,105 +165,53 @@ def run_rf_direct(
     n_channels = len(primary_bandnames)
     log.info(f"  Primary year {primary_year}: {n_channels} channels")
 
-    # ── Sample pixels — primary year ─────────────────────────────────────────
+    # ── Sample + train on primary year ────────────────────────────────────────
     log.info(f"  Sampling {primary_year}...")
     df_primary = sample_pixels(primary_s2, primary_cdl, primary_bandnames)
+    rf_primary = _train_multiclass_rf(df_primary, primary_bandnames, seed=42)
+    imp_primary = _per_class_importance(rf_primary, primary_bandnames, KEEP_CLASSES)
 
-    # ── Sample extra years for band-level RF importance averaging ─────────────
-    extra_band_importance: list[dict[int, pd.Series]] = []
+    # ── MMDD helpers ──────────────────────────────────────────────────────────
+    def _doy(mmdd: str) -> int:
+        return _dt.strptime(f"2000{mmdd}", "%Y%m%d").timetuple().tm_yday
+
+    def _mmdd_level(imp: pd.Series, bandnames: list[str]) -> dict[str, float]:
+        """Collapse channel importance to {band_MMDD: mean_importance}."""
+        result: dict[str, list[float]] = {}
+        for ch in bandnames:
+            parts = ch.rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            band, date8 = parts[0], parts[1]
+            mmdd = date8[4:]
+            key  = f"{band}_{mmdd}"
+            result.setdefault(key, []).append(float(imp[ch]))
+        return {k: float(np.mean(v)) for k, v in result.items()}
+
+    # ── Extra years: sample + train separate multi-class RF, MMDD-level imp ───
+    extra_imps: list[tuple[str, list[str], dict[int, dict[str, float]]]] = []
     for year, s2_paths, cdl_path in years_data[1:]:
-        log.info(f"  Sampling extra year {year} for band importance averaging...")
+        log.info(f"  Sampling extra year {year}...")
         bandnames_yr, _, _ = build_channel_names(s2_paths)
         df_yr = sample_pixels(s2_paths, cdl_path, bandnames_yr)
-        extra_band_importance.append((year, bandnames_yr, df_yr))
+        rf_yr = _train_multiclass_rf(df_yr, bandnames_yr, seed=42)
+        imp_yr = _per_class_importance(rf_yr, bandnames_yr, KEEP_CLASSES)
+        # Collapse to MMDD level per crop
+        mmdd_yr = {
+            crop_id: _mmdd_level(imp_yr[crop_id], bandnames_yr)
+            for crop_id in KEEP_CLASSES
+        }
+        extra_imps.append((year, bandnames_yr, mmdd_yr))
 
-    # ── Per-crop RF on primary year + band-averaging across extra years ────────
-    per_crop: dict[int, list[str]] = {}
+    # ── Adjust primary-year importances via multi-year MMDD averaging ─────────
     adjusted_per_crop: dict[int, pd.Series] = {}
 
     for crop_id in KEEP_CLASSES:
-        crop_name = CDL_CLASS_NAMES[crop_id]
+        si_primary = imp_primary[crop_id]
 
-        # --- Primary year: full channel-level RF importance ---
-        y = (df_primary["class_label"].values == crop_id).astype(int)
-        x = df_primary[primary_bandnames].values
-
-        # Cap pixel count
-        if len(y) > RF_MAX_PIXELS:
-            rng = np.random.default_rng(crop_id)
-            idx = rng.choice(len(y), RF_MAX_PIXELS, replace=False)
-            x, y = x[idx], y[idx]
-
-        n_pos = y.sum()
-        if n_pos < 10:
-            log.warning(f"  {crop_name}: only {n_pos} positive samples — skipping RF, using zeros")
-            per_crop[crop_id] = []
-            adjusted_per_crop[crop_id] = pd.Series(0.0, index=primary_bandnames)
-            continue
-
-        # Handle NaN: replace with column median
-        col_medians = np.nanmedian(x, axis=0)
-        nan_mask = np.isnan(x)
-        x = np.where(nan_mask, col_medians, x)
-
-        rf = RandomForestClassifier(
-            n_estimators=RF_N_ESTIMATORS,
-            class_weight="balanced",
-            n_jobs=-1,
-            random_state=crop_id,
-        )
-        rf.fit(x, y)
-        importance_primary = pd.Series(rf.feature_importances_, index=primary_bandnames)
-
-        # --- Extra years: MMDD-level importance averaging with primary ---
-        if extra_band_importance:
-            from crop_mapping_pipeline.config import S2_BAND_NAMES
-
-            def _doy(mmdd: str) -> int:
-                return _dt.strptime(f"2000{mmdd}", "%Y%m%d").timetuple().tm_yday
-
-            def _mmdd_level(importance: pd.Series, bandnames: list[str]) -> dict[str, float]:
-                """Collapse channel importances to {band_MMDD: mean_importance}."""
-                result = {}
-                for ch in bandnames:
-                    parts = ch.rsplit("_", 1)
-                    if len(parts) != 2:
-                        continue
-                    band, date8 = parts[0], parts[1]   # e.g. B12, 20220814
-                    mmdd = date8[4:]                    # 0814
-                    key  = f"{band}_{mmdd}"
-                    result.setdefault(key, []).append(float(importance[ch]))
-                return {k: float(np.mean(v)) for k, v in result.items()}
-
-            # Primary year MMDD-level importance
-            primary_mmdd_imp = _mmdd_level(importance_primary, primary_bandnames)
-
-            # Extra years: run RF, collapse to MMDD-level
-            extra_mmdd_imps: list[dict[str, float]] = []
-            for _yr, bandnames_yr, df_yr in extra_band_importance:
-                y_yr = (df_yr["class_label"].values == crop_id).astype(int)
-                x_yr = df_yr[bandnames_yr].values
-                if y_yr.sum() < 10:
-                    continue
-                if len(y_yr) > RF_MAX_PIXELS:
-                    rng = np.random.default_rng(crop_id + 1000)
-                    idx = rng.choice(len(y_yr), RF_MAX_PIXELS, replace=False)
-                    x_yr, y_yr = x_yr[idx], y_yr[idx]
-                col_med = np.nanmedian(x_yr, axis=0)
-                x_yr = np.where(np.isnan(x_yr), col_med, x_yr)
-                rf_yr = RandomForestClassifier(
-                    n_estimators=RF_N_ESTIMATORS,
-                    class_weight="balanced",
-                    n_jobs=-1,
-                    random_state=crop_id,
-                )
-                rf_yr.fit(x_yr, y_yr)
-                imp_yr = pd.Series(rf_yr.feature_importances_, index=bandnames_yr)
-                extra_mmdd_imps.append(_mmdd_level(imp_yr, bandnames_yr))
-
-            # For each primary channel, find nearest-MMDD match in each extra year
-            # and average importances across all years at that (band, MMDD) level
-            adjusted = importance_primary.copy()
+        if extra_imps:
+            primary_mmdd = _mmdd_level(si_primary, primary_bandnames)
+            adjusted = si_primary.copy()
             for ch in primary_bandnames:
                 parts = ch.rsplit("_", 1)
                 if len(parts) != 2:
@@ -159,28 +220,29 @@ def run_rf_direct(
                 mmdd_p = date8[4:]
                 doy_p  = _doy(mmdd_p)
 
-                imps = [primary_mmdd_imp.get(f"{band}_{mmdd_p}", float(importance_primary[ch]))]
-                for yr_mmdd_imp in extra_mmdd_imps:
-                    # Find nearest MMDD key for same band in this extra year
-                    cands = [k for k in yr_mmdd_imp if k.startswith(f"{band}_")]
+                imps = [primary_mmdd.get(f"{band}_{mmdd_p}", float(si_primary[ch]))]
+                for _yr, _bnames, mmdd_yr in extra_imps:
+                    yr_mmdd = mmdd_yr[crop_id]
+                    cands = [k for k in yr_mmdd if k.startswith(f"{band}_")]
                     if not cands:
                         continue
                     nearest = min(cands, key=lambda k: abs(_doy(k.split("_")[1]) - doy_p))
-                    imps.append(yr_mmdd_imp[nearest])
-
+                    imps.append(yr_mmdd[nearest])
                 adjusted[ch] = float(np.mean(imps))
         else:
-            adjusted = importance_primary
+            adjusted = si_primary
 
         adjusted_per_crop[crop_id] = adjusted.fillna(0.0)
 
-    # ── Selection: pooled-percentile threshold (Option B) OR top-K per crop ─────
+    # ── Selection: pooled-percentile threshold OR top-K per crop ─────────────
+    per_crop: dict[int, list[str]] = {}
+    thr: float | None = None
     if percentile is not None:
         pooled = np.concatenate([s.values for s in adjusted_per_crop.values()])
         thr    = float(np.percentile(pooled, percentile))
         log.info(f"  RF pooled P{percentile:g} threshold = {thr:.6f}")
         for crop_id in KEEP_CLASSES:
-            s = adjusted_per_crop[crop_id]
+            s   = adjusted_per_crop[crop_id]
             sel = s[s >= thr].sort_values(ascending=False).index.tolist()
             per_crop[crop_id] = sel
             log.info(f"  {CDL_CLASS_NAMES[crop_id]:20s}: {len(sel)} ch (top-3 {sel[:3]})")
@@ -201,35 +263,44 @@ def run_rf_direct(
 
     union = save_selection(
         per_crop, json_path, txt_path,
-        selector="rf_direct", top_k=top_k, percentile=percentile,
-        meta={"years": [yr for yr, _, _ in years_data], "primary_year": primary_year,
-              "n_primary_channels": n_channels, "rf_n_estimators": RF_N_ESTIMATORS},
+        selector="rf_direct_multiclass", top_k=top_k, percentile=percentile,
+        meta={
+            "years":             [yr for yr, _, _ in years_data],
+            "primary_year":      primary_year,
+            "n_primary_channels": n_channels,
+            "rf_n_estimators":   RF_N_ESTIMATORS,
+            "rf_oob_score":      float(rf_primary.oob_score_),
+            "method":            "multiclass_rf_per_class_mdi",
+            "reference":         "Wei et al. 2023 Remote Sensing 15:3212",
+        },
     )
-    log.info(f"RF-direct: {len(union)} union channels → {json_path}")
+    log.info(f"RF-direct (multi-class): {len(union)} union channels → {json_path}")
 
     # ── MLflow ────────────────────────────────────────────────────────────────
-    try:
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_FEATURE)
-        from datetime import datetime
-        with mlflow.start_run(run_name=f"rf_direct_{datetime.now().strftime('%Y%m%d-%H%M%S')}"):
-            mlflow.log_params({
-                "selector":      "rf_direct",
-                "top_k":         top_k,
-                "years":         str([yr for yr, _, _ in years_data]),
-                "primary_year":  primary_year,
-                "n_channels":    n_channels,
-                "n_union":       len(union),
-                "n_crops":       len(KEEP_CLASSES),
-                "rf_n_estimators": RF_N_ESTIMATORS,
-            })
-            mlflow.log_metric("n_union_channels", len(union))
-            with tempfile.TemporaryDirectory() as tmp:
-                import shutil
-                tmp_json = Path(tmp) / json_path.name
-                shutil.copy(json_path, tmp_json)
-                mlflow.log_artifact(str(tmp_json))
-    except Exception as e:
-        log.warning(f"MLflow logging failed (non-fatal): {e}")
+    duration_s = time.time() - t_start
+    log.info(f"RF-direct completed in {duration_s:.1f}s")
+    log_selection_run(
+        selector="rf_direct_multiclass",
+        run_name_prefix="rf_direct",
+        per_crop=per_crop,
+        union=union,
+        json_path=json_path,
+        params={
+            "selector":        "rf_direct_multiclass",
+            "selection_mode":  "percentile" if percentile is not None else "top_k",
+            "top_k":           top_k,
+            "percentile":      percentile,
+            "years":           str([yr for yr, _, _ in years_data]),
+            "primary_year":    primary_year,
+            "n_channels":      n_channels,
+            "n_union":         len(union),
+            "n_crops":         len(KEEP_CLASSES),
+            "rf_n_estimators": RF_N_ESTIMATORS,
+            "method":          "multiclass_rf_per_class_mdi",
+        },
+        duration_s=duration_s,
+        threshold=thr,
+        extra_metrics={"rf_oob_score": float(rf_primary.oob_score_)},
+    )
 
     return union

@@ -1,6 +1,7 @@
 """Shared pixel-sampling utilities for single-stage direct selectors."""
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,8 @@ import pandas as pd
 import rasterio
 
 from crop_mapping_pipeline.config import S2_BAND_NAMES, S2_NODATA, KEEP_CLASSES, SAMPLE_FRACTION
+
+log = logging.getLogger(__name__)
 
 
 def build_channel_names(s2_paths: list[str]) -> tuple[list[str], list[str], dict[str, int]]:
@@ -120,3 +123,103 @@ def save_selection(
     txt_path.write_text("\n".join(union) + "\n")
 
     return union
+
+
+def hardware_info() -> dict:
+    """CPU/GPU/RAM identity for mlflow params — static per-machine, not a metric."""
+    import platform
+
+    cpu_name = platform.processor()
+    if not cpu_name and platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.lower().startswith("model name"):
+                        cpu_name = line.split(":", 1)[1].strip()
+                        break
+        except OSError:
+            pass
+
+    info = {"cpu_name": cpu_name or "unknown", "cpu_cores": os.cpu_count()}
+    try:
+        import psutil
+        info["ram_total_gb"] = round(psutil.virtual_memory().total / 1024**3, 1)
+    except ImportError:
+        info["ram_total_gb"] = None
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            info["gpu_name"]      = torch.cuda.get_device_name(0)
+            info["gpu_count"]     = torch.cuda.device_count()
+            info["gpu_memory_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
+        else:
+            info["gpu_name"], info["gpu_count"], info["gpu_memory_gb"] = "none", 0, None
+    except Exception:
+        info["gpu_name"], info["gpu_count"], info["gpu_memory_gb"] = "unknown", None, None
+    return info
+
+
+def _metric_safe(name: str) -> str:
+    """mlflow metric keys: keep alnum/_-./space — replace anything else."""
+    return re.sub(r"[^0-9A-Za-z_\-./ ]", "_", name)
+
+
+def log_selection_run(
+    *,
+    selector: str,
+    run_name_prefix: str,
+    per_crop: dict[int, list[str]],
+    union: list[str],
+    json_path: Path,
+    params: dict,
+    duration_s: float,
+    threshold: float | None = None,
+    extra_metrics: dict | None = None,
+):
+    """Log a band-selection run to MLflow: results, per-crop counts, runtime,
+    machine identity, and (if available) live system metrics. Non-fatal on error."""
+    import shutil
+    import tempfile
+    from datetime import datetime
+
+    import mlflow
+    from crop_mapping_pipeline.config import (
+        MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE, CDL_CLASS_NAMES,
+    )
+
+    try:
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_FEATURE)
+        run_name = f"{run_name_prefix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        try:
+            run_ctx = mlflow.start_run(run_name=run_name, log_system_metrics=True)
+        except TypeError:   # older mlflow without system-metrics kwarg
+            run_ctx = mlflow.start_run(run_name=run_name)
+
+        with run_ctx:
+            hw = hardware_info()
+            mlflow.log_params({
+                **params,
+                **{f"hw_{k}": v for k, v in hw.items()},
+            })
+            # Results
+            mlflow.log_metric("n_union_channels", len(union))
+            mlflow.log_metric("runtime_seconds", round(duration_s, 2))
+            mlflow.log_metric("runtime_minutes", round(duration_s / 60.0, 3))
+            if threshold is not None:
+                mlflow.log_metric("pooled_threshold", float(threshold))
+            # Per-crop selected counts
+            for cid, chs in per_crop.items():
+                cname = CDL_CLASS_NAMES.get(cid, str(cid))
+                mlflow.log_metric(_metric_safe(f"n_sel_{cname}"), len(chs))
+            for k, v in (extra_metrics or {}).items():
+                if v is not None:
+                    mlflow.log_metric(_metric_safe(k), float(v))
+            # Full selection JSON (per-crop bands + union)
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_json = Path(tmp) / Path(json_path).name
+                shutil.copy(json_path, tmp_json)
+                mlflow.log_artifact(str(tmp_json))
+    except Exception as e:
+        log.warning(f"MLflow logging failed (non-fatal): {e}")

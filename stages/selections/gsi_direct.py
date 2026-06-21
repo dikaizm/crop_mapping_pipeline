@@ -8,21 +8,19 @@ Band-level GSI is averaged across all training years for robustness.
 """
 
 import logging
-import tempfile
+import time
 from datetime import datetime as _dt
 from pathlib import Path
 
-import mlflow
 import numpy as np
 import pandas as pd
 
 from crop_mapping_pipeline.config import (
     KEEP_CLASSES, CDL_CLASS_NAMES, S2_BAND_NAMES,
     SELECT_TOP_K_PER_CROP, SELECT_GSI_DIRECT_JSON, SELECT_GSI_DIRECT_BANDS,
-    MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_FEATURE,
 )
 from crop_mapping_pipeline.stages.selections._utils import (
-    build_channel_names, sample_pixels, save_selection,
+    build_channel_names, sample_pixels, save_selection, log_selection_run,
 )
 
 log = logging.getLogger(__name__)
@@ -80,6 +78,7 @@ def run_gsi_direct(
       Primary year (first) supplies date strings; extra years contribute band-level GSI averaging.
     Returns union channel list.
     """
+    t_start = time.time()
     log.info("GSI-direct: scoring all channels, no prefilter")
     log.info(f"  years={[yr for yr, _, _ in years_data]}  top_k={top_k}")
 
@@ -153,6 +152,7 @@ def run_gsi_direct(
 
     # ── Selection: pooled-percentile threshold (Option B) OR top-K per crop ─────
     per_crop: dict[int, list[str]] = {}
+    thr: float | None = None
     if percentile is not None:
         # Shared absolute GSI threshold = Pxx of the POOLED per-crop GSI scores.
         # Per crop keeps channels >= thr → adaptive count (separable crops keep more).
@@ -188,27 +188,27 @@ def run_gsi_direct(
     log.info(f"GSI-direct: {len(union)} union channels → {json_path}")
 
     # ── MLflow ────────────────────────────────────────────────────────────────
-    try:
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_FEATURE)
-        from datetime import datetime
-        with mlflow.start_run(run_name=f"gsi_direct_{datetime.now().strftime('%Y%m%d-%H%M%S')}"):
-            mlflow.log_params({
-                "selector":      "gsi_direct",
-                "top_k":         top_k,
-                "years":         str([yr for yr, _, _ in years_data]),
-                "primary_year":  primary_year,
-                "n_channels":    len(primary_bandnames),
-                "n_union":       len(union),
-                "n_crops":       len(KEEP_CLASSES),
-            })
-            mlflow.log_metric("n_union_channels", len(union))
-            with tempfile.TemporaryDirectory() as tmp:
-                import shutil
-                tmp_json = Path(tmp) / json_path.name
-                shutil.copy(json_path, tmp_json)
-                mlflow.log_artifact(str(tmp_json))
-    except Exception as e:
-        log.warning(f"MLflow logging failed (non-fatal): {e}")
+    duration_s = time.time() - t_start
+    log.info(f"GSI-direct completed in {duration_s:.1f}s")
+    log_selection_run(
+        selector="gsi_direct",
+        run_name_prefix="gsi_direct",
+        per_crop=per_crop,
+        union=union,
+        json_path=json_path,
+        params={
+            "selector":       "gsi_direct",
+            "selection_mode": "percentile" if percentile is not None else "top_k",
+            "top_k":          top_k,
+            "percentile":     percentile,
+            "years":          str([yr for yr, _, _ in years_data]),
+            "primary_year":   primary_year,
+            "n_channels":     len(primary_bandnames),
+            "n_union":        len(union),
+            "n_crops":        len(KEEP_CLASSES),
+        },
+        duration_s=duration_s,
+        threshold=thr,
+    )
 
     return union
