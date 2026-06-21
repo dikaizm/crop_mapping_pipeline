@@ -90,7 +90,13 @@ CDL_DOWNLOAD_URLS = {
     "2023": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2023_30m_cdls.zip",
     "2024": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2024_30m_cdls.zip",
 }
+# Native 10m CDL (random-forest, Sentinel-2+Landsat fusion, no 30m resampling).
+# Only available from 2024 onward — used by process_data_v6.py for the test year.
+CDL_DOWNLOAD_URLS_10M = {
+    "2024": "https://www.nass.usda.gov/Research_and_Science/Cropland/Release/datasets/2024_10m_cdls.zip",
+}
 GDRIVE_PROCESSED_CDL_FOLDER_ID    = "1limegK5Eu3NpNOKHG9xDPe8RoW1B7qMQ"
+GDRIVE_PROCESSED_CDL_FOLDER_ID_V6 = "1oztNLt4a2YS4CzL5cIahW0rvKZB0GARW"
 # V2 study area processed data — single parent folder; year subfolders created automatically
 GDRIVE_PROCESSED_V2_FOLDER_ID     = "1RepvRly_kh4z54Jum-3F_RBzxsw3wxcS"
 GDRIVE_PROCESSED_V3_FOLDER_ID     = "1WyMw6j1jRdTeIMrG0rkbRv712RBw5rz_"
