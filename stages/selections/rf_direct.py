@@ -159,7 +159,10 @@ def run_rf_direct(
     """
     t_start = time.time()
     log.info("RF-direct (multi-class): scoring all channels, no prefilter")
-    log.info(f"  years={[yr for yr, _, _ in years_data]}  top_k={top_k}  n_trees={RF_N_ESTIMATORS}")
+    _mode_str = (f"score_threshold={score_threshold:g}" if score_threshold is not None
+                 else f"percentile={percentile:g}" if percentile is not None
+                 else f"top_k={top_k}")
+    log.info(f"  years={[yr for yr, _, _ in years_data]}  mode={_mode_str}  n_trees={RF_N_ESTIMATORS}")
 
     primary_year, primary_s2, primary_cdl = years_data[0]
     primary_bandnames, _, _ = build_channel_names(primary_s2)

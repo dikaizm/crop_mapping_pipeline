@@ -81,7 +81,10 @@ def run_gsi_direct(
     """
     t_start = time.time()
     log.info("GSI-direct: scoring all channels, no prefilter")
-    log.info(f"  years={[yr for yr, _, _ in years_data]}  top_k={top_k}")
+    _mode_str = (f"score_threshold={score_threshold:g}" if score_threshold is not None
+                 else f"percentile={percentile:g}" if percentile is not None
+                 else f"top_k={top_k}")
+    log.info(f"  years={[yr for yr, _, _ in years_data]}  mode={_mode_str}")
 
     # ── Per-year GSI ──────────────────────────────────────────────────────────
     primary_year, primary_s2, primary_cdl = years_data[0]
