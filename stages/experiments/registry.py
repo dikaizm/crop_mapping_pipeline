@@ -23,6 +23,7 @@ from crop_mapping_pipeline.config import (
     MLFLOW_EXPERIMENT_TRAIN_SAME_AREA,
     MLFLOW_EXPERIMENT_TRAIN_V6_SPATIAL,
     MLFLOW_EXPERIMENT_TRAIN_V6_SAME_AREA,
+    MLFLOW_EXPERIMENT_TRAIN_V6_1_SAME_AREA,
 )
 
 
@@ -33,7 +34,7 @@ class ExperimentConfig:
     band_indices:      Any           # list[int] or dict{yr: (list[int], list[str])}
     band_names:        list          # reference-year channel names
     default_loss:      str  = "wce"  # "wce" | "phenology" | "focal_tversky" | "dynamic_balanced" | "recall"
-    mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_V6_SAME_AREA
+    mlflow_experiment: str  = MLFLOW_EXPERIMENT_TRAIN_V6_1_SAME_AREA
     extra_kw:          dict = field(default_factory=dict)
 
 

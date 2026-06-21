@@ -357,6 +357,62 @@ def evaluate_test_set(model, loader, num_classes, device):
     }
 
 
+def benchmark_inference_latency(model, loader, device, run_id):
+    """Time inference one patch at a time (excludes data loading/metric compute).
+
+    Logs per-patch latency (ms) to mlflow via log_batch (chunked, avoids one
+    HTTP call per patch) plus avg/std/min/max summary metrics.
+    """
+    from mlflow.entities import Metric
+    from mlflow.tracking import MlflowClient
+
+    model.eval()
+    client  = MlflowClient()
+    metrics = []
+    latencies_ms = []
+    is_cuda = torch.cuda.is_available() and str(device) != "cpu"
+    idx = 0
+
+    with torch.no_grad():
+        for imgs, _ in loader:
+            imgs = torch.nan_to_num(imgs, nan=0.0, posinf=5.0, neginf=-5.0)
+            for b in range(imgs.shape[0]):
+                patch = imgs[b:b + 1].to(device)
+                if is_cuda:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                _ = model(patch)
+                if is_cuda:
+                    torch.cuda.synchronize()
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                latencies_ms.append(elapsed_ms)
+                metrics.append(Metric(
+                    key="inference_time_ms_patch", value=elapsed_ms,
+                    timestamp=int(time.time() * 1000), step=idx,
+                ))
+                idx += 1
+
+    for i in range(0, len(metrics), 1000):
+        client.log_batch(run_id, metrics=metrics[i:i + 1000])
+
+    lat = np.array(latencies_ms)
+    summary = {
+        "inference_time_ms_avg":       float(lat.mean()),
+        "inference_time_ms_std":       float(lat.std()),
+        "inference_time_ms_min":       float(lat.min()),
+        "inference_time_ms_max":       float(lat.max()),
+        "inference_patches_benchmarked": len(lat),
+    }
+    mlflow.log_metrics(summary)
+    log.info(
+        f"  Inference latency: avg={summary['inference_time_ms_avg']:.2f}ms "
+        f"std={summary['inference_time_ms_std']:.2f}ms "
+        f"(min={summary['inference_time_ms_min']:.2f} max={summary['inference_time_ms_max']:.2f}) "
+        f"over {len(lat)} patches"
+    )
+    return summary
+
+
 # ── Model builder ─────────────────────────────────────────────────────────────
 
 def build_model(arch, in_channels, num_classes):
@@ -1298,7 +1354,7 @@ def run_experiment(
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
 
-    with mlflow.start_run(run_name=exp_name, nested=True) as run:
+    with mlflow.start_run(run_name=exp_name, nested=True, log_system_metrics=True) as run:
         mlflow.log_params({
             "experiment":     exp_name,
             "architecture":   arch,
@@ -1395,12 +1451,13 @@ def run_experiment(
                     slug   = name.lower().replace('/', '_').replace(' ', '_')
                     per_cls_metrics[f"val_oa_{slug}"] = oav
             mlflow.log_metrics({
-                "train_loss": train_loss,
-                "val_loss":   val_m["loss"],
-                "val_miou":   val_m["miou"],
-                "val_mf1":    val_m["mf1"],
-                "val_oa":     val_m["oa"],
-                "lr":         scheduler.get_last_lr()[0],
+                "train_loss":   train_loss,
+                "val_loss":     val_m["loss"],
+                "val_miou":     val_m["miou"],
+                "val_mf1":      val_m["mf1"],
+                "val_oa":       val_m["oa"],
+                "lr":           scheduler.get_last_lr()[0],
+                "epoch_time_s": ep_t,
                 **per_cls_metrics,
             }, step=epoch)
 
@@ -1472,6 +1529,14 @@ def run_experiment(
                 log.info(f"  Early stopping at epoch {epoch + 1}")
                 break
 
+        # Training time only — measured up to here, excludes test/inference below.
+        train_time_total_s = time.time() - t_start
+        mlflow.log_metrics({
+            "train_time_total_s":   train_time_total_s,
+            "train_time_total_min": train_time_total_s / 60,
+        })
+        log.info(f"  Training time: {train_time_total_s:.1f}s ({train_time_total_s / 60:.1f}min)")
+
         # ── Test evaluation (held-out same-area split, only when TEST_FRAC > 0) ─
         ckpt = torch.load(best_ckpt, map_location=DEVICE)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -1482,6 +1547,8 @@ def run_experiment(
         if test_dl is not None:
             log.info("  Evaluating on held-out test set (same area, random split)...")
             test_r = evaluate_test_set(model, test_dl, NUM_CLASSES, DEVICE)
+            log.info("  Benchmarking per-patch inference latency...")
+            benchmark_inference_latency(model, test_dl, DEVICE, run.info.run_id)
         else:
             log.info("  No same-area test split — TEST_FRAC=0; skipping test evaluation")
             test_r = None
