@@ -50,6 +50,7 @@ os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
 # Cache HuggingFace model weights persistently so they are not re-downloaded each run
 os.environ.setdefault("HF_HOME", str(Path(__file__).parent.parent / ".hf_cache"))
 import mlflow
+from mlflow.tracking import MlflowClient
 
 _ROOT = Path(__file__).parent.parent   # crop_mapping_pipeline/
 sys.path.insert(0, str(_ROOT.parent))
@@ -70,6 +71,7 @@ from crop_mapping_pipeline.config import (
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
     SELECT_TOP_K_PER_CROP,
 )
+from crop_mapping_pipeline.utils.constants import USDA_CDL_COLORS
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import (
     build_wce, build_phenology, build_focal_tversky,
@@ -364,7 +366,6 @@ def benchmark_inference_latency(model, loader, device, run_id):
     HTTP call per patch) plus avg/std/min/max summary metrics.
     """
     from mlflow.entities import Metric
-    from mlflow.tracking import MlflowClient
 
     model.eval()
     client  = MlflowClient()
@@ -1383,6 +1384,12 @@ def run_experiment(
         })
         mlflow.set_tag("band_names", str(band_names_list))
         mlflow.set_tag("n_bands",    str(in_channels))
+        mlflow.set_tag(
+            "mlflow.note.content",
+            f"{description}. Arch={arch} ({cfg['encoder']}), {in_channels} input "
+            f"channels, loss={loss}. Trained on {TRAIN_YEARS}, tested on {TEST_YEAR} "
+            f"(same-area 70/10/20 split: {n_train} train / {n_val} val / {n_test} test patches).",
+        )
 
 
         # ── Training loop ─────────────────────────────────────────────────────
@@ -1762,16 +1769,9 @@ def run_experiment(
 
 # ── Full-image inference & visualization ─────────────────────────────────────
 
-# Colors aligned to KEEP_CLASSES = [3, 24, 36, 54, 75, 76]
-CROP_COLORS = [
-    "#000000",  # 0  background
-    "#1E90FF",  # 1  Rice          — DodgerBlue
-    "#FFD700",  # 2  Winter Wheat  — Gold
-    "#228B22",  # 3  Alfalfa       — ForestGreen
-    "#FF6347",  # 4  Tomatoes      — Tomato
-    "#D2B48C",  # 5  Almonds       — Tan
-    "#8B4513",  # 6  Walnuts       — SaddleBrown
-]
+# Derived from KEEP_CLASSES (config.py) — stays in sync if the class set changes,
+# unlike a hardcoded list which silently desyncs (IndexError once len < NUM_CLASSES).
+CROP_COLORS  = ["#000000"] + [USDA_CDL_COLORS[c] for c in KEEP_CLASSES]
 CLASS_LABELS = ["Background"] + [CDL_CLASS_NAMES[c] for c in KEEP_CLASSES]
 SEG_CMAP     = ListedColormap(CROP_COLORS)
 SEG_NORM     = BoundaryNorm(boundaries=range(NUM_CLASSES + 1), ncolors=NUM_CLASSES)
@@ -2524,8 +2524,16 @@ def main(
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     for exp_key, arch_runs in exp_groups.items():
-        cfg_entry = registry[exp_key]
-        mlflow.set_experiment(cfg_entry.mlflow_experiment)
+        cfg_entry  = registry[exp_key]
+        experiment = mlflow.set_experiment(cfg_entry.mlflow_experiment)
+        MlflowClient().set_experiment_tag(
+            experiment.experiment_id, "mlflow.note.content",
+            "Segmentation training — 8-crop CalCROP21-style class selection "
+            "(>=1M px threshold), same-area 70/10/20 spatial split (train/val/test all "
+            "from the same study area, not split by year). Compares band-selection "
+            "experiments (single-date / naive multi-temporal / GSI / RF direct-K) "
+            f"across architectures. train_years={TRAIN_YEARS}, test_year={TEST_YEAR}.",
+        )
         n_ch = len(arch_runs[0][1]) if arch_runs[0][1] else 0
         parent_run_name = f"exp_{exp_key}_k{top_k}_{timestamp}" if top_k else f"exp_{exp_key}_{timestamp}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
@@ -2538,6 +2546,12 @@ def main(
                 "loss":         loss,
                 **({"top_k": top_k} if top_k else {}),
             })
+            mlflow.set_tag(
+                "mlflow.note.content",
+                f"Parent run grouping all architectures for experiment '{exp_key}': "
+                f"{cfg_entry.description}. {n_ch} input channels, trained on "
+                f"{TRAIN_YEARS} and tested on {TEST_YEAR}.",
+            )
             log.info(f"Parent MLflow run: {parent_run_name}  (id={parent_run.info.run_id})")
             for arch, band_idx, band_names, description, extra_kw in arch_runs:
                 exp_name = f"exp_{exp_key}_k{top_k}_{arch}" if top_k else f"exp_{exp_key}_{arch}"
