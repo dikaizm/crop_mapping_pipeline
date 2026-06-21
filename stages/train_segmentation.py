@@ -700,22 +700,18 @@ class AugmentedSubset(torch.utils.data.Dataset):
 # long-tailed S2 reflectance. Per-band stats are area-invariant when computed
 # from a representative sample across the training region.
 
-def compute_per_band_percentiles(s2_paths, n_samples_per_file=50_000,
-                                  percentiles=(1.0, 99.0), seed=42):
-    """Compute (p1, p99) per S2 band by sampling pixels across all files.
+NORM_MODES = ("percentile", "minmax", "zscore")
 
-    Returns: (p1, p99), each shape (N_BANDS_PER_DATE,) float32.
-    """
+
+def _sample_per_band(s2_paths, n_samples_per_file=50_000, seed=42):
+    """Return list[np.ndarray] — one array of valid samples per S2 band."""
     rng = np.random.default_rng(seed)
-    samples_per_band: list = [[] for _ in range(N_BANDS_PER_DATE)]
-
-    log.info(f"  [percentiles] Sampling {n_samples_per_file} px/file × {len(s2_paths)} files …")
+    samples: list = [[] for _ in range(N_BANDS_PER_DATE)]
     for path in s2_paths:
         try:
             with rasterio.open(path) as src:
                 h, w, nb = src.height, src.width, src.count
                 if nb != N_BANDS_PER_DATE:
-                    log.warning(f"  [percentiles] {Path(path).name}: {nb} bands ≠ {N_BANDS_PER_DATE}; skipping")
                     continue
                 n_pick = min(n_samples_per_file, h * w)
                 ys = rng.integers(0, h, n_pick)
@@ -724,38 +720,89 @@ def compute_per_band_percentiles(s2_paths, n_samples_per_file=50_000,
                     arr = src.read(b)
                     vals = arr[ys, xs].astype(np.float32)
                     vals = vals[np.isfinite(vals) & (vals != S2_NODATA)]
-                    samples_per_band[b - 1].append(vals)
+                    samples[b - 1].append(vals)
         except Exception as e:
-            log.warning(f"  [percentiles] {Path(path).name}: read failed — {e}")
+            log.warning(f"  [norm] {Path(path).name}: read failed — {e}")
+    return [np.concatenate(s) if s else np.array([0.0, 10000.0], dtype=np.float32)
+            for s in samples]
 
-    p1  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
-    p99 = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+
+def compute_per_band_percentiles(s2_paths, n_samples_per_file=50_000,
+                                  percentiles=(2.0, 98.0), seed=42):
+    """Compute (p_lo, p_hi) per S2 band. Default P2/P98 (ablation baseline).
+
+    Returns: (lo, hi), each shape (N_BANDS_PER_DATE,) float32.
+    """
+    log.info(f"  [norm:percentile] P{percentiles[0]}/P{percentiles[1]}  "
+             f"{n_samples_per_file} px/file × {len(s2_paths)} files …")
+    samples = _sample_per_band(s2_paths, n_samples_per_file, seed)
+    lo  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    hi  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
     for b in range(N_BANDS_PER_DATE):
-        if not samples_per_band[b]:
-            log.warning(f"  [percentiles] Band {S2_BAND_NAMES[b]}: no valid samples; using [0, 10000]")
-            p1[b], p99[b] = 0.0, 10000.0
-            continue
-        cat = np.concatenate(samples_per_band[b])
-        p1[b], p99[b] = np.percentile(cat, percentiles)
+        lo[b], hi[b] = np.percentile(samples[b], percentiles)
+        log.info(f"    {S2_BAND_NAMES[b]}: lo={lo[b]:.1f}  hi={hi[b]:.1f}")
+    return lo, hi
 
-    log.info(f"  [percentiles] Per-band stats:")
+
+def compute_per_band_minmax(s2_paths, n_samples_per_file=50_000, seed=42):
+    """Compute (min, max) per S2 band for min-max normalization → [0, 1].
+
+    Returns: (lo, hi), each shape (N_BANDS_PER_DATE,) float32.
+    """
+    log.info(f"  [norm:minmax] {n_samples_per_file} px/file × {len(s2_paths)} files …")
+    samples = _sample_per_band(s2_paths, n_samples_per_file, seed)
+    lo  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    hi  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
     for b in range(N_BANDS_PER_DATE):
-        log.info(f"    {S2_BAND_NAMES[b]}: p1={p1[b]:.1f}  p99={p99[b]:.1f}")
-    return p1, p99
+        lo[b] = float(samples[b].min())
+        hi[b] = float(samples[b].max())
+        log.info(f"    {S2_BAND_NAMES[b]}: min={lo[b]:.1f}  max={hi[b]:.1f}")
+    return lo, hi
 
 
-def load_or_compute_band_percentiles(s2_paths, cache_path):
-    """Load cached percentiles or compute and cache them. Returns (p1, p99) (N_BANDS,) each."""
-    cache_path = Path(cache_path)
+def compute_per_band_zscore(s2_paths, n_samples_per_file=50_000, seed=42):
+    """Compute (mean, std) per S2 band for z-score normalization: (x - mean) / std.
+
+    Returns: (mean, std), each shape (N_BANDS_PER_DATE,) float32.
+    """
+    log.info(f"  [norm:zscore] {n_samples_per_file} px/file × {len(s2_paths)} files …")
+    samples = _sample_per_band(s2_paths, n_samples_per_file, seed)
+    lo  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    hi  = np.zeros(N_BANDS_PER_DATE, dtype=np.float32)
+    for b in range(N_BANDS_PER_DATE):
+        lo[b] = float(samples[b].mean())
+        hi[b] = float(samples[b].std()) or 1.0
+        log.info(f"    {S2_BAND_NAMES[b]}: mean={lo[b]:.1f}  std={hi[b]:.1f}")
+    return lo, hi
+
+
+def load_or_compute_norm_stats(norm_mode, s2_paths, cache_dir):
+    """Load or compute (lo, hi) normalization stats for the given norm_mode.
+
+    Returns (lo, hi) each shape (N_BANDS_PER_DATE,) float32.
+    Cache keyed by norm_mode — different modes never share a cache file.
+    """
+    assert norm_mode in NORM_MODES, f"norm_mode must be one of {NORM_MODES}"
+    cache_path = Path(cache_dir) / f"norm_stats_{norm_mode}.npz"
     if cache_path.exists():
         d = np.load(str(cache_path))
-        log.info(f"  [percentiles] Loaded from cache → {cache_path.name}")
-        return d["p1"].astype(np.float32), d["p99"].astype(np.float32)
-    p1, p99 = compute_per_band_percentiles(s2_paths)
+        log.info(f"  [norm:{norm_mode}] Loaded from cache → {cache_path.name}")
+        return d["lo"].astype(np.float32), d["hi"].astype(np.float32)
+    if norm_mode == "percentile":
+        lo, hi = compute_per_band_percentiles(s2_paths)
+    elif norm_mode == "minmax":
+        lo, hi = compute_per_band_minmax(s2_paths)
+    else:  # zscore
+        lo, hi = compute_per_band_zscore(s2_paths)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(str(cache_path), p1=p1, p99=p99)
-    log.info(f"  [percentiles] Cached → {cache_path.name}")
-    return p1, p99
+    np.savez(str(cache_path), lo=lo, hi=hi)
+    log.info(f"  [norm:{norm_mode}] Cached → {cache_path.name}")
+    return lo, hi
+
+
+# Keep old name as alias for backward compat
+def load_or_compute_band_percentiles(s2_paths, cache_path):
+    return load_or_compute_norm_stats("percentile", s2_paths, Path(cache_path).parent)
 
 
 def _channel_to_band_idx(dataset_band_indices):
@@ -789,13 +836,20 @@ class PreloadedDataset(torch.utils.data.Dataset):
     """
 
     def __init__(self, dataset, desc="preload", cache_dir=None, n_threads=None,
-                 channel_stats=None, band_percentiles=None):
-        """Normalisation: per-band 1st/99th percentile → [0, 1] clipped.
+                 channel_stats=None, band_percentiles=None, norm_mode="percentile"):
+        """Normalisation: per-band stats → normalised values stored as float16.
 
-        band_percentiles: (p1, p99) each shape (N_BANDS_PER_DATE,). Required.
+        band_percentiles: (lo, hi) each shape (N_BANDS_PER_DATE,). Required.
+          Semantics depend on norm_mode:
+            percentile → (p2, p98) clip to [0,1]
+            minmax     → (min, max) clip to [0,1]
+            zscore     → (mean, std) no clip
         channel_stats: deprecated, kept for API compat (ignored).
+        norm_mode: one of NORM_MODES ("percentile", "minmax", "zscore").
         """
-        assert band_percentiles is not None, "band_percentiles required for percentile normalisation"
+        assert band_percentiles is not None, "band_percentiles (lo, hi) required"
+        assert norm_mode in NORM_MODES, f"norm_mode must be one of {NORM_MODES}"
+        self._norm_mode = norm_mode
         imgs_path, masks_path = self._cache_paths(dataset, cache_dir) if cache_dir else (None, None)
 
         if imgs_path and imgs_path.exists() and masks_path and masks_path.exists():
@@ -869,17 +923,19 @@ class PreloadedDataset(torch.utils.data.Dataset):
                         buf[pi, out_pos, :, :] = band_plane[r:r+ps, c:c+ps]
                 del arr
 
-        # Per-band 1st/99th percentile normalisation → [0, 1] clipped.
-        p1_per_ch, p99_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
-        denom = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
-        p1_b  = p1_per_ch[np.newaxis, :, np.newaxis, np.newaxis].astype(np.float32)
+        # Per-band normalisation using norm_mode stats.
+        lo_per_ch, hi_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
+        denom = np.maximum(hi_per_ch - lo_per_ch, 1.0).astype(np.float32)
+        lo_b  = lo_per_ch[np.newaxis, :, np.newaxis, np.newaxis].astype(np.float32)
         d_b   = denom[np.newaxis, :, np.newaxis, np.newaxis]
         CHUNK = 128
-        log.info(f"  [{desc}] Normalising with per-band percentile (1st/99th) …")
+        log.info(f"  [{desc}] Normalising with norm_mode={norm_mode} …")
         for start in range(0, n, CHUNK):
             end   = min(start + CHUNK, n)
             chunk = buf[start:end].astype(np.float32)
-            chunk = np.clip((chunk - p1_b) / d_b, 0.0, 1.0)
+            chunk = (chunk - lo_b) / d_b
+            if norm_mode != "zscore":
+                chunk = np.clip(chunk, 0.0, 1.0)
             buf[start:end] = chunk.astype(np.float16)
         buf.flush()
 
@@ -915,7 +971,7 @@ class PreloadedDataset(torch.utils.data.Dataset):
             "stride":         getattr(dataset, "stride", None),
             "min_valid_frac": getattr(dataset, "min_valid_frac", None),
             "n_patches":      len(dataset.patches),
-            "norm":           "percentile_v1",  # per-band 1st/99th percentile; invalidates older caches
+            "norm":           f"norm_v2_{norm_mode}",  # invalidates pre-norm_mode caches
         }
         h = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         base = Path(cache_dir) / f"preload_{h}"
@@ -933,14 +989,21 @@ class PreloadedDataset(torch.utils.data.Dataset):
 # ── No-preload: on-the-fly normalisation ─────────────────────────────────────
 
 class NormalizedDataset(torch.utils.data.Dataset):
-    """Per-band 1st/99th percentile normalisation wrapper — no disk cache."""
+    """Per-band normalisation wrapper — on-the-fly, no disk cache.
 
-    def __init__(self, dataset, channel_stats=None, band_percentiles=None):
-        assert band_percentiles is not None, "band_percentiles required for percentile normalisation"
-        self.dataset = dataset
-        p1_per_ch, p99_per_ch = _per_channel_percentiles(dataset.band_indices, *band_percentiles)
-        denom = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
-        self.p1    = torch.tensor(p1_per_ch.astype(np.float32)).view(-1, 1, 1)
+    norm_mode: "percentile" (P2/P98, clip [0,1]) | "minmax" (clip [0,1]) | "zscore" (no clip).
+    band_percentiles: (lo, hi) per-band stats (semantics depend on norm_mode).
+    """
+
+    def __init__(self, dataset, channel_stats=None, band_percentiles=None,
+                 norm_mode="percentile"):
+        assert band_percentiles is not None, "band_percentiles (lo, hi) required"
+        assert norm_mode in NORM_MODES, f"norm_mode must be one of {NORM_MODES}"
+        self.dataset   = dataset
+        self.norm_mode = norm_mode
+        lo_per_ch, hi_per_ch = _per_channel_percentiles(dataset.band_indices, *band_percentiles)
+        denom = np.maximum(hi_per_ch - lo_per_ch, 1.0).astype(np.float32)
+        self.lo    = torch.tensor(lo_per_ch.astype(np.float32)).view(-1, 1, 1)
         self.denom = torch.tensor(denom).view(-1, 1, 1)
 
     def __len__(self):
@@ -950,7 +1013,9 @@ class NormalizedDataset(torch.utils.data.Dataset):
         img, mask = self.dataset[idx]
         if not isinstance(img, torch.Tensor):
             img = torch.tensor(img, dtype=torch.float32)
-        img = ((img.float() - self.p1) / self.denom).clamp(0.0, 1.0)
+        img = (img.float() - self.lo) / self.denom
+        if self.norm_mode != "zscore":
+            img = img.clamp(0.0, 1.0)
         return img, mask
 
 
@@ -1036,6 +1101,7 @@ def _evaluate_spatial_area(
     channel_stats: "tuple | None" = None,  # kept for API compat, unused
     band_percentiles: "tuple | None" = None,
     no_preload: bool = False,
+    norm_mode: str = "percentile",
 ) -> "dict | None":
     """Evaluate model on one held-out spatial test area.
 
@@ -1085,10 +1151,11 @@ def _evaluate_spatial_area(
         min_valid_frac=MIN_VALID_FRAC, band_indices=area_idx_local,
     )
     if no_preload:
-        area_norm = NormalizedDataset(area_ds, band_percentiles=band_percentiles)
+        area_norm = NormalizedDataset(area_ds, band_percentiles=band_percentiles,
+                                      norm_mode=norm_mode)
     else:
         area_norm = PreloadedDataset(area_ds, desc=area_name, cache_dir=PRELOAD_CACHE_DIR,
-                                     band_percentiles=band_percentiles)
+                                     band_percentiles=band_percentiles, norm_mode=norm_mode)
     area_dl = DataLoader(area_norm, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     area_r = evaluate_test_set(model, area_dl, NUM_CLASSES, DEVICE)
@@ -1182,8 +1249,9 @@ def run_experiment(
     loss="wce",             # "wce" | "phenology" | "focal_tversky" | "dynamic_balanced" | "recall"
     force=False,
     skip_viz=False,
-    no_preload=False,       # skip disk preload cache; use on-the-fly z-score normalisation
+    no_preload=False,       # skip disk preload cache; use on-the-fly normalisation
     cache_only=False,       # build PreloadedDataset cache then exit without training
+    norm_mode="percentile", # "percentile" | "minmax" | "zscore"
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -1255,12 +1323,13 @@ def run_experiment(
     log.info(f"  {description}")
     log.info(f"{'='*65}\n")
 
-    # ── Per-band percentile stats (computed once from all training files) ─────
-    _perc_cache = Path(s2_processed[0]).parent / "band_percentiles.npz"
+    # ── Per-band normalisation stats (computed once from all training files) ────
+    _stats_cache_dir = Path(s2_processed[0]).parent
     _all_train_s2 = []
     for yr in TRAIN_YEARS:
         _all_train_s2.extend(_s2_for_year(s2_processed, yr))
-    band_percentiles = load_or_compute_band_percentiles(_all_train_s2, _perc_cache)
+    band_percentiles = load_or_compute_norm_stats(norm_mode, _all_train_s2, _stats_cache_dir)
+    log.info(f"  norm_mode={norm_mode}")
 
     # ── Year-based dataset split ──────────────────────────────────────────────
     train_year_datasets_raw = []   # RasterPatchDataset — for _patch_weights (needs _cdl etc.)
@@ -1287,10 +1356,11 @@ def run_experiment(
         log.info(f"  [{yr}] {len(ds_raw):,} patches  ({len(yr_idx)} channels, {len(yr_s2_filtered)}/{len(yr_s2)} files)")
         train_year_datasets_raw.append(ds_raw)
         if no_preload:
-            train_year_datasets.append(NormalizedDataset(ds_raw, band_percentiles=band_percentiles))
+            train_year_datasets.append(NormalizedDataset(ds_raw, band_percentiles=band_percentiles,
+                                                          norm_mode=norm_mode))
         else:
             preloaded = PreloadedDataset(ds_raw, desc=yr, cache_dir=PRELOAD_CACHE_DIR,
-                                         band_percentiles=band_percentiles)
+                                         band_percentiles=band_percentiles, norm_mode=norm_mode)
             train_year_datasets.append(preloaded)
 
     assert train_year_datasets, "No training data for any TRAIN_YEAR"
@@ -1408,6 +1478,7 @@ def run_experiment(
             "optimizer":      "AdamW",
             "lr_scheduler":   "PolynomialLR(power=0.9)",
             "loss":           loss,
+            "norm_mode":      norm_mode,
             "train_years":    str(TRAIN_YEARS),
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
@@ -1721,6 +1792,7 @@ def run_experiment(
             pred_map, _  = run_full_inference(
                 model, test_s2_filtered, test_idx_local, patch_size=PATCH_SIZE, stride=PATCH_SIZE,
                 channel_stats=None, band_percentiles=band_percentiles,
+                norm_mode=norm_mode,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             rgb_img = _load_rgb_for_viz(test_s2_filtered, band_percentiles, downsample=4)
@@ -1738,6 +1810,7 @@ def run_experiment(
                 model, primary_s2_filtered, primary_idx_local,
                 patch_size=PATCH_SIZE, stride=PATCH_SIZE,
                 channel_stats=None, band_percentiles=band_percentiles,
+                norm_mode=norm_mode,
             )
             seg_path = exp_dir / "test_segmentation_map.png"
             rgb_img = _load_rgb_for_viz(primary_s2_filtered, band_percentiles, downsample=4)
@@ -1898,10 +1971,8 @@ def upload_models_to_gdrive(run_name, model_files):
 
 
 def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256,
-                       channel_stats=None, band_percentiles=None):
-    """Tiled inference — reads one window at a time, never loads full rasters.
-    Normalisation: per-band 1st/99th percentile → [0, 1] clipped.
-    """
+                       channel_stats=None, band_percentiles=None, norm_mode="percentile"):
+    """Tiled inference — reads one window at a time, never loads full rasters."""
     assert band_percentiles is not None, "band_percentiles required"
     with rasterio.open(s2_paths[0]) as src:
         H, W    = src.height, src.width
@@ -1914,9 +1985,9 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
     total    = n_rows * n_cols
     K        = len(band_indices)
 
-    p1_per_ch, p99_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
-    denom_per_ch = np.maximum(p99_per_ch - p1_per_ch, 1.0).astype(np.float32)
-    p1_per_ch    = p1_per_ch.astype(np.float32)
+    lo_per_ch, hi_per_ch = _per_channel_percentiles(band_indices, *band_percentiles)
+    denom_per_ch = np.maximum(hi_per_ch - lo_per_ch, 1.0).astype(np.float32)
+    lo_per_ch    = lo_per_ch.astype(np.float32)
 
     model.eval()
     done = 0
@@ -1940,7 +2011,9 @@ def run_full_inference(model, s2_paths, band_indices, patch_size=256, stride=256
                         bands.append(arr)
 
                     patch = np.concatenate(bands, axis=0)[band_indices]  # (K, ph, pw)
-                    patch = np.clip((patch - p1_per_ch[:, None, None]) / denom_per_ch[:, None, None], 0.0, 1.0)
+                    patch = (patch - lo_per_ch[:, None, None]) / denom_per_ch[:, None, None]
+                    if norm_mode != "zscore":
+                        patch = np.clip(patch, 0.0, 1.0)
 
                     # Pad to patch_size if at border
                     if ph < patch_size or pw < patch_size:
@@ -2607,6 +2680,7 @@ def main(
                     skip_viz=skip_viz,
                     no_preload=args.no_preload,
                     cache_only=args.build_cache_only,
+                    norm_mode=args.norm,
                     **extra_kw,
                 )
                 if result is not None:
@@ -2721,8 +2795,13 @@ if __name__ == "__main__":
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz",   action="store_true", help="Skip full-image visualization")
     parser.add_argument("--no-preload", action="store_true",
-                        help="Skip disk preload cache; use on-the-fly z-score normalization. "
+                        help="Skip disk preload cache; use on-the-fly normalization. "
                              "Slower per epoch but avoids large disk/RAM allocation — useful for high channel counts.")
+    parser.add_argument("--norm", default="percentile", choices=list(NORM_MODES),
+                        help="Input normalization strategy for ablation. "
+                             "percentile: clip [P2,P98]→[0,1] (default). "
+                             "minmax: clip [min,max]→[0,1]. "
+                             "zscore: (x-mean)/std, no clip.")
     parser.add_argument("--build-cache-only", action="store_true",
                         help="Build PreloadedDataset cache for all selected experiments then exit without training. "
                              "Transfer the cache dir to another machine and training will use it as a cache hit.")
