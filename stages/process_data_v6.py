@@ -749,7 +749,7 @@ def main(
         elif s2_ref_path is None:
             log.warning("  No processed S2 reference — skipping CDL processing")
         else:
-            cdl_out_dir     = S2_PROCESSED_DIR.parent / "cdl"
+            cdl_out_dir     = PROCESSED_DIR / "cdl"
             cdl_reprojected = str(cdl_out_dir / f"cdl_{yr}_study_area.tif")
             cdl_filtered    = str(cdl_out_dir / f"cdl_{yr}_study_area_filtered.tif")
             process_cdl(cdl_raw, s2_ref_path, cdl_reprojected, cdl_filtered,
