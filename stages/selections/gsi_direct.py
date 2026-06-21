@@ -43,7 +43,11 @@ def _gsi_per_crop(df: pd.DataFrame, bandnames: list[str]) -> dict[int, pd.Series
             continue
         x_c = x_all[crop_mask]
         x_r = x_all[rest_mask]
-        si = np.abs(np.nanmean(x_c, 0) - np.nanmean(x_r, 0)) / (np.nanstd(x_c, 0) + 1e-9)
+        # SI(j,k) = |mean_s - mean_o| / (1.96 * (std_s + std_o))  — Li et al. 2023 (rs15040875),
+        # adapted from Somers & Asner 2013 (RSE 136:14-27).
+        si = np.abs(np.nanmean(x_c, 0) - np.nanmean(x_r, 0)) / (
+            1.96 * (np.nanstd(x_c, 0) + np.nanstd(x_r, 0)) + 1e-9
+        )
         gsi[crop_id] = pd.Series(si.astype(np.float32), index=bandnames)
     return gsi
 
