@@ -14,10 +14,12 @@ S2 handling identical to v5. CDL handling now branches on native resolution:
     no majority filter, no erosion. This is the label used for the 2024 test split.
 
 CDL confidence masking (Maleki et al. 2024, Agriculture 14:1285):
-  Each CDL zip ships a companion confidence raster (uint8, 0–100%). Pixels below
+  30m CDL zips ship a companion confidence raster (uint8, 0–100%). Pixels below
   --conf-threshold (default 55, per Maleki et al. 2024 best result) are set to
   unknown_value (255) so the model never trains on low-confidence labels.
-  Use --no-conf-mask to disable.
+  NOTE: NASS discontinued downloadable confidence layers for the native 10m CDL
+  (file too large) — confidence masking is automatically skipped for 2024+.
+  Use --no-conf-mask to disable for 30m years too.
 
 Checks processed_v3 on GDrive before downloading raw files — only downloads
 and processes dates that are missing from processed_v3.
@@ -850,9 +852,13 @@ def main(
                 else:
                     log.warning("  No download URL configured for CDL year %s", yr)
 
-        # Detect companion confidence raster (extracted from zip earlier)
+        # Detect companion confidence raster (extracted from zip earlier).
+        # NASS discontinued downloadable confidence layers for native 10m CDL
+        # (too large) — skip silently for those years.
         cdl_conf_raw = None
-        if not no_conf_mask:
+        if native_10m:
+            log.info("  Native 10m CDL: confidence layer not available from NASS — skipping confidence mask")
+        elif not no_conf_mask:
             conf_candidates = sorted(cdl_subdir.glob("*confidence*")) if cdl_subdir.exists() else []
             if conf_candidates:
                 cdl_conf_raw = str(conf_candidates[0])
@@ -877,11 +883,7 @@ def main(
                         unknown_value=unknown_value,
                         conf_raw_path=cdl_conf_raw,
                         conf_threshold=conf_threshold)
-            # Delete raw CDL after processing — full CONUS TIF is large (~8 GB)
-            if not skip_delete and pathlib.Path(cdl_raw).exists():
-                freed = pathlib.Path(cdl_raw).stat().st_size
-                pathlib.Path(cdl_raw).unlink()
-                log.info("  Deleted raw CDL TIF (freed %.1f GB)", freed / 1e9)
+            log.info("  Raw CDL TIF retained: %s", pathlib.Path(cdl_raw).name)
 
         if not skip_upload:
             service    = _build_drive_service()
