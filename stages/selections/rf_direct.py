@@ -117,8 +117,8 @@ def _train_multiclass_rf(df: pd.DataFrame, bandnames: list[str],
     x = df[bandnames].values.astype(np.float32)
     y = df["class_label"].values.astype(int)
 
-    # Cap total pixels
-    if len(y) > RF_MAX_PIXELS:
+    # Cap total pixels (None = no cap, use all sampled pixels)
+    if RF_MAX_PIXELS is not None and len(y) > RF_MAX_PIXELS:
         rng = np.random.default_rng(seed)
         idx = rng.choice(len(y), RF_MAX_PIXELS, replace=False)
         x, y = x[idx], y[idx]

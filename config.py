@@ -173,6 +173,6 @@ SELECT_RF_DIRECT_JSON    = PROCESSED_DIR / "select_rf_direct.json"
 SELECT_RF_DIRECT_BANDS   = PROCESSED_DIR / "select_rf_direct_bands.txt"
 
 # ── RF selector hyperparameters ────────────────────────────────────────────────
-RF_N_ESTIMATORS       = 500     # trees in the multi-class RF, per Asam et al. 2022 (rs14132981)
-RF_MAX_PIXELS         = 500_000 # pixel sample cap (crop + rest) to keep RF fast
-RF_IMPORTANCE_THRESH  = 0.10    # keep dates/bands with importance >= 10% of max
+RF_N_ESTIMATORS       = 500       # trees in the multi-class RF, per Asam et al. 2022 (rs14132981)
+RF_MAX_PIXELS         = 1_000_000 # pixel sample cap (crop + rest) — no-cap was too slow on CPU
+RF_IMPORTANCE_THRESH  = 0.10      # keep dates/bands with importance >= 10% of max
