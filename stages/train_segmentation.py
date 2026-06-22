@@ -378,11 +378,12 @@ def _get_hardware_info() -> dict:
 def evaluate_test_set(model, loader, num_classes, device):
     model.eval()
     all_logits, all_labels = [], []
-    for imgs, masks in loader:
-        imgs = torch.nan_to_num(imgs, nan=0.0, posinf=5.0, neginf=-5.0)
-        logits = model(imgs.to(device))
-        all_logits.append(logits.cpu())
-        all_labels.append(masks.cpu())
+    with torch.no_grad():
+        for imgs, masks in loader:
+            imgs = torch.nan_to_num(imgs, nan=0.0, posinf=5.0, neginf=-5.0)
+            logits = model(imgs.to(device))
+            all_logits.append(logits.cpu())
+            all_labels.append(masks.cpu())
     all_logits = torch.cat(all_logits)
     all_labels = torch.cat(all_labels)
     preds      = all_logits.argmax(dim=1)
