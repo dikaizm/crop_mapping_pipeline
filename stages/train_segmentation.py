@@ -2422,9 +2422,12 @@ def save_ndvi_patch_visualizations(
     n_patches = len(patch_coords)
     ps        = patch_coords[0][2] if patch_coords else PATCH_SIZE
 
-    # Cache keyed on seed + n_patches — split is deterministic, same every experiment.
+    # Cache keyed on seed + n_patches + n_dates — split is deterministic, same every
+    # experiment, but the NDVI date stack (s2_processed) varies per experiment's
+    # filtered S2 file list, so n_dates must be part of the key or experiments with
+    # different date counts collide on a stale cache (shape mismatch downstream).
     _cache_dir  = Path(s2_processed[0]).parent
-    _cache_path = _cache_dir / f"ndvi_patches_seed{SEED}_n{n_patches}.npy"
+    _cache_path = _cache_dir / f"ndvi_patches_seed{SEED}_n{n_patches}_d{len(s2_processed)}.npy"
 
     if _cache_path.exists():
         log.info(f"  NDVI patch cache hit → {_cache_path.name}")
