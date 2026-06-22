@@ -102,14 +102,14 @@ def _band_union_from_candidates(band_candidates: dict, top_k: int | None = None)
 
 def build_naive_multitemporal_indices(local_date_to_idx, local_band_to_idx,
                                       s2_paths=None, cdl_path=None):
-    """4 phenological dates × all 9 VEGE_BANDS = up to 36 channels."""
+    """4 phenological dates × all 10 S2_BAND_NAMES = up to 40 channels."""
     phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
 
     idx, names = [], []
     for _label, d in phenol_map.items():
         off    = local_date_to_idx[d] * N_BANDS_PER_DATE
-        idx   += [off + S2_BAND_NAMES.index(b) for b in VEGE_BANDS]
-        names += [f"{b}_{d}" for b in VEGE_BANDS]
+        idx   += [off + S2_BAND_NAMES.index(b) for b in S2_BAND_NAMES]
+        names += [f"{b}_{d}" for b in S2_BAND_NAMES]
 
     seen, dedup_idx, dedup_names = set(), [], []
     for i, name in zip(idx, names):

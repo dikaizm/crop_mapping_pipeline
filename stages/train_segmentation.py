@@ -2963,7 +2963,7 @@ if __name__ == "__main__":
         help=(
             "Experiments to run (default: all four). "
             "single_date=peak NDVI date + ALL bands (single-date baseline), "
-            "naive_mt=4 phenological dates + ALL VEGE_BANDS (multi-temporal baseline, no selection), "
+            "naive_mt=4 phenological dates + ALL S2_BAND_NAMES (multi-temporal baseline, noselection), "
             "gsi=GSI-direct top-K, rf=RF-direct top-K (multi-class MDI)."
         ),
     )

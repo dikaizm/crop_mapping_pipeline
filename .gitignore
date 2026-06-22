@@ -16,4 +16,5 @@ documents/
 data/processed/preload_cache/
 mlruns/
 ml_models/
+mlflow_artifacts/
 mlflow.db
