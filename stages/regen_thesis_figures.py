@@ -224,7 +224,7 @@ def fig_spectral_profile(s2_files: list[Path], out_path: Path):
                 color=colors[season], lw=2)
     ax.set_xlabel("Band Sentinel-2")
     ax.set_ylabel("Reflektansi rata-rata")
-    ax.set_title("Profil Spektral per Band pada Tiga Fase Musim (2024)")
+    ax.set_title("Profil Spektral per Band pada Tiga Tanggal Representatif (2024)")
     ax.grid(alpha=0.3)
     ax.legend()
     plt.tight_layout()

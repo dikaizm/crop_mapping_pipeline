@@ -20,7 +20,7 @@ from crop_mapping_pipeline.config import (
     SELECT_TOP_K_PER_CROP, SELECT_GSI_DIRECT_JSON, SELECT_GSI_DIRECT_BANDS,
 )
 from crop_mapping_pipeline.stages.selections._utils import (
-    build_channel_names, sample_pixels, save_selection, log_selection_run,
+    build_channel_names, sample_pixels, save_selection, log_selection_run, save_per_class_table,
 )
 
 log = logging.getLogger(__name__)
@@ -206,6 +206,15 @@ def run_gsi_direct(
     )
     log.info(f"GSI-direct: {len(union)} union channels → {json_path}")
 
+    table_paths = save_per_class_table(
+        per_crop={int(k): v for k, v in per_crop.items()},
+        save_dir=base_dir,
+        stem=stem,
+        score_label="SIglobal",
+        adjusted_per_crop=adjusted_per_crop,
+    )
+    log.info(f"GSI-direct: tables saved ({len(table_paths)} files)")
+
     # ── MLflow ────────────────────────────────────────────────────────────────
     duration_s = time.time() - t_start
     log.info(f"GSI-direct completed in {duration_s:.1f}s")
@@ -221,6 +230,7 @@ def run_gsi_direct(
         per_crop=per_crop,
         union=union,
         json_path=json_path,
+        extra_artifacts=table_paths,
         params={
             "selector":         "gsi_direct",
             "selection_mode":   sel_mode,
