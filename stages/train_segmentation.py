@@ -177,6 +177,9 @@ from crop_mapping_pipeline.stages.experiments import (
 )
 from crop_mapping_pipeline.stages.experiments.exp_select_direct import build_direct_indices
 from crop_mapping_pipeline.stages.selections.rf_band_only import run_rf_band_only, save_rf_band_json
+from crop_mapping_pipeline.stages.ndvi_disagreement_analysis import (
+    run_ndvi_disagreement, score_patch_verdict, B4_IDX, B8_IDX,
+)
 from crop_mapping_pipeline.config import (
     SELECT_GSI_DIRECT_JSON,
     SELECT_RF_DIRECT_JSON,
@@ -1252,6 +1255,7 @@ def run_experiment(
     no_preload=False,       # skip disk preload cache; use on-the-fly normalisation
     cache_only=False,       # build PreloadedDataset cache then exit without training
     norm_mode="percentile", # "percentile" | "minmax" | "zscore"
+    skip_ndvi=False,        # skip NDVI GT-vs-pred disagreement analysis (CalCROP21 method)
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -1786,6 +1790,8 @@ def run_experiment(
 
         # Segmentation map PNG (full-tile inference)
         seg_path = None
+        ndvi_char_matrix = ndvi_char_var = None
+        ndvi_s2_paths    = None
         if not skip_viz and test_s2_filtered is not None:
             log.info(f"  Running full-image inference for {exp_name}...")
             gt_map, _    = load_gt_remap(str(test_cdl))
@@ -1802,6 +1808,14 @@ def run_experiment(
                 save_path=str(seg_path),
                 rgb_img=rgb_img,
             )
+            # Persisted full-res arrays — input to ndvi_disagreement_analysis.py
+            # (Ghosh et al. 2021 CalCROP21 NDVI-based GT-vs-pred resolution).
+            np.save(exp_dir / "test_pred_map.npy", pred_map)
+            np.save(exp_dir / "test_gt_map.npy", gt_map)
+            if not skip_ndvi:
+                ndvi_char_matrix, ndvi_char_var = _run_ndvi_disagreement_and_log(
+                    pred_map, gt_map, test_s2_filtered, exp_dir, label="test")
+                ndvi_s2_paths = test_s2_filtered
             del pred_map, gt_map
         elif not skip_viz and primary_s2_filtered is not None:
             log.info(f"  Running full-image inference on training area for {exp_name}...")
@@ -1820,6 +1834,12 @@ def run_experiment(
                 save_path=str(seg_path),
                 rgb_img=rgb_img,
             )
+            np.save(exp_dir / "test_pred_map.npy", pred_map)
+            np.save(exp_dir / "test_gt_map.npy", gt_map)
+            if not skip_ndvi:
+                ndvi_char_matrix, ndvi_char_var = _run_ndvi_disagreement_and_log(
+                    pred_map, gt_map, primary_s2_filtered, exp_dir, label="train_area")
+                ndvi_s2_paths = primary_s2_filtered
             del pred_map, gt_map
 
         # Per-patch test visualizations
@@ -1831,6 +1851,19 @@ def run_experiment(
                 band_percentiles, exp_dir, exp_name,
             )
             mlflow.log_artifacts(str(patch_dir), artifact_path="test_patches")
+
+            # NDVI disagreement, per patch — own artifact folder (CalCROP21 method).
+            if not skip_ndvi and ndvi_char_matrix is not None:
+                log.info(f"  Saving NDVI disagreement patch visualizations for {exp_name}...")
+                ndvi_patch_dir = save_ndvi_patch_visualizations(
+                    test_dl, test_r["preds"], test_r["labels"],
+                    ndvi_s2_paths, test_ds, train_year_datasets_raw,
+                    ndvi_char_matrix, ndvi_char_var, exp_dir, exp_name,
+                )
+                try:
+                    mlflow.log_artifacts(str(ndvi_patch_dir), artifact_path="ndvi_patches")
+                except Exception as e:
+                    log.warning(f"  Could not log ndvi_patches to MLflow: {e}")
 
         gdrive_links = upload_models_to_gdrive(
             run_name=f"{exp_name}_{run_timestamp}",
@@ -2310,6 +2343,173 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
     log.info(f"  Saved: {save_path}")
 
 
+def _run_ndvi_disagreement_and_log(pred_map, gt_map, s2_paths, exp_dir, label):
+    """Run CalCROP21 (Ghosh et al. 2021) NDVI GT-vs-pred disagreement analysis
+    and log results to the active MLflow run. Non-fatal — a failure here must
+    not take down a completed training run.
+
+    Returns (char_matrix, char_var) on success, (None, None) on failure — these
+    are reused by save_ndvi_patch_visualizations to avoid rebuilding the
+    per-class characteristic series at patch scale.
+    """
+    ndvi_out_dir = exp_dir / "ndvi_disagreement"
+    try:
+        overall, char_matrix, char_var = run_ndvi_disagreement(pred_map, gt_map, s2_paths, ndvi_out_dir)
+    except Exception as e:
+        log.warning(f"  NDVI disagreement analysis failed ({label}): {e}")
+        return None, None
+
+    if overall.get("pred_win_rate_overall") is not None:
+        mlflow.log_metric("ndvi_pred_win_rate", overall["pred_win_rate_overall"])
+    mlflow.log_metric("ndvi_n_disagreement_px", overall["n_disagreement_px"])
+    mlflow.log_metric("ndvi_n_scored", overall["n_scored"])
+
+    summary_csv = ndvi_out_dir / "ndvi_disagreement_summary.csv"
+    if summary_csv.exists():
+        summary_df = pd.read_csv(summary_csv)
+        for _, row in summary_df.iterrows():
+            name = str(row["class_name"]).lower().replace("/", "_").replace(" ", "_")
+            mlflow.log_metric(f"ndvi_pred_win_rate_{name}", row["pred_win_rate"])
+        mlflow.log_artifact(str(summary_csv))
+    overall_json = ndvi_out_dir / "ndvi_disagreement_overall.json"
+    if overall_json.exists():
+        mlflow.log_artifact(str(overall_json))
+
+    log.info(f"  NDVI disagreement ({label}): logged to MLflow")
+    return char_matrix, char_var
+
+
+def save_ndvi_patch_visualizations(
+    test_dl,
+    preds_tensor,
+    labels_tensor,
+    s2_processed,
+    test_ds,
+    raw_datasets,
+    char_matrix,
+    char_var,
+    exp_dir,
+    exp_name,
+):
+    """Per-patch NDVI GT-vs-pred disagreement overlay (Ghosh et al. 2021 CalCROP21).
+
+    Separate artifact folder from test_patches/ — colors disagreement pixels by
+    which label (CDL ground truth or model prediction) the pixel's own NDVI
+    series actually follows, using the characteristic series already built by
+    _run_ndvi_disagreement_and_log over the full raster.
+    """
+    import rasterio.windows as _rwin
+
+    patch_dir = exp_dir / "ndvi_patches"
+    patch_dir.mkdir(exist_ok=True)
+
+    b4_rast, b8_rast = B4_IDX + 1, B8_IDX + 1   # rasterio 1-based
+
+    cum_sizes = [0]
+    for ds_raw in raw_datasets:
+        cum_sizes.append(cum_sizes[-1] + len(ds_raw.patches))
+
+    patch_coords = []
+    for j in range(len(test_ds)):
+        flat_idx = test_ds.indices[j]
+        for i in range(len(raw_datasets)):
+            if cum_sizes[i] <= flat_idx < cum_sizes[i + 1]:
+                row, col = raw_datasets[i].patches[flat_idx - cum_sizes[i]]
+                patch_coords.append((row, col, raw_datasets[i].patch_size))
+                break
+
+    n_patches = len(patch_coords)
+    ps        = patch_coords[0][2] if patch_coords else PATCH_SIZE
+
+    # Cache keyed on seed + n_patches — split is deterministic, same every experiment.
+    _cache_dir  = Path(s2_processed[0]).parent
+    _cache_path = _cache_dir / f"ndvi_patches_seed{SEED}_n{n_patches}.npy"
+
+    if _cache_path.exists():
+        log.info(f"  NDVI patch cache hit → {_cache_path.name}")
+        ndvi_patches = np.load(str(_cache_path))
+    else:
+        log.info(f"  Building NDVI series for {n_patches} test patches across {len(s2_processed)} dates...")
+        ndvi_patches = np.full((n_patches, len(s2_processed), ps, ps), np.nan, dtype=np.float16)
+        for fi, path in enumerate(s2_processed):
+            try:
+                with rasterio.open(path) as src:
+                    for pi, (row, col, _) in enumerate(patch_coords):
+                        win = _rwin.Window(col, row, ps, ps)
+                        b4, b8 = src.read([b4_rast, b8_rast], window=win).astype(np.float32)
+                        invalid = (b4 == S2_NODATA) | (b8 == S2_NODATA) | ~np.isfinite(b4) | ~np.isfinite(b8)
+                        denom = b4 + b8
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            ndvi = (b8 - b4) / denom
+                        ndvi[invalid | (denom == 0)] = np.nan
+                        ndvi_patches[pi, fi] = ndvi.astype(np.float16)
+            except Exception as e:
+                log.warning(f"  NDVI skip {Path(path).name}: {e}")
+        np.save(str(_cache_path), ndvi_patches)
+        log.info(f"  NDVI patches cached → {_cache_path.name}")
+
+    verdict_cmap = ListedColormap(["#d0d0d0", "#22cc44", "#ee2222", "#f5a623"])
+    verdict_norm = BoundaryNorm([0, 1, 2, 3, 4], verdict_cmap.N)
+    verdict_legend = [
+        mpatches.Patch(color="#d0d0d0", label="Agreement / background"),
+        mpatches.Patch(color="#22cc44", label="Prediction wins (NDVI)"),
+        mpatches.Patch(color="#ee2222", label="CDL wins (NDVI)"),
+        mpatches.Patch(color="#f5a623", label="Disagreement, unscored"),
+    ]
+
+    patch_ndvi_metrics = []
+    patch_idx = 0
+    for imgs_batch, _ in test_dl:
+        for b in range(imgs_batch.shape[0]):
+            pred = preds_tensor[patch_idx].numpy()
+            gt   = labels_tensor[patch_idx].numpy()
+            ndvi_patch = ndvi_patches[patch_idx].astype(np.float32)   # (n_dates, ps, ps)
+
+            verdict = score_patch_verdict(ndvi_patch, gt, pred, char_matrix, char_var)
+
+            n_pred_win = int((verdict == 1).sum())
+            n_gt_win   = int((verdict == 2).sum())
+            n_unscored = int((verdict == 3).sum())
+            patch_ndvi_metrics.append({
+                "patch_idx":       patch_idx,
+                "n_disagreement":  int((gt != pred).sum()),
+                "pred_wins":       n_pred_win,
+                "gt_cdl_wins":     n_gt_win,
+                "unscored":        n_unscored,
+                "pred_win_rate":   round(n_pred_win / (n_pred_win + n_gt_win), 4)
+                                   if (n_pred_win + n_gt_win) > 0 else float("nan"),
+            })
+
+            fig, axes = plt.subplots(1, 3, figsize=(6 * 3, 5))
+            axes[0].imshow(gt,      cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[0].set_title("Ground Truth (CDL)", fontsize=11, fontweight="bold"); axes[0].axis("off")
+            axes[1].imshow(pred,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
+            axes[1].set_title("Prediction",         fontsize=11, fontweight="bold"); axes[1].axis("off")
+            axes[2].imshow(verdict, cmap=verdict_cmap, norm=verdict_norm, interpolation="nearest")
+            axes[2].set_title("NDVI Disagreement Verdict", fontsize=11, fontweight="bold"); axes[2].axis("off")
+
+            fig.legend(handles=verdict_legend, loc="lower center", ncol=4, fontsize=9,
+                       bbox_to_anchor=(0.5, -0.02), frameon=True)
+            plt.suptitle(f"{exp_name} — NDVI Patch {patch_idx:04d}", fontsize=12, y=1.02)
+            plt.tight_layout()
+            plt.savefig(str(patch_dir / f"ndvi_patch_{patch_idx:04d}.png"), dpi=100, bbox_inches="tight")
+            plt.close()
+            patch_idx += 1
+
+    log.info(f"  Saved {patch_idx} NDVI patch PNGs → {patch_dir}")
+
+    if patch_ndvi_metrics:
+        csv_path = exp_dir / "ndvi_patch_metrics.csv"
+        pd.DataFrame(patch_ndvi_metrics).to_csv(csv_path, index=False)
+        log.info(f"  Saved per-patch NDVI metrics → {csv_path}")
+        try:
+            mlflow.log_artifact(str(csv_path))
+        except Exception as e:
+            log.warning(f"  Could not log ndvi patch metrics to MLflow: {e}")
+
+    return patch_dir
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(
@@ -2319,6 +2519,7 @@ def main(
     force=False,
     data_dir=None,
     skip_viz=False,
+    skip_ndvi=False,
     top_k=None,
     percentile=None,
     score_threshold=None,
@@ -2666,6 +2867,7 @@ def main(
                     loss=loss,
                     force=force,
                     skip_viz=skip_viz,
+                    skip_ndvi=skip_ndvi,
                     no_preload=no_preload,
                     cache_only=cache_only,
                     norm_mode=norm_mode,
@@ -2782,6 +2984,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz",   action="store_true", help="Skip full-image visualization")
+    parser.add_argument("--skip-ndvi",  action="store_true",
+                        help="Skip NDVI GT-vs-pred disagreement analysis (Ghosh et al. 2021 CalCROP21 method). "
+                             "Runs after full-image inference, logs per-class win-rate to MLflow.")
     parser.add_argument("--no-preload", action="store_true",
                         help="Skip disk preload cache; use on-the-fly normalization. "
                              "Slower per epoch but avoids large disk/RAM allocation — useful for high channel counts.")
@@ -2921,6 +3126,7 @@ if __name__ == "__main__":
             force=args.force,
             data_dir=args.data_dir,
             skip_viz=args.skip_viz,
+            skip_ndvi=args.skip_ndvi,
             top_k=val if mode == "top_k" else None,
             percentile=val if mode == "percentile" else None,
             score_threshold=val if mode == "score_threshold" else None,
