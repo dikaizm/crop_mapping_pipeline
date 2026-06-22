@@ -902,7 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="cnn",
         help="Selector: cnn/rf for Stage 2v2; others for --stage select.",
     )
-    parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
+    parser.add_argument("--force", "--overwrite", dest="force", action="store_true",
+                        help="Re-run even if outputs exist")
     parser.add_argument("--top-k", type=int, nargs="+", default=None, metavar="K",
                         help="Top-K per crop for --stage select sweep (e.g. --top-k 5 10 15 20 30)")
     parser.add_argument("--percentile", type=float, nargs="+", default=None, metavar="P",

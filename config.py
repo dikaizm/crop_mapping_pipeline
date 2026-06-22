@@ -132,7 +132,7 @@ MLFLOW_EXPERIMENT_TRAIN_V6_SAME_AREA = "cropmap_segmentation_s2_v6_same_area"
 MLFLOW_EXPERIMENT_TRAIN_V6_1_SAME_AREA = "cropmap_segmentation_s2_v6.1_same_area"
 
 # ── GSI scoring hyperparameters ───────────────────────────────────────────────
-SAMPLE_FRACTION = 0.05   # 5% of labeled crop pixels for GSI computation
+SAMPLE_FRACTION = 0.20   # 20% of labeled crop pixels for GSI computation
 TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 
 # ── Training hyperparameters ───────────────────────────────────────────────────
@@ -173,6 +173,6 @@ SELECT_RF_DIRECT_JSON    = PROCESSED_DIR / "select_rf_direct.json"
 SELECT_RF_DIRECT_BANDS   = PROCESSED_DIR / "select_rf_direct_bands.txt"
 
 # ── RF selector hyperparameters ────────────────────────────────────────────────
-RF_N_ESTIMATORS       = 200    # trees in the binary RF oracle
-RF_MAX_PIXELS         = 50_000 # pixel sample cap (crop + rest) to keep RF fast
-RF_IMPORTANCE_THRESH  = 0.10   # keep dates/bands with importance >= 10% of max
+RF_N_ESTIMATORS       = 500     # trees in the multi-class RF, per Asam et al. 2022 (rs14132981)
+RF_MAX_PIXELS         = 500_000 # pixel sample cap (crop + rest) to keep RF fast
+RF_IMPORTANCE_THRESH  = 0.10    # keep dates/bands with importance >= 10% of max
