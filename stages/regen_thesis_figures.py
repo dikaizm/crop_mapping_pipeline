@@ -321,10 +321,107 @@ def fig_cdl_class_distribution(cdl_path: Path, out_path: Path, top_n: int = 20):
     print(f"  saved {out_path.name}")
 
 
+def fig_cdl_patch_detail(s2_files: list[Path], cdl_path: Path, out_path: Path):
+    """Two 256×256 px training patches: true color vs CDL label (2-row × 2-col grid)."""
+    PATCH = 256
+    # (row_start, col_start) in full-res pixels — chosen for crop diversity
+    PATCH_ORIGINS = [(1800, 2200), (3200, 1400)]
+    PATCH_LABELS  = ["Patch A", "Patch B"]
+
+    match = [p for p in s2_files if PEAK_DATE in p.name]
+    if not match:
+        print(f"  WARN: no file for {PEAK_DATE}")
+        return
+    path = match[0]
+
+    # Read full-res RGB bands
+    def read_full(band_name):
+        with rasterio.open(path) as src:
+            idx = S2_BAND_NAMES.index(band_name) + 1
+            arr = src.read(idx).astype(np.float32)
+            nd = src.nodata
+        if nd is not None:
+            arr[arr == nd] = np.nan
+        arr[arr <= 0] = np.nan
+        return arr
+
+    b4 = read_full("B4"); b3 = read_full("B3"); b2 = read_full("B2")
+
+    # Read full-res CDL
+    with rasterio.open(cdl_path) as src:
+        cdl_full = src.read(1)
+
+    # Build CDL colormap
+    legend_colors = ["#BFBFBF"]
+    legend_labels  = ["Background"]
+    for cid in KEEP_CLASSES:
+        legend_colors.append(USDA_CDL_COLORS.get(cid, "#c8c8c8"))
+        legend_labels.append(CDL_CLASS_NAMES.get(cid, str(cid)))
+    cmap = ListedColormap(legend_colors)
+    norm = BoundaryNorm(np.arange(-0.5, len(legend_colors) + 0.5, 1), cmap.N)
+
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+
+    for row, ((r0, c0), label) in enumerate(zip(PATCH_ORIGINS, PATCH_LABELS)):
+        r1, c1 = r0 + PATCH, c0 + PATCH
+
+        # RGB patch
+        rgb = np.stack([normalize_for_display(b4[r0:r1, c0:c1]),
+                        normalize_for_display(b3[r0:r1, c0:c1]),
+                        normalize_for_display(b2[r0:r1, c0:c1])], axis=-1)
+        axes[row, 0].imshow(rgb, interpolation="nearest")
+        axes[row, 0].set_title(f"{label} — True Color (B4/B3/B2)", fontsize=9)
+        axes[row, 0].axis("off")
+
+        # CDL patch
+        cdl_p = cdl_full[r0:r1, c0:c1]
+        display = np.zeros_like(cdl_p, dtype=np.int32)
+        for i, cid in enumerate(KEEP_CLASSES, start=1):
+            display[cdl_p == cid] = i
+        axes[row, 1].imshow(display, cmap=cmap, norm=norm, interpolation="nearest")
+        axes[row, 1].set_title(f"{label} — Label CDL 2024", fontsize=9)
+        axes[row, 1].axis("off")
+
+    # Shared legend on last CDL panel
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in legend_colors]
+    axes[1, 1].legend(handles, legend_labels, loc="lower right", fontsize=7, framealpha=0.9)
+
+    plt.suptitle(f"Contoh patch pelatihan 256×256 px ({PEAK_DATE.replace('_', '-')})", fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  saved {out_path.name}")
+
+
+def fig_rgb_single(s2_files: list[Path], out_path: Path):
+    """Single true-color (B4/B3/B2) image at peak date."""
+    match = [p for p in s2_files if PEAK_DATE in p.name]
+    if not match:
+        print(f"  WARN: no file for {PEAK_DATE}")
+        return
+    path = match[0]
+    b4 = read_band(path, S2_BAND_NAMES.index("B4") + 1)
+    b3 = read_band(path, S2_BAND_NAMES.index("B3") + 1)
+    b2 = read_band(path, S2_BAND_NAMES.index("B2") + 1)
+    rgb = np.stack([normalize_for_display(b4),
+                    normalize_for_display(b3),
+                    normalize_for_display(b2)], axis=-1)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(rgb)
+    ax.set_title(f"True Color (B4/B3/B2) — {PEAK_DATE.replace('_', '-')}", fontsize=11)
+    ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  saved {out_path.name}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 FIGURES = {
     "rgb":      ("s2_rgb_temporal.png",        "fig_rgb_temporal"),
+    "rgb_single":   ("s2_rgb_single.png",          "fig_rgb_single"),
+    "cdl_patch":    ("s2_cdl_patch_detail.png",    "fig_cdl_patch_detail"),
     "bands":    ("s2_band_grid.png",           "fig_band_grid"),
     "ndvi":     ("s2_ndvi_temporal.png",       "fig_ndvi_temporal"),
     "ndvi_cls": ("s2_ndvi_per_class.png",      "fig_ndvi_per_class"),
@@ -365,7 +462,7 @@ def main():
         fn = globals()[fn_name]
         if key in ("cdl_map", "cdl_dist"):
             fn(args.cdl, out)
-        elif key == "ndvi_cls":
+        elif key in ("ndvi_cls", "cdl_patch"):
             fn(s2_files, args.cdl, out)
         else:
             fn(s2_files, out)
