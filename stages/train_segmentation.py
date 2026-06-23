@@ -90,6 +90,7 @@ DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
 # all archs in the run; warmup_epochs/sched_power override config defaults.
 HP_OVERRIDE: dict | None = None   # {lr, weight_decay, warmup_epochs, sched_power}
 HP_TAG: str = ""                  # short run-name suffix, e.g. "lr1e-04_wd1e-02_wu5_pw0.9"
+SESSION_LOG_PATH: str | None = None  # top-level session .log file (LOGS_DIR), uploaded to MLflow parent runs
 
 
 # Recognised HP-grid keys (validated on load).
@@ -1924,6 +1925,11 @@ def run_experiment(
                 log.info(f"  [--eval-only] Outputs written to {exp_dir}")
             else:
                 log.warning("  [--eval-only] No test split available — nothing to write")
+            try:
+                run_log_handler.flush()
+                mlflow.log_artifact(str(run_log_path), artifact_path="logs")
+            except Exception as e:
+                log.warning(f"  Could not upload run log: {e}")
             log.removeHandler(run_log_handler)
             run_log_handler.close()
             return None
@@ -2062,9 +2068,16 @@ def run_experiment(
         if seg_path is not None:
             mlflow.log_artifact(str(seg_path))
 
-        # Training log
+        # Training log → child run (per-run log + full session log)
         run_log_handler.flush()
-        mlflow.log_artifact(str(run_log_path))
+        for _h in logging.root.handlers:
+            _h.flush()
+        try:
+            mlflow.log_artifact(str(run_log_path), artifact_path="logs")
+            if SESSION_LOG_PATH and Path(SESSION_LOG_PATH).exists():
+                mlflow.log_artifact(SESSION_LOG_PATH, artifact_path="logs")
+        except Exception as e:
+            log.warning(f"  Could not upload training log to child run: {e}")
 
         run_id = run.info.run_id
 
@@ -3072,6 +3085,16 @@ def main(
                 if result is not None:
                     all_results.append(result)
 
+            # Attach the top-level session log to the parent run (best-effort).
+            # File is still being written; log_artifact snapshots it as-is.
+            if SESSION_LOG_PATH and Path(SESSION_LOG_PATH).exists():
+                try:
+                    for _h in logging.root.handlers:
+                        _h.flush()
+                    mlflow.log_artifact(SESSION_LOG_PATH, artifact_path="logs")
+                except Exception as e:
+                    log.warning(f"Could not upload session log: {e}")
+
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
         summary_df  = pd.DataFrame(all_results)
@@ -3180,9 +3203,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")
     parser.add_argument("--skip-viz",   action="store_true", help="Skip full-image visualization")
-    parser.add_argument("--skip-ndvi",  action="store_true",
-                        help="Skip NDVI GT-vs-pred disagreement analysis (Ghosh et al. 2021 CalCROP21 method). "
-                             "Runs after full-image inference, logs per-class win-rate to MLflow.")
+    parser.add_argument("--ndvi", action="store_true",
+                        help="Run NDVI GT-vs-pred disagreement analysis (Ghosh et al. 2021 CalCROP21 method). "
+                             "OFF by default. Runs after full-image inference, logs per-class win-rate to MLflow.")
+    parser.add_argument("--skip-ndvi", action="store_true",
+                        help="Deprecated/no-op — NDVI analysis is off by default now; use --ndvi to enable.")
     parser.add_argument("--no-preload", action="store_true",
                         help="Skip disk preload cache; use on-the-fly normalization. "
                              "Slower per epoch but avoids large disk/RAM allocation — useful for high channel counts.")
@@ -3275,14 +3300,13 @@ if __name__ == "__main__":
     # Also silence rasterio._err directly (covers worker processes via fork)
     logging.getLogger("rasterio._err").setLevel(logging.ERROR)
 
+    SESSION_LOG_PATH = str(LOGS_DIR / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(
-                LOGS_DIR / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-            ),
+            logging.FileHandler(SESSION_LOG_PATH),
         ],
     )
     for _h in logging.root.handlers:
@@ -3356,7 +3380,7 @@ if __name__ == "__main__":
                 data_dir=args.data_dir,
                 phenol_dates=args.phenol_dates,
                 skip_viz=args.skip_viz,
-                skip_ndvi=args.skip_ndvi,
+                skip_ndvi=(not args.ndvi) or args.skip_ndvi,
                 top_k=val if mode == "top_k" else None,
                 percentile=val if mode == "percentile" else None,
                 score_threshold=val if mode == "score_threshold" else None,
