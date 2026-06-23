@@ -92,46 +92,80 @@ HP_OVERRIDE: dict | None = None   # {lr, weight_decay, warmup_epochs, sched_powe
 HP_TAG: str = ""                  # short run-name suffix, e.g. "lr1e-04_wd1e-02_wu5_pw0.9"
 
 
+# Recognised HP-grid keys (validated on load).
+HP_KEYS = {
+    "lr", "weight_decay", "warmup_epochs", "sched_power",
+    "scheduler", "optimizer", "grad_clip", "batch_size", "momentum",
+}
+_OPTIMIZERS  = {"adamw", "adam", "sgd"}
+_SCHEDULERS  = {"polynomial", "cosine"}
+
+
 def _resolve_hp(cfg: dict) -> dict:
-    """Merge HP_OVERRIDE over a per-arch ARCH_CFG entry + scheduler defaults."""
+    """Merge HP_OVERRIDE over a per-arch ARCH_CFG entry + config defaults.
+
+    batch_size=None → use the module BATCH_SIZE (CLI/config). grad_clip=0 → off.
+    """
     o = HP_OVERRIDE or {}
+    optimizer = str(o.get("optimizer", "adamw")).lower()
+    scheduler = str(o.get("scheduler", "polynomial")).lower()
+    if optimizer not in _OPTIMIZERS:
+        raise ValueError(f"--hp-grid optimizer '{optimizer}' invalid; choose {sorted(_OPTIMIZERS)}")
+    if scheduler not in _SCHEDULERS:
+        raise ValueError(f"--hp-grid scheduler '{scheduler}' invalid; choose {sorted(_SCHEDULERS)}")
     return {
         "lr":            float(o.get("lr",            cfg["lr"])),
         "weight_decay":  float(o.get("weight_decay",  cfg["weight_decay"])),
         "warmup_epochs": int(o.get("warmup_epochs",   WARMUP_EPOCHS)),
         "sched_power":   float(o.get("sched_power",    SCHED_POWER)),
+        "scheduler":     scheduler,
+        "optimizer":     optimizer,
+        "momentum":      float(o.get("momentum", 0.9)),   # SGD only
+        "grad_clip":     float(o.get("grad_clip", 0.0)),  # 0 = disabled
+        "batch_size":    int(o["batch_size"]) if o.get("batch_size") else None,
     }
 
 
-def _build_scheduler(optimizer, max_epochs: int, power: float, warmup_epochs: int):
-    """PolynomialLR decay with optional linear warmup, stepped per-epoch.
+def _build_optimizer(name: str, params, lr: float, weight_decay: float, momentum: float):
+    """AdamW (default) / Adam / SGD(+momentum, nesterov)."""
+    if name == "sgd":
+        return torch.optim.SGD(params, lr=lr, momentum=momentum,
+                               weight_decay=weight_decay, nesterov=momentum > 0)
+    if name == "adam":
+        return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    warmup_epochs=0 → plain PolynomialLR. Otherwise LinearLR (start_factor →
-    1.0 over warmup_epochs) chained into PolynomialLR over the remaining epochs
-    via SequentialLR.
+
+def _build_scheduler(optimizer, max_epochs: int, power: float, warmup_epochs: int,
+                     kind: str = "polynomial"):
+    """LR decay (PolynomialLR or CosineAnnealingLR) with optional linear warmup.
+
+    Stepped per-epoch. warmup_epochs=0 → plain decay. Otherwise LinearLR
+    (start_factor → 1.0 over warmup_epochs) chained into the decay over the
+    remaining epochs via SequentialLR.
     """
+    def _decay(iters):
+        if kind == "cosine":
+            return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters)
+        return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=iters, power=power)
+
     if warmup_epochs and warmup_epochs > 0:
         decay_iters = max(1, max_epochs - warmup_epochs)
         warmup = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=WARMUP_START_FACTOR, end_factor=1.0,
             total_iters=warmup_epochs,
         )
-        decay = torch.optim.lr_scheduler.PolynomialLR(
-            optimizer, total_iters=decay_iters, power=power,
-        )
         return torch.optim.lr_scheduler.SequentialLR(
-            optimizer, schedulers=[warmup, decay], milestones=[warmup_epochs],
+            optimizer, schedulers=[warmup, _decay(decay_iters)], milestones=[warmup_epochs],
         )
-    return torch.optim.lr_scheduler.PolynomialLR(
-        optimizer, total_iters=max_epochs, power=power,
-    )
+    return _decay(max_epochs)
 
 
 def _expand_grid_block(block: dict) -> list[dict]:
     """Expand one {'grid':{...}} / {'combos':[...]} / bare-dict-of-lists block."""
     import itertools
 
-    valid = {"lr", "weight_decay", "warmup_epochs", "sched_power"}
+    valid = HP_KEYS
 
     if isinstance(block, dict) and "combos" in block:
         combos = block["combos"]
@@ -200,10 +234,15 @@ def _load_hp_grid(path: str) -> list[tuple]:
 def _hp_tag(combo: dict) -> str:
     """Short, filename-safe run-name suffix for an HP combo."""
     parts = []
+    if "optimizer" in combo:     parts.append(str(combo["optimizer"]))
     if "lr" in combo:            parts.append(f"lr{float(combo['lr']):.0e}")
     if "weight_decay" in combo:  parts.append(f"wd{float(combo['weight_decay']):.0e}")
+    if "batch_size" in combo:    parts.append(f"bs{int(combo['batch_size'])}")
+    if "scheduler" in combo:     parts.append(str(combo["scheduler"])[:3])
     if "warmup_epochs" in combo: parts.append(f"wu{int(combo['warmup_epochs'])}")
     if "sched_power" in combo:   parts.append(f"pw{float(combo['sched_power']):g}")
+    if "grad_clip" in combo and float(combo["grad_clip"]) > 0:
+        parts.append(f"gc{float(combo['grad_clip']):g}")
     return "_".join(parts)
 
 
@@ -1383,6 +1422,8 @@ def run_experiment(
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
+    hp            = _resolve_hp(cfg)
+    bs            = hp["batch_size"] or BATCH_SIZE   # per-combo batch size override
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     eval_only     = EVAL_ONLY_CKPT is not None
     if eval_only:
@@ -1533,31 +1574,33 @@ def run_experiment(
     # In --eval-only with on-the-fly (no-preload) datasets, workers can't pickle open
     # rasterio handles under macOS spawn; use 0 workers (single test pass, speed is fine).
     _nw = 0 if eval_only else 4
-    train_dl = DataLoader(aug_train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=_nw, pin_memory=True, drop_last=True)
-    val_dl   = DataLoader(val_ds,       batch_size=BATCH_SIZE, shuffle=False,   num_workers=_nw, pin_memory=True)
-    test_dl  = DataLoader(test_ds,      batch_size=BATCH_SIZE, shuffle=False,   num_workers=_nw, pin_memory=True) if test_ds is not None else None
+    train_dl = DataLoader(aug_train_ds, batch_size=bs, sampler=sampler, num_workers=_nw, pin_memory=True, drop_last=True)
+    val_dl   = DataLoader(val_ds,       batch_size=bs, shuffle=False,   num_workers=_nw, pin_memory=True)
+    test_dl  = DataLoader(test_ds,      batch_size=bs, shuffle=False,   num_workers=_nw, pin_memory=True) if test_ds is not None else None
     if n_test > 0:
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (same-area random split)")
     else:
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (no test split — TEST_FRAC=0)")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
-    hp        = _resolve_hp(cfg)
     model     = build_model(arch, in_channels, NUM_CLASSES)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=hp["lr"], weight_decay=hp["weight_decay"]
+    grad_clip = hp["grad_clip"]
+    optimizer = _build_optimizer(
+        hp["optimizer"], model.parameters(),
+        lr=hp["lr"], weight_decay=hp["weight_decay"], momentum=hp["momentum"],
     )
     scheduler = _build_scheduler(
-        optimizer, MAX_EPOCHS, power=hp["sched_power"], warmup_epochs=hp["warmup_epochs"]
+        optimizer, MAX_EPOCHS, power=hp["sched_power"],
+        warmup_epochs=hp["warmup_epochs"], kind=hp["scheduler"],
     )
-    _sched_label = (
-        f"PolynomialLR(power={hp['sched_power']:g})"
-        + (f"+LinearWarmup({hp['warmup_epochs']}ep)" if hp["warmup_epochs"] else "")
-    )
+    _decay_label = (f"CosineAnnealingLR" if hp["scheduler"] == "cosine"
+                    else f"PolynomialLR(power={hp['sched_power']:g})")
+    _sched_label = _decay_label + (f"+LinearWarmup({hp['warmup_epochs']}ep)" if hp["warmup_epochs"] else "")
+    _opt_label   = {"adamw": "AdamW", "adam": "Adam", "sgd": f"SGD(m={hp['momentum']:g})"}[hp["optimizer"]]
     if HP_OVERRIDE:
         log.info(
-            f"  HP override: lr={hp['lr']:.2e} wd={hp['weight_decay']:.2e} "
-            f"warmup={hp['warmup_epochs']} power={hp['sched_power']:g}"
+            f"  HP override: opt={_opt_label} lr={hp['lr']:.2e} wd={hp['weight_decay']:.2e} "
+            f"bs={bs} sched={_sched_label} grad_clip={grad_clip or 'off'}"
         )
 
     # ── Loss function (named) ──────────────────────────────────────────────
@@ -1608,14 +1651,15 @@ def run_experiment(
             "num_classes":    NUM_CLASSES,
             "patch_size":     PATCH_SIZE,
             "stride":         STRIDE,
-            "batch_size":     BATCH_SIZE,
+            "batch_size":     bs,
             "max_epochs":     MAX_EPOCHS,
             "early_stopping": EARLY_STOP,
             "learning_rate":  hp["lr"],
             "weight_decay":   hp["weight_decay"],
             "warmup_epochs":  hp["warmup_epochs"],
             "sched_power":    hp["sched_power"],
-            "optimizer":      "AdamW",
+            "grad_clip":      grad_clip,
+            "optimizer":      _opt_label,
             "lr_scheduler":   _sched_label,
             "loss":           loss,
             "norm_mode":      norm_mode,
@@ -1671,6 +1715,8 @@ def run_experiment(
                     loss = criterion(logits, masks)
 
                 loss.backward()
+                if grad_clip and grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
                 train_loss_acc += loss.item()
                 n_batches += 1
@@ -3207,10 +3253,12 @@ if __name__ == "__main__":
              "arch names, each {\"grid\":{...}} or {\"combos\":[...]} — separate search "
              "space per architecture. Shared: top-level {\"grid\":{\"lr\":[...], "
              "\"weight_decay\":[...], \"warmup_epochs\":[...], \"sched_power\":[...]}} or "
-             "{\"combos\":[...]} applied to every --arch. Each combo overrides ARCH_CFG "
-             "lr/weight_decay + config scheduler defaults, runs the --exp/--top-k matrix, "
-             "and logs to MLflow tagged with the combo. Combos run outermost, nesting with "
-             "--top-k/--percentile sweeps. See configs/hp_grid_example.json.",
+             "{\"combos\":[...]} applied to every --arch. Tunable keys: lr, weight_decay, "
+             "warmup_epochs, sched_power, scheduler(polynomial|cosine), optimizer(adamw|"
+             "adam|sgd), momentum, grad_clip(0=off), batch_size. Each combo overrides "
+             "ARCH_CFG/config defaults, runs the --exp/--top-k matrix, and logs to MLflow "
+             "tagged with the combo. Combos run outermost, nesting with --top-k/--percentile "
+             "sweeps. See configs/hp_grid_example.json.",
     )
     args = parser.parse_args()
 
