@@ -90,7 +90,11 @@ DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
 # all archs in the run; warmup_epochs/sched_power override config defaults.
 HP_OVERRIDE: dict | None = None   # {lr, weight_decay, warmup_epochs, sched_power}
 HP_TAG: str = ""                  # short run-name suffix, e.g. "lr1e-04_wd1e-02_wu5_pw0.9"
-SESSION_LOG_PATH: str | None = None  # top-level session .log file (LOGS_DIR), uploaded to MLflow parent runs
+SESSION_LOG_PATH: str | None = None  # top-level session .log file (LOGS_DIR)
+# (run_id, per_run_log_path) captured per finished run; logs uploaded to MLflow
+# only AFTER the whole session ends (avoids HTTP errors from uploading the
+# still-growing session log mid-training).
+_DEFERRED_LOG_RUNS: list[tuple] = []
 
 
 # Recognised HP-grid keys (validated on load).
@@ -245,6 +249,34 @@ def _hp_tag(combo: dict) -> str:
     if "grad_clip" in combo and float(combo["grad_clip"]) > 0:
         parts.append(f"gc{float(combo['grad_clip']):g}")
     return "_".join(parts)
+
+
+def _flush_deferred_logs() -> None:
+    """Upload per-run + session logs to MLflow AFTER the session ends.
+
+    Deferred so the still-growing session log is never uploaded mid-training
+    (that triggered HTTP errors). Uses MlflowClient to attach to each already
+    closed run by id. Best-effort per run.
+    """
+    if not _DEFERRED_LOG_RUNS:
+        return
+    for _h in logging.root.handlers:
+        try:
+            _h.flush()
+        except Exception:
+            pass
+    client = MlflowClient()
+    sess = SESSION_LOG_PATH if (SESSION_LOG_PATH and Path(SESSION_LOG_PATH).exists()) else None
+    log.info(f"Uploading logs for {len(_DEFERRED_LOG_RUNS)} run(s) → MLflow logs/ …")
+    for run_id, run_log in _DEFERRED_LOG_RUNS:
+        try:
+            if run_log and Path(run_log).exists():
+                client.log_artifact(run_id, run_log, artifact_path="logs")
+            if sess:
+                client.log_artifact(run_id, sess, artifact_path="logs")
+        except Exception as e:
+            log.warning(f"  Could not upload logs for run {run_id}: {e}")
+    _DEFERRED_LOG_RUNS.clear()
 
 
 def _check_gdrive_token() -> None:
@@ -1925,13 +1957,11 @@ def run_experiment(
                 log.info(f"  [--eval-only] Outputs written to {exp_dir}")
             else:
                 log.warning("  [--eval-only] No test split available — nothing to write")
-            try:
-                run_log_handler.flush()
-                mlflow.log_artifact(str(run_log_path), artifact_path="logs")
-            except Exception as e:
-                log.warning(f"  Could not upload run log: {e}")
+            _eval_run_id = run.info.run_id
+            run_log_handler.flush()
             log.removeHandler(run_log_handler)
             run_log_handler.close()
+            _DEFERRED_LOG_RUNS.append((_eval_run_id, str(run_log_path)))
             return None
 
         # ── Artifacts ─────────────────────────────────────────────────────────
@@ -2068,21 +2098,13 @@ def run_experiment(
         if seg_path is not None:
             mlflow.log_artifact(str(seg_path))
 
-        # Training log → child run (per-run log + full session log)
-        run_log_handler.flush()
-        for _h in logging.root.handlers:
-            _h.flush()
-        try:
-            mlflow.log_artifact(str(run_log_path), artifact_path="logs")
-            if SESSION_LOG_PATH and Path(SESSION_LOG_PATH).exists():
-                mlflow.log_artifact(SESSION_LOG_PATH, artifact_path="logs")
-        except Exception as e:
-            log.warning(f"  Could not upload training log to child run: {e}")
-
         run_id = run.info.run_id
 
+    # Logs uploaded after the whole session ends (see _flush_deferred_logs).
+    run_log_handler.flush()
     run_log_handler.close()
     log.removeHandler(run_log_handler)
+    _DEFERRED_LOG_RUNS.append((run_id, str(run_log_path)))
 
     summary = {
         "exp_name":      exp_name,
@@ -3085,16 +3107,6 @@ def main(
                 if result is not None:
                     all_results.append(result)
 
-            # Attach the top-level session log to the parent run (best-effort).
-            # File is still being written; log_artifact snapshots it as-is.
-            if SESSION_LOG_PATH and Path(SESSION_LOG_PATH).exists():
-                try:
-                    for _h in logging.root.handlers:
-                        _h.flush()
-                    mlflow.log_artifact(SESSION_LOG_PATH, artifact_path="logs")
-                except Exception as e:
-                    log.warning(f"Could not upload session log: {e}")
-
     # ── Summary table ──────────────────────────────────────────────────────
     if all_results:
         summary_df  = pd.DataFrame(all_results)
@@ -3391,6 +3403,9 @@ if __name__ == "__main__":
                 norm_mode=args.norm,
                 hp=hp,
             )
+
+    # ── Upload all logs once, after the whole session finished ────────────────
+    _flush_deferred_logs()
 
     # ── Auto-upload preload cache after --build-cache-only ────────────────────
     if args.build_cache_only and not args.no_upload_cache:
