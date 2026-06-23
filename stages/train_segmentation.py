@@ -127,25 +127,14 @@ def _build_scheduler(optimizer, max_epochs: int, power: float, warmup_epochs: in
     )
 
 
-def _load_hp_grid(path: str) -> list[dict]:
-    """Expand an HP-grid JSON file into a list of combo dicts.
-
-    Two accepted schemas:
-      {"grid": {"lr": [...], "weight_decay": [...], ...}}  → cartesian product
-      {"combos": [{"lr": ..., ...}, ...]}                  → explicit list
-
-    A bare top-level dict of lists is treated as a "grid". Recognised keys:
-    lr, weight_decay, warmup_epochs, sched_power. Unknown keys raise.
-    """
+def _expand_grid_block(block: dict) -> list[dict]:
+    """Expand one {'grid':{...}} / {'combos':[...]} / bare-dict-of-lists block."""
     import itertools
-
-    with open(path) as f:
-        spec = json.load(f)
 
     valid = {"lr", "weight_decay", "warmup_epochs", "sched_power"}
 
-    if isinstance(spec, dict) and "combos" in spec:
-        combos = spec["combos"]
+    if isinstance(block, dict) and "combos" in block:
+        combos = block["combos"]
         if not isinstance(combos, list) or not combos:
             raise ValueError("--hp-grid 'combos' must be a non-empty list of dicts")
         for c in combos:
@@ -154,9 +143,9 @@ def _load_hp_grid(path: str) -> list[dict]:
                 raise ValueError(f"--hp-grid combo has unknown keys {bad}; valid={sorted(valid)}")
         return [dict(c) for c in combos]
 
-    grid = spec.get("grid", spec) if isinstance(spec, dict) else None
+    grid = block.get("grid", block) if isinstance(block, dict) else None
     if not isinstance(grid, dict) or not grid:
-        raise ValueError("--hp-grid must contain a 'grid' dict, 'combos' list, or a bare dict of lists")
+        raise ValueError("--hp-grid block must be a 'grid' dict, 'combos' list, or a bare dict of lists")
     bad = set(grid) - valid
     if bad:
         raise ValueError(f"--hp-grid has unknown keys {bad}; valid={sorted(valid)}")
@@ -164,6 +153,48 @@ def _load_hp_grid(path: str) -> list[dict]:
     keys = list(grid)
     values = [v if isinstance(v, list) else [v] for v in grid.values()]
     return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+
+
+def _load_hp_grid(path: str) -> list[tuple]:
+    """Expand an HP-grid JSON into a list of (arch_or_None, combo) tuples.
+
+    Two schemas:
+
+      Shared (applies to every --arch uniformly):
+        {"grid": {"lr": [...], "weight_decay": [...], ...}}
+        {"combos": [{...}, ...]}
+        → [(None, combo), ...]
+
+      Per-arch (separate search space per architecture — recommended, since
+      CNN vs. transformer encoders want different lr/wd regimes):
+        {"deeplabv3plus_cbam": {"grid": {...}},
+         "segformer":          {"combos": [...]}}
+        → [(arch, combo), ...]
+
+    arch=None means "use the run's --arch matrix"; an arch string pins the
+    combo to that single architecture.
+    """
+    with open(path) as f:
+        spec = json.load(f)
+
+    if not isinstance(spec, dict):
+        raise ValueError("--hp-grid must be a JSON object")
+
+    # Per-arch when top-level keys are architecture names (ignore _comment etc.).
+    arch_keys = {k for k in spec if k in ARCH_CFG}
+    non_arch  = {k for k in spec if not k.startswith("_") and k not in ARCH_CFG}
+    if arch_keys and not non_arch:
+        out: list[tuple] = []
+        for arch in spec:
+            if arch.startswith("_"):
+                continue
+            for combo in _expand_grid_block(spec[arch]):
+                out.append((arch, combo))
+        if not out:
+            raise ValueError("--hp-grid per-arch spec expanded to zero combos")
+        return out
+
+    return [(None, combo) for combo in _expand_grid_block(spec)]
 
 
 def _hp_tag(combo: dict) -> str:
@@ -3172,12 +3203,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--hp-grid", metavar="JSON_PATH", default=None,
-        help="Hyperparameter-grid JSON. Schema: {\"grid\": {\"lr\":[...], "
-             "\"weight_decay\":[...], \"warmup_epochs\":[...], \"sched_power\":[...]}} "
-             "(cartesian product) or {\"combos\":[{...},...]} (explicit). Each combo "
-             "overrides ARCH_CFG lr/weight_decay + config scheduler defaults, runs the "
-             "full --exp/--arch/--top-k matrix, and logs to MLflow tagged with the combo. "
-             "Combos run outermost, so this nests with --top-k/--percentile sweeps.",
+        help="Hyperparameter-grid JSON. Per-arch (recommended): top-level keys = "
+             "arch names, each {\"grid\":{...}} or {\"combos\":[...]} — separate search "
+             "space per architecture. Shared: top-level {\"grid\":{\"lr\":[...], "
+             "\"weight_decay\":[...], \"warmup_epochs\":[...], \"sched_power\":[...]}} or "
+             "{\"combos\":[...]} applied to every --arch. Each combo overrides ARCH_CFG "
+             "lr/weight_decay + config scheduler defaults, runs the --exp/--top-k matrix, "
+             "and logs to MLflow tagged with the combo. Combos run outermost, nesting with "
+             "--top-k/--percentile sweeps. See configs/hp_grid_example.json.",
     )
     args = parser.parse_args()
 
@@ -3242,17 +3275,24 @@ if __name__ == "__main__":
     else:
         sweep = [(None, None)]
 
-    # HP-grid combos run outermost; [None] = no grid (single default-HP pass).
-    hp_combos = _load_hp_grid(args.hp_grid) if args.hp_grid else [None]
+    # HP-grid combos run outermost; [(None, None)] = no grid (single default pass).
+    # Each entry is (arch_or_None, combo): arch=None → use the --arch matrix;
+    # an arch string pins the combo to that single architecture (per-arch grid).
+    hp_combos = _load_hp_grid(args.hp_grid) if args.hp_grid else [(None, None)]
     if args.hp_grid:
         log.info(f"HP grid: {len(hp_combos)} combo(s) from {args.hp_grid}")
-        for i, c in enumerate(hp_combos):
-            log.info(f"  [{i+1}/{len(hp_combos)}] {c}")
+        for i, (a, c) in enumerate(hp_combos):
+            log.info(f"  [{i+1}/{len(hp_combos)}] arch={a or 'ALL'}  {c}")
 
-    for hp in hp_combos:
+    for hp_arch, hp in hp_combos:
+        # Per-arch grid pinned to an arch excluded by --arch → skip.
+        if hp_arch is not None and args.arch and hp_arch not in args.arch:
+            log.info(f"Skip HP combo (arch {hp_arch} not in --arch {args.arch})")
+            continue
+        run_archs = [hp_arch] if hp_arch is not None else args.arch
         if hp is not None:
             log.info(f"{'#'*65}")
-            log.info(f"  HP combo: {hp}")
+            log.info(f"  HP combo: arch={hp_arch or 'ALL'}  {hp}")
             log.info(f"{'#'*65}")
         for mode, val in sweep:
             if mode is not None:
@@ -3262,7 +3302,7 @@ if __name__ == "__main__":
                 log.info(f"{'='*65}")
             main(
                 exps=args.exp,
-                archs=args.arch,
+                archs=run_archs,
                 loss=args.loss,
                 force=args.force,
                 data_dir=args.data_dir,
