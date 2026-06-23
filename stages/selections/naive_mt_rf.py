@@ -1,4 +1,4 @@
-"""RF band selection scoped to 4 phenological dates (naive multi-temporal experiments)."""
+"""RF band selection scoped to 4 calendar dates (multi-temporal experiments)."""
 
 import json
 import logging
@@ -18,7 +18,7 @@ def run_naive_mt_rf(
     data_dir: str | None = None,
     force: bool = False,
 ) -> tuple[dict[str, list[str]], dict]:
-    """Score bands on 4 phenological dates using RF importance.
+    """Score bands on 4 calendar dates using RF importance.
 
     Saves rf_band_naive_mt.json to data_dir (defaults to processed root).
     Returns (band_candidates_per_crop, phenol_map).

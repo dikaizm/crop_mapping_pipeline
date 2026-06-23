@@ -1,4 +1,4 @@
-"""GSI band selection scoped to 4 phenological dates (naive multi-temporal experiments)."""
+"""GSI band selection scoped to 4 calendar dates (multi-temporal experiments)."""
 
 import logging
 from pathlib import Path
@@ -15,7 +15,7 @@ def run_naive_mt_gsi(
     cdl_path: str,
     force: bool = False,
 ) -> tuple[dict[str, list[str]], dict]:
-    """Score bands on 4 phenological dates using scoped GSI.
+    """Score bands on 4 calendar dates using scoped GSI.
 
     Saves gsi_naive_mt_candidates.json alongside the S2 data.
     Returns (band_candidates_per_crop, phenol_map).

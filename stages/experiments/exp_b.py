@@ -1,7 +1,8 @@
-"""Naive multi-temporal experiments — 4 NDVI-based phenological dates × selected bands."""
+"""Multi-temporal baseline — 4 peak-NDVI dates per calendar quarter × bands."""
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -11,22 +12,57 @@ _ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
-    S2_BAND_NAMES, N_BANDS_PER_DATE, VEGE_BANDS, KEEP_CLASSES,
+    S2_BAND_NAMES, N_BANDS_PER_DATE, KEEP_CLASSES,
 )
 from crop_mapping_pipeline.stages.experiments.exp_a import _mean_ndvi
 
 import logging
 log = logging.getLogger(__name__)
 
-# Calendar fallback targets (mmdd) when NDVI unavailable
-_CALENDAR_TARGETS = {"Dormant": "0115", "GreenUp": "0615", "Peak": "0715", "Senescence": "0912"}
+# Bump when date selection logic or JSON schema changes.
+_PHENOL_CACHE_VERSION = "quarterly_ndvi_v1"
+
+_QUARTERS = [
+    (1,  1,  3, 31),
+    (4,  1,  6, 30),
+    (7,  1,  9, 30),
+    (10, 1, 12, 31),
+]
 
 
-def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None):
-    """Return phenol_map {label: date_str} using NDVI or calendar fallback. Caches result."""
+def _date_in_quarter(d: str, q_idx: int, year: int) -> bool:
+    """Check if date string YYYYMMDD falls within the given quarter index (0–3)."""
+    sm, sd, em, ed = _QUARTERS[q_idx]
+    s = date(year, sm, sd)
+    e = date(year, em, ed)
+    dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+    return s <= dt <= e
+
+
+def _quarter_label(q_idx: int, year: int) -> str:
+    """Return a human-readable quarter label e.g. 'Q1 (01/01–03/31)'."""
+    sm, sd, em, ed = _QUARTERS[q_idx]
+    return f"Q{q_idx+1} ({sm:02d}/{sd:02d}–{em:02d}/{ed:02d})"
+
+
+def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None, phenol_json=None):
+    """Return {Q1..Q4: date_str} for 4 dates — max-NDVI within each calendar quarter.
+
+    Computes full-year NDVI (mean over crop pixels), then picks the single
+    date with the highest NDVI per quarter. Falls back to quarter midpoints
+    if NDVI cannot be computed (no s2_paths/cdl_path).
+
+    If phenol_json is provided, reads/writes cache at that path instead of
+    the default <s2_dir>/phenol_dates.json.
+    """
     available_dates = sorted(local_date_to_idx.keys())
 
-    cache_path = (
+    if not available_dates:
+        raise ValueError("No available dates")
+
+    ref_year = int(available_dates[0][:4])
+
+    cache_path = Path(phenol_json) if phenol_json else (
         Path(s2_paths[0]).parent / "phenol_dates.json"
         if s2_paths else None
     )
@@ -34,52 +70,65 @@ def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None):
         try:
             with open(cache_path) as f:
                 cached = json.load(f)
-            if cached.get("dates_key") == available_dates and cached.get("phenol_map"):
-                log.info(f"naive_multitemporal: phenol dates cached → {cached['phenol_map']}")
+            if (cached.get("version") == _PHENOL_CACHE_VERSION
+                    and cached.get("dates_key") == available_dates
+                    and cached.get("phenol_map")):
+                log.info(f"quarterly-NDVI dates cached → {list(cached['phenol_map'].values())}")
                 return cached["phenol_map"]
         except Exception:
             pass
 
-    phenol_map = {}
-
+    # ── full-year NDVI ──
+    ndvi_year = {}
     if s2_paths and cdl_path:
         try:
             with rasterio.open(cdl_path) as src:
                 cdl_arr = np.isin(src.read(1), KEEP_CLASSES).astype(np.uint8)
-
-            ndvi_scores = {}
             for d in available_dates:
                 fi = local_date_to_idx[d]
                 ndvi, _ = _mean_ndvi(s2_paths[fi], cdl_arr)
                 if ndvi is not None:
-                    ndvi_scores[d] = ndvi
-
-            if len(ndvi_scores) >= 4:
-                valid_dates = sorted(ndvi_scores.keys())
-                ndvis = np.array([ndvi_scores[d] for d in valid_dates])
-                diffs = np.diff(ndvis)
-
-                phenol_map["Dormant"]    = valid_dates[int(np.argmin(ndvis))]
-                phenol_map["Peak"]       = valid_dates[int(np.argmax(ndvis))]
-                phenol_map["GreenUp"]    = valid_dates[int(np.argmax(diffs)) + 1]
-                phenol_map["Senescence"] = valid_dates[int(np.argmin(diffs)) + 1]
-
-                log.info(f"naive_multitemporal: NDVI-selected dates={phenol_map}")
+                    ndvi_year[d] = float(round(ndvi, 5))
+            if ndvi_year:
+                log.info(f"full-year NDVI: {len(ndvi_year)} dates")
         except Exception as e:
-            log.warning(f"naive_multitemporal: NDVI selection failed ({e}), falling back to calendar")
+            log.warning(f"NDVI scan failed ({e}), falling back to midpoints")
 
-    if not phenol_map:
-        for label, target_mmdd in _CALENDAR_TARGETS.items():
-            target_doy = int(target_mmdd)
-            phenol_map[label] = min(
-                available_dates,
-                key=lambda d: abs(int(d[4:]) - target_doy),
-            )
-        log.info(f"naive_multitemporal: calendar-heuristic dates={phenol_map}")
+    # ── per-quarter max-NDVI (with midpoints fallback) ──
+    phenol_map = {}
+    selection_method = "ndvi_max" if ndvi_year else "midpoint"
+
+    for qi in range(4):
+        quarter_dates = [d for d in available_dates if _date_in_quarter(d, qi, ref_year)]
+
+        if selection_method == "ndvi_max" and quarter_dates:
+            # filter to dates that have NDVI computed
+            candidates = [(d, ndvi_year[d]) for d in quarter_dates if d in ndvi_year]
+            if candidates:
+                best = max(candidates, key=lambda x: x[1])[0]
+                qlbl = f"Q{qi+1}"
+                log.info(f"  {_quarter_label(qi, ref_year)}: {best} (NDVI={ndvi_year[best]:.4f})")
+                phenol_map[qlbl] = best
+                continue
+
+        # fallback: nearest to quarter midpoint
+        sm, sd, em, ed = _QUARTERS[qi]
+        mid = (date(ref_year, sm, sd).toordinal() + date(ref_year, em, ed).toordinal()) // 2
+        mid_mmdd = date.fromordinal(mid).strftime("%m%d")
+        target = int(mid_mmdd)
+        best = min(available_dates, key=lambda d: abs(int(d[4:]) - target))
+        qlbl = f"Q{qi+1}"
+        ndvi_str = f" (NDVI={ndvi_year.get(best, '?'):.4f})" if ndvi_year.get(best) else ""
+        log.info(f"  {_quarter_label(qi, ref_year)} fallback → {best}{ndvi_str}")
+        phenol_map[qlbl] = best
+
+    log.info(f"selection_method={selection_method} → dates={list(phenol_map.values())}")
 
     if cache_path:
         with open(cache_path, "w") as f:
-            json.dump({"phenol_map": phenol_map, "dates_key": available_dates}, f)
+            json.dump({"phenol_map": phenol_map, "dates_key": available_dates,
+                       "ndvi_year": ndvi_year, "selection_method": selection_method,
+                       "version": _PHENOL_CACHE_VERSION}, f)
 
     return phenol_map
 
@@ -101,9 +150,14 @@ def _band_union_from_candidates(band_candidates: dict, top_k: int | None = None)
 
 
 def build_naive_multitemporal_indices(local_date_to_idx, local_band_to_idx,
-                                      s2_paths=None, cdl_path=None):
-    """4 phenological dates × all 10 S2_BAND_NAMES = up to 40 channels."""
-    phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
+                                      s2_paths=None, cdl_path=None,
+                                      phenol_json=None):
+    """4 calendar dates × all S2_BAND_NAMES = up to 40 channels.
+
+    phenol_json: optional path to pre-computed phenol_dates.json.
+    """
+    phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths,
+                                      cdl_path=cdl_path, phenol_json=phenol_json)
 
     idx, names = [], []
     for _label, d in phenol_map.items():
@@ -131,11 +185,12 @@ def build_naive_multitemporal_selected_indices(
     candidates_json: Path | None = None,
     force: bool = False,
     phenol_map: dict | None = None,
+    phenol_json: str | None = None,
 ):
-    """4 phenological dates × GSI or RF top-K band union.
+    """4 calendar dates × GSI or RF top-K band union.
 
-    When candidates_json is None: runs scoped GSI on only the 4 phenol date
-    files and caches to gsi_naive_mt_candidates.json alongside the data.
+    When candidates_json is None: runs scoped GSI on only the 4 calendar
+    dates and caches to gsi_naive_mt_candidates.json alongside the data.
     When candidates_json is provided (RF variant): loads that JSON directly.
 
     Parameters
@@ -147,10 +202,13 @@ def build_naive_multitemporal_selected_indices(
     force : bool
         Re-run scoped GSI even if cached JSON exists.
     phenol_map : dict | None
-        Pre-computed {label: date_str}. Skips NDVI scan if provided.
+        Pre-computed {Q1..Q4: date_str}. If provided, skips date selection.
+    phenol_json : str | None
+        Path to pre-computed phenol_dates.json cache.
     """
     if phenol_map is None:
-        phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths, cdl_path=cdl_path)
+        phenol_map = _select_phenol_dates(local_date_to_idx, s2_paths=s2_paths,
+                                          cdl_path=cdl_path, phenol_json=phenol_json)
 
     if candidates_json is not None:
         json_path = Path(candidates_json)

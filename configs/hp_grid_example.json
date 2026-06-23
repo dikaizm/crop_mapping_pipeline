@@ -1,0 +1,9 @@
+{
+  "_comment": "HP-grid for train_segmentation.py --hp-grid. 'grid' = cartesian product over the listed values. Recognised keys: lr, weight_decay, warmup_epochs, sched_power. lr/weight_decay override ARCH_CFG per-arch defaults uniformly. Each combo runs the full --exp/--arch matrix and logs to MLflow tagged with the combo. For an explicit (non-cartesian) set, replace 'grid' with 'combos': [{...}, {...}]. This example = 2*2*2 = 8 combos.",
+  "grid": {
+    "lr": [1e-4, 5e-5],
+    "weight_decay": [1e-4, 1e-2],
+    "warmup_epochs": [0, 5],
+    "sched_power": [0.9]
+  }
+}

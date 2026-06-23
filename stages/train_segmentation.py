@@ -6,7 +6,7 @@ Six experiment configurations × 2 architectures = up to 12 training runs.
 | Config             | Dates               | Band selection | Purpose                      |
 |--------------------|---------------------|----------------|------------------------------|
 | single_date        | peak NDVI           | none (all bands)| Baseline (isolates temporal) |
-| naive_mt           | 4 phenological      | none           | Multi-temporal baseline + GSI bands   |
+| naive_mt           | 4 calendar dates     | none           | Multi-temporal baseline + GSI bands   |
 | gsi                | multi-temporal      | GSI-direct     | Proposed method + RF bands    |
 | gsi                | GSI-direct          | GSI-direct     | GSI spectral-temporal        |
 | rf                 | RF-direct           | RF-direct      | RF spectral-temporal         |
@@ -67,6 +67,7 @@ from crop_mapping_pipeline.config import (
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, TEST_FRAC, SEED, ARCH_CFG,
+    SCHED_POWER, WARMUP_EPOCHS, WARMUP_START_FACTOR,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
     SELECT_TOP_K_PER_CROP,
 )
@@ -82,6 +83,97 @@ from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
 
 log = logging.getLogger(__name__)
 DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
+
+# ── Hyperparameter-grid overrides ─────────────────────────────────────────────
+# Set per-combo by main() when --hp-grid is used. None = use config/ARCH_CFG
+# defaults. lr/weight_decay override ARCH_CFG per-arch values uniformly across
+# all archs in the run; warmup_epochs/sched_power override config defaults.
+HP_OVERRIDE: dict | None = None   # {lr, weight_decay, warmup_epochs, sched_power}
+HP_TAG: str = ""                  # short run-name suffix, e.g. "lr1e-04_wd1e-02_wu5_pw0.9"
+
+
+def _resolve_hp(cfg: dict) -> dict:
+    """Merge HP_OVERRIDE over a per-arch ARCH_CFG entry + scheduler defaults."""
+    o = HP_OVERRIDE or {}
+    return {
+        "lr":            float(o.get("lr",            cfg["lr"])),
+        "weight_decay":  float(o.get("weight_decay",  cfg["weight_decay"])),
+        "warmup_epochs": int(o.get("warmup_epochs",   WARMUP_EPOCHS)),
+        "sched_power":   float(o.get("sched_power",    SCHED_POWER)),
+    }
+
+
+def _build_scheduler(optimizer, max_epochs: int, power: float, warmup_epochs: int):
+    """PolynomialLR decay with optional linear warmup, stepped per-epoch.
+
+    warmup_epochs=0 → plain PolynomialLR. Otherwise LinearLR (start_factor →
+    1.0 over warmup_epochs) chained into PolynomialLR over the remaining epochs
+    via SequentialLR.
+    """
+    if warmup_epochs and warmup_epochs > 0:
+        decay_iters = max(1, max_epochs - warmup_epochs)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=WARMUP_START_FACTOR, end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        decay = torch.optim.lr_scheduler.PolynomialLR(
+            optimizer, total_iters=decay_iters, power=power,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, decay], milestones=[warmup_epochs],
+        )
+    return torch.optim.lr_scheduler.PolynomialLR(
+        optimizer, total_iters=max_epochs, power=power,
+    )
+
+
+def _load_hp_grid(path: str) -> list[dict]:
+    """Expand an HP-grid JSON file into a list of combo dicts.
+
+    Two accepted schemas:
+      {"grid": {"lr": [...], "weight_decay": [...], ...}}  → cartesian product
+      {"combos": [{"lr": ..., ...}, ...]}                  → explicit list
+
+    A bare top-level dict of lists is treated as a "grid". Recognised keys:
+    lr, weight_decay, warmup_epochs, sched_power. Unknown keys raise.
+    """
+    import itertools
+
+    with open(path) as f:
+        spec = json.load(f)
+
+    valid = {"lr", "weight_decay", "warmup_epochs", "sched_power"}
+
+    if isinstance(spec, dict) and "combos" in spec:
+        combos = spec["combos"]
+        if not isinstance(combos, list) or not combos:
+            raise ValueError("--hp-grid 'combos' must be a non-empty list of dicts")
+        for c in combos:
+            bad = set(c) - valid
+            if bad:
+                raise ValueError(f"--hp-grid combo has unknown keys {bad}; valid={sorted(valid)}")
+        return [dict(c) for c in combos]
+
+    grid = spec.get("grid", spec) if isinstance(spec, dict) else None
+    if not isinstance(grid, dict) or not grid:
+        raise ValueError("--hp-grid must contain a 'grid' dict, 'combos' list, or a bare dict of lists")
+    bad = set(grid) - valid
+    if bad:
+        raise ValueError(f"--hp-grid has unknown keys {bad}; valid={sorted(valid)}")
+
+    keys = list(grid)
+    values = [v if isinstance(v, list) else [v] for v in grid.values()]
+    return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+
+
+def _hp_tag(combo: dict) -> str:
+    """Short, filename-safe run-name suffix for an HP combo."""
+    parts = []
+    if "lr" in combo:            parts.append(f"lr{float(combo['lr']):.0e}")
+    if "weight_decay" in combo:  parts.append(f"wd{float(combo['weight_decay']):.0e}")
+    if "warmup_epochs" in combo: parts.append(f"wu{int(combo['warmup_epochs'])}")
+    if "sched_power" in combo:   parts.append(f"pw{float(combo['sched_power']):g}")
+    return "_".join(parts)
 
 
 def _check_gdrive_token() -> None:
@@ -1419,13 +1511,23 @@ def run_experiment(
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (no test split — TEST_FRAC=0)")
 
     # ── Model + optimiser + scheduler + loss ──────────────────────────────────
+    hp        = _resolve_hp(cfg)
     model     = build_model(arch, in_channels, NUM_CLASSES)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]
+        model.parameters(), lr=hp["lr"], weight_decay=hp["weight_decay"]
     )
-    scheduler = torch.optim.lr_scheduler.PolynomialLR(
-        optimizer, total_iters=MAX_EPOCHS, power=0.9
+    scheduler = _build_scheduler(
+        optimizer, MAX_EPOCHS, power=hp["sched_power"], warmup_epochs=hp["warmup_epochs"]
     )
+    _sched_label = (
+        f"PolynomialLR(power={hp['sched_power']:g})"
+        + (f"+LinearWarmup({hp['warmup_epochs']}ep)" if hp["warmup_epochs"] else "")
+    )
+    if HP_OVERRIDE:
+        log.info(
+            f"  HP override: lr={hp['lr']:.2e} wd={hp['weight_decay']:.2e} "
+            f"warmup={hp['warmup_epochs']} power={hp['sched_power']:g}"
+        )
 
     # ── Loss function (named) ──────────────────────────────────────────────
     if loss == "phenology":
@@ -1478,10 +1580,12 @@ def run_experiment(
             "batch_size":     BATCH_SIZE,
             "max_epochs":     MAX_EPOCHS,
             "early_stopping": EARLY_STOP,
-            "learning_rate":  cfg["lr"],
-            "weight_decay":   cfg["weight_decay"],
+            "learning_rate":  hp["lr"],
+            "weight_decay":   hp["weight_decay"],
+            "warmup_epochs":  hp["warmup_epochs"],
+            "sched_power":    hp["sched_power"],
             "optimizer":      "AdamW",
-            "lr_scheduler":   "PolynomialLR(power=0.9)",
+            "lr_scheduler":   _sched_label,
             "loss":           loss,
             "norm_mode":      norm_mode,
             "train_years":    str(TRAIN_YEARS),
@@ -2522,6 +2626,7 @@ def main(
     loss="wce",
     force=False,
     data_dir=None,
+    phenol_dates=None,
     skip_viz=False,
     skip_ndvi=False,
     top_k=None,
@@ -2532,14 +2637,20 @@ def main(
     no_preload=False,
     cache_only=False,
     norm_mode="percentile",
+    hp=None,
 ):
-    global BATCH_SIZE, MAX_EPOCHS
+    global BATCH_SIZE, MAX_EPOCHS, HP_OVERRIDE, HP_TAG
     if batch_size:
         BATCH_SIZE = batch_size
         log.info(f"Batch size overridden: {BATCH_SIZE}")
     if epochs:
         MAX_EPOCHS = epochs
         log.info(f"Max epochs overridden: {MAX_EPOCHS}")
+
+    HP_OVERRIDE = hp or None
+    HP_TAG = _hp_tag(hp) if hp else ""
+    if HP_OVERRIDE:
+        log.info(f"HP grid combo: {HP_OVERRIDE}  (tag={HP_TAG})")
 
     _check_gdrive_token()
 
@@ -2714,6 +2825,7 @@ def main(
         nmt_base = build_naive_multitemporal_indices(
             local_date_to_idx, local_band_to_idx,
             s2_paths=_ref_year_s2, cdl_path=str(_ref_year_cdl),
+            phenol_json=phenol_dates,
         )
         nmt_base_idx, nmt_base_names, phenol_map_base = nmt_base
 
@@ -2724,7 +2836,7 @@ def main(
     if not exps or "single_date" in exps:
         single_date_idx, single_date_names, single_date_key = sd_base_idx, sd_base_names, sd_date_key
 
-    # ── naive_mt (4 phenological dates × ALL VEGE_BANDS — no selection) ──
+    # ── naive_mt (4 calendar dates × ALL VEGE_BANDS — no selection) ──
     naive_mt_idx = naive_mt_names = phenol_map = None
     if not exps or "naive_mt" in exps:
         naive_mt_idx, naive_mt_names, phenol_map = nmt_base_idx, nmt_base_names, phenol_map_base
@@ -2837,6 +2949,8 @@ def main(
         n_ch = len(arch_runs[0][1]) if arch_runs[0][1] else 0
         _sel_sfx = (f"_p{percentile:g}" if percentile is not None
                     else (f"_k{top_k}" if top_k else ""))
+        if HP_TAG:
+            _sel_sfx += f"_{HP_TAG}"
         parent_run_name = f"exp_{exp_key}{_sel_sfx}_{timestamp}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
             mlflow.log_params({
@@ -2848,6 +2962,7 @@ def main(
                 "loss":         loss,
                 **({"top_k": top_k} if top_k else {}),
                 **({"percentile": percentile} if percentile is not None else {}),
+                **({f"hp_{k}": v for k, v in HP_OVERRIDE.items()} if HP_OVERRIDE else {}),
                 **_get_hardware_info(),
             })
             mlflow.set_tag(
@@ -2963,7 +3078,7 @@ if __name__ == "__main__":
         help=(
             "Experiments to run (default: all four). "
             "single_date=peak NDVI date + ALL bands (single-date baseline), "
-            "naive_mt=4 phenological dates + ALL S2_BAND_NAMES (multi-temporal baseline, noselection), "
+            "naive_mt=4 calendar dates + ALL S2_BAND_NAMES (multi-temporal baseline, noselection), "
             "gsi=GSI-direct top-K, rf=RF-direct top-K (multi-class MDI)."
         ),
     )
@@ -3016,6 +3131,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-upload-cache", action="store_true",
                         help="Disable the automatic preload-cache upload after --build-cache-only.")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
+    parser.add_argument("--phenol-dates", default=None, help="Path to pre-computed phenol_dates.json for Exp B multi-temporal baseline")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
     parser.add_argument(
         "--upload-existing", action="store_true",
@@ -3053,6 +3169,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval-only", metavar="CKPT_PATH",
         help="Skip training — load checkpoint and run spatial test evaluation only.",
+    )
+    parser.add_argument(
+        "--hp-grid", metavar="JSON_PATH", default=None,
+        help="Hyperparameter-grid JSON. Schema: {\"grid\": {\"lr\":[...], "
+             "\"weight_decay\":[...], \"warmup_epochs\":[...], \"sched_power\":[...]}} "
+             "(cartesian product) or {\"combos\":[{...},...]} (explicit). Each combo "
+             "overrides ARCH_CFG lr/weight_decay + config scheduler defaults, runs the "
+             "full --exp/--arch/--top-k matrix, and logs to MLflow tagged with the combo. "
+             "Combos run outermost, so this nests with --top-k/--percentile sweeps.",
     )
     args = parser.parse_args()
 
@@ -3117,29 +3242,43 @@ if __name__ == "__main__":
     else:
         sweep = [(None, None)]
 
-    for mode, val in sweep:
-        if mode is not None:
-            log.info(f"{'='*65}")
-            mode_label = {"percentile": "Percentile", "top_k": "Top-K", "score_threshold": "Score-threshold"}.get(mode, mode)
-            log.info(f"  {mode_label} sweep: {mode}={val}")
-            log.info(f"{'='*65}")
-        main(
-            exps=args.exp,
-            archs=args.arch,
-            loss=args.loss,
-            force=args.force,
-            data_dir=args.data_dir,
-            skip_viz=args.skip_viz,
-            skip_ndvi=args.skip_ndvi,
-            top_k=val if mode == "top_k" else None,
-            percentile=val if mode == "percentile" else None,
-            score_threshold=val if mode == "score_threshold" else None,
-            batch_size=args.batch_size,
-            epochs=args.epochs,
-            no_preload=args.no_preload,
-            cache_only=args.build_cache_only,
-            norm_mode=args.norm,
-        )
+    # HP-grid combos run outermost; [None] = no grid (single default-HP pass).
+    hp_combos = _load_hp_grid(args.hp_grid) if args.hp_grid else [None]
+    if args.hp_grid:
+        log.info(f"HP grid: {len(hp_combos)} combo(s) from {args.hp_grid}")
+        for i, c in enumerate(hp_combos):
+            log.info(f"  [{i+1}/{len(hp_combos)}] {c}")
+
+    for hp in hp_combos:
+        if hp is not None:
+            log.info(f"{'#'*65}")
+            log.info(f"  HP combo: {hp}")
+            log.info(f"{'#'*65}")
+        for mode, val in sweep:
+            if mode is not None:
+                log.info(f"{'='*65}")
+                mode_label = {"percentile": "Percentile", "top_k": "Top-K", "score_threshold": "Score-threshold"}.get(mode, mode)
+                log.info(f"  {mode_label} sweep: {mode}={val}")
+                log.info(f"{'='*65}")
+            main(
+                exps=args.exp,
+                archs=args.arch,
+                loss=args.loss,
+                force=args.force,
+                data_dir=args.data_dir,
+                phenol_dates=args.phenol_dates,
+                skip_viz=args.skip_viz,
+                skip_ndvi=args.skip_ndvi,
+                top_k=val if mode == "top_k" else None,
+                percentile=val if mode == "percentile" else None,
+                score_threshold=val if mode == "score_threshold" else None,
+                batch_size=args.batch_size,
+                epochs=args.epochs,
+                no_preload=args.no_preload,
+                cache_only=args.build_cache_only,
+                norm_mode=args.norm,
+                hp=hp,
+            )
 
     # ── Auto-upload preload cache after --build-cache-only ────────────────────
     if args.build_cache_only and not args.no_upload_cache:

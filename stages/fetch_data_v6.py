@@ -487,7 +487,9 @@ if __name__ == "__main__":
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--list-files", action="store_true")
     parser.add_argument("--include-cdl", action="store_true",
-                        help="Also download CDL files from cdl/ subfolder")
+                        help="Also download CDL files (v6.1 processed CDL folder) into cdl/")
+    parser.add_argument("--cdl-only", action="store_true",
+                        help="Download only CDL (skip S2 + test areas). Implies --include-cdl.")
     parser.add_argument("--raw", action="store_true",
                         help="Download raw S2 files (no _processed suffix) from raw GDrive folders")
     parser.add_argument("--workers", type=int, default=2)
@@ -495,6 +497,9 @@ if __name__ == "__main__":
                         help="Download test_a and test_b S2 files to s2/test_a/ and s2/test_b/")
     parser.add_argument("--auth", action="store_true")
     args = parser.parse_args()
+
+    if args.cdl_only:
+        args.include_cdl = True
 
     if args.auth:
         generate_oauth_token()
@@ -509,7 +514,7 @@ if __name__ == "__main__":
     from crop_mapping_pipeline.config import (
         GDRIVE_PROCESSED_S2_V6_FOLDER_IDS,
         GDRIVE_RAW_S2_V5_FOLDER_IDS,
-        GDRIVE_PROCESSED_CDL_FOLDER_ID_V5,
+        GDRIVE_PROCESSED_CDL_FOLDER_ID_V6,
     )
 
     if args.raw:
@@ -528,7 +533,7 @@ if __name__ == "__main__":
         sys.exit(0 if ok else 1)
 
     # S2 — download each year from its own folder → {s2_output_dir}/{year}/
-    for yr in years:
+    for yr in ([] if args.cdl_only else years):
         fid = args.folder_id or folder_ids.get(yr)
         if not fid:
             log.warning("  No folder ID for year %s — skipping", yr)
@@ -549,7 +554,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     # Spatial test areas — flat folders → {s2_output_dir}/test_a/ and test_b/
-    if args.test_areas:
+    if args.test_areas and not args.cdl_only:
         from crop_mapping_pipeline.config import (
             GDRIVE_S2_TEST_A_FOLDER_ID,
             GDRIVE_S2_TEST_B_FOLDER_ID,
@@ -568,7 +573,7 @@ if __name__ == "__main__":
 
     # CDL — flat folder → {output_dir}/cdl/
     if args.include_cdl:
-        cdl_fid = GDRIVE_PROCESSED_CDL_FOLDER_ID_V5
+        cdl_fid = GDRIVE_PROCESSED_CDL_FOLDER_ID_V6
         log.info("  Fetching CDL from folder %s", cdl_fid)
         service = _build_drive_service()
         tifs, _ = _list_children(service, cdl_fid)
@@ -597,4 +602,5 @@ if __name__ == "__main__":
         else:
             log.warning("  No CDL files found in folder %s", cdl_fid)
 
-    verify(s2_output_dir, years=years)
+    if not args.cdl_only:
+        verify(s2_output_dir, years=years)

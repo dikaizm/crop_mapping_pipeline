@@ -149,6 +149,12 @@ VAL_FRAC       = 0.10      # fraction of patches → val (random split)
 TEST_FRAC      = 0.20      # fraction of patches → same-area test split (70/10/20)
 SEED           = 42
 
+# Scheduler: PolynomialLR decay with optional linear warmup.
+# Both tunable via --hp-grid (scheduler/warmup hyperparameter search).
+SCHED_POWER    = 0.9       # PolynomialLR power (1.0 = linear decay)
+WARMUP_EPOCHS  = 0         # linear-warmup epochs before polynomial decay (0 = no warmup)
+WARMUP_START_FACTOR = 0.1  # initial lr multiplier at epoch 0 during warmup
+
 ARCH_CFG = {
     "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "resnet50"},
     "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b2"},
