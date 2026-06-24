@@ -1,0 +1,43 @@
+{
+  "_comment": "Per-arch HP grid for train_segmentation.py --hp-grid. Top-level keys=arch names. Keys: lr, weight_decay, warmup_epochs, sched_power, scheduler(polynomial|cosine), optimizer(adamw|adam|sgd), momentum(sgd), grad_clip(0=off), batch_size. Symmetric sweep: each arch has 3 AdamW + 2 SGD base configs, each crossed with batch_size {4,8,16} = 15 runs/arch, 30 total. bs=16 at 256px may OOM on 16GB VRAM (esp. segformer).",
+  "deeplabv3plus_cbam": {
+    "combos": []
+  },
+  "segformer": {
+    "combos": [
+      {
+        "optimizer": "sgd",
+        "lr": 0.0005,
+        "weight_decay": 0.0005,
+        "momentum": 0.9,
+        "scheduler": "polynomial",
+        "warmup_epochs": 10,
+        "sched_power": 0.9,
+        "grad_clip": 1.0,
+        "batch_size": 4
+      },
+      {
+        "optimizer": "sgd",
+        "lr": 0.0005,
+        "weight_decay": 0.0005,
+        "momentum": 0.9,
+        "scheduler": "polynomial",
+        "warmup_epochs": 10,
+        "sched_power": 0.9,
+        "grad_clip": 1.0,
+        "batch_size": 8
+      },
+      {
+        "optimizer": "sgd",
+        "lr": 0.0005,
+        "weight_decay": 0.0005,
+        "momentum": 0.9,
+        "scheduler": "polynomial",
+        "warmup_epochs": 10,
+        "sched_power": 0.9,
+        "grad_clip": 1.0,
+        "batch_size": 16
+      }
+    ]
+  }
+}
