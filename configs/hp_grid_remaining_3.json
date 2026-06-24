@@ -1,7 +1,17 @@
 {
-  "_comment": "mt_base remaining split 1/3 \u2014 disjoint combos, balanced batch-size mix, safe parallel. --exp mt_base.",
+  "_comment": "mt_base remaining split 3/3 \u2014 disjoint combos, balanced batch-size mix, safe parallel. --exp mt_base.",
   "segformer": {
     "combos": [
+      {
+        "optimizer": "sgd",
+        "lr": 0.001,
+        "weight_decay": 0.0001,
+        "momentum": 0.9,
+        "scheduler": "cosine",
+        "warmup_epochs": 10,
+        "grad_clip": 1.0,
+        "batch_size": 4
+      },
       {
         "optimizer": "adamw",
         "lr": 6e-05,
@@ -9,7 +19,7 @@
         "scheduler": "cosine",
         "warmup_epochs": 5,
         "grad_clip": 1.0,
-        "batch_size": 4
+        "batch_size": 8
       },
       {
         "optimizer": "sgd",
@@ -20,7 +30,7 @@
         "warmup_epochs": 10,
         "sched_power": 0.9,
         "grad_clip": 1.0,
-        "batch_size": 4
+        "batch_size": 8
       },
       {
         "optimizer": "adamw",
@@ -29,25 +39,6 @@
         "scheduler": "polynomial",
         "warmup_epochs": 5,
         "sched_power": 1.0,
-        "grad_clip": 1.0,
-        "batch_size": 8
-      },
-      {
-        "optimizer": "adamw",
-        "lr": 0.0001,
-        "weight_decay": 0.01,
-        "scheduler": "cosine",
-        "warmup_epochs": 5,
-        "grad_clip": 1.0,
-        "batch_size": 16
-      },
-      {
-        "optimizer": "sgd",
-        "lr": 0.001,
-        "weight_decay": 0.0001,
-        "momentum": 0.9,
-        "scheduler": "cosine",
-        "warmup_epochs": 10,
         "grad_clip": 1.0,
         "batch_size": 16
       }
