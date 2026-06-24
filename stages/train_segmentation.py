@@ -251,6 +251,23 @@ def _hp_tag(combo: dict) -> str:
     return "_".join(parts)
 
 
+def _combo_done(exp_name: str) -> bool:
+    """True if a finished run dir exists for this combo (a `.done` marker).
+
+    Run dirs are `{exp_name}_{timestamp}/`; exp_name is deterministic per combo
+    (exp_key + selection + hp_tag + arch, no timestamp). A `.done` file is
+    written only after a run fully completes — enables resuming a grid sweep
+    that died mid-way (skips finished combos, reruns the rest).
+    """
+    if not MODELS_DIR.exists():
+        return False
+    return any(
+        (d / ".done").exists()
+        for d in MODELS_DIR.glob(f"{exp_name}_*")
+        if d.is_dir()
+    )
+
+
 def _flush_deferred_logs() -> None:
     """Upload per-run + session logs to MLflow AFTER the session ends.
 
@@ -1467,14 +1484,15 @@ def run_experiment(
         last_ckpt = best_ckpt
         exp_dir.mkdir(parents=True, exist_ok=True)
     else:
+        # Resume support: skip combos already finished (have a `.done` marker)
+        # unless --force. Checked before creating a new dir so skips leave no litter.
+        if not force and _combo_done(exp_name):
+            log.info(f"✓ already done — skipping {exp_name}  (use --force to re-run)")
+            return None
         exp_dir   = MODELS_DIR / f"{exp_name}_{run_timestamp}"
         best_ckpt = exp_dir / "best_model.pth"
         last_ckpt = exp_dir / "last_model.pth"
         exp_dir.mkdir(parents=True, exist_ok=True)
-
-    if not eval_only and not force and best_ckpt.exists():
-        log.info(f"Checkpoint exists — skipping {exp_name}  (use --force to re-run)")
-        return None
 
     # Per-run log file — captured from start of training; uploaded as MLflow artifact at end
     run_log_path    = exp_dir / f"{exp_name}_train.log"
@@ -2124,6 +2142,12 @@ def run_experiment(
     else:
         spatial_str = "(no test set)"
     log.info(f"\n✅ {exp_name}  val_mIoU={best_miou:.4f}  {spatial_str}  run={run_id}")
+
+    # Resume marker — written last, so a crashed run is NOT marked done and reruns.
+    try:
+        (exp_dir / ".done").write_text(f"{run_timestamp}\trun_id={run_id}\tval_miou={best_miou:.4f}\n")
+    except Exception as e:
+        log.warning(f"  Could not write .done marker: {e}")
     return summary
 
 
