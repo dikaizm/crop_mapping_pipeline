@@ -23,7 +23,7 @@ _ASPP_OUT_CH = 256
 
 class DeepLabV3PlusCBAM(nn.Module):
     """
-    DeepLabV3+ (ResNet-50 backbone) augmented with CBAM after ASPP.
+    DeepLabV3+ (smp encoder, e.g. mobilenet_v2 / resnet50) augmented with CBAM after ASPP.
 
     The forward pass hooks into the decoder to apply CBAM on the
     256-channel ASPP output before the low-level feature fusion step.
@@ -77,7 +77,8 @@ class DeepLabV3PlusCBAM(nn.Module):
         aspp_raw = self.base.decoder.aspp(features[-1])
         aspp_att = self.cbam(aspp_raw)          # CBAM-refined
 
-        # Low-level features from encoder (layer1, stride-4, 256ch for resnet50)
+        # Low-level features from encoder (stride-4 stage; smp builds block1 sized
+        # to the encoder's stride-4 channels — e.g. 256ch resnet50, 24ch mobilenet_v2)
         low_level = self.base.decoder.block1(features[2])   # (B, 48, H/4, W/4)
 
         # Upsample ASPP features to match low-level resolution
