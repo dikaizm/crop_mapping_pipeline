@@ -145,9 +145,19 @@ BATCH_SIZE     = 8
 MAX_EPOCHS     = 150
 EARLY_STOP     = 20
 EARLY_STOP_DELTA = 0.001   # min mIoU improvement to reset patience
-VAL_FRAC       = 0.10      # fraction of patches → val (random split)
-TEST_FRAC      = 0.20      # fraction of patches → same-area test split (70/10/20)
+VAL_FRAC       = 0.15      # fraction → val
+TEST_FRAC      = 0.15      # fraction → test  (70/15/15)
 SEED           = 42
+
+# ── Train/val/test split strategy ──────────────────────────────────────────
+# Spatial block (grid) split — patches grouped into BLOCK_SIZE×BLOCK_SIZE blocks;
+# each block assigned wholly to one split (train/val/test) via class-balanced
+# greedy stratification. Prevents patch-adjacency spatial leakage (no train patch
+# spatially adjacent to a val/test patch).
+BLOCK_SIZE = 1024          # px per block side = 4×4 patches (PATCH_SIZE=256)
+# Per-split, per-crop minimum pixel fraction (of that crop's total) the repair pass
+# enforces, so no split gets a crop only as a token sliver. 0 disables (presence-only).
+MIN_CLASS_FRAC = 0.05
 
 # Scheduler: PolynomialLR decay with optional linear warmup.
 # Both tunable via --hp-grid (scheduler/warmup hyperparameter search).
@@ -156,8 +166,8 @@ WARMUP_EPOCHS  = 0         # linear-warmup epochs before polynomial decay (0 = n
 WARMUP_START_FACTOR = 0.1  # initial lr multiplier at epoch 0 during warmup
 
 ARCH_CFG = {
-    "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "mobilenet_v2"},
-    "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b0"},
+    "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "resnet50"},
+    "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b2"},
 }
 
 # ── Band scoring hyperparameters ───────────────────────────────────────────────

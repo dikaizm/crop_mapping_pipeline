@@ -42,7 +42,7 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split, ConcatDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 import rasterio
 
 os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
@@ -67,6 +67,7 @@ from crop_mapping_pipeline.config import (
     TRAIN_YEARS, TEST_YEAR,
     PATCH_SIZE, STRIDE, MIN_VALID_FRAC, BATCH_SIZE, MAX_EPOCHS, EARLY_STOP, EARLY_STOP_DELTA,
     VAL_FRAC, TEST_FRAC, SEED, ARCH_CFG,
+    BLOCK_SIZE, MIN_CLASS_FRAC,
     SCHED_POWER, WARMUP_EPOCHS, WARMUP_START_FACTOR,
     GDRIVE_OAUTH_TOKEN, GDRIVE_MODELS_FOLDER_ID,
     SELECT_TOP_K_PER_CROP,
@@ -80,6 +81,9 @@ from crop_mapping_pipeline.stages.losses import (
 )
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
+from crop_mapping_pipeline.stages.spatial_split import (
+    _block_spatial_split, _save_block_split_artifacts,
+)
 
 log = logging.getLogger(__name__)
 DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
@@ -1593,19 +1597,23 @@ def run_experiment(
 
     train_val_ds = ConcatDataset(train_year_datasets)
 
-    gen = torch.Generator().manual_seed(SEED)
-
-    # Split: train / val / test  (same-area random split, TEST_FRAC > 0)
-    # When TEST_FRAC=0: test evaluation is skipped (no spatial test areas in this branch).
-    n_total = len(train_val_ds)
-    n_val   = max(1, int(VAL_FRAC * n_total))
-    n_test  = max(1, int(TEST_FRAC * n_total)) if TEST_FRAC > 0 else 0
-    n_train = n_total - n_val - n_test
-    if n_test > 0:
-        train_ds, val_ds, test_ds = random_split(train_val_ds, [n_train, n_val, n_test], generator=gen)
-    else:
-        train_ds, val_ds = random_split(train_val_ds, [n_train, n_val], generator=gen)
-        test_ds = None
+    # Split: train / val / test — spatial block (grid) split; whole blocks per
+    # split, prevents patch-adjacency spatial leakage. When TEST_FRAC=0: test
+    # evaluation is skipped.
+    n_total   = len(train_val_ds)
+    tr_idx, va_idx, te_idx, split_info = _block_spatial_split(
+        train_year_datasets_raw, BLOCK_SIZE, VAL_FRAC, TEST_FRAC,
+        NUM_CLASSES, SEED, min_class_frac=MIN_CLASS_FRAC, log=log,
+    )
+    train_ds = torch.utils.data.Subset(train_val_ds, tr_idx)
+    val_ds   = torch.utils.data.Subset(train_val_ds, va_idx)
+    test_ds  = torch.utils.data.Subset(train_val_ds, te_idx) if te_idx else None
+    n_train, n_val, n_test = len(tr_idx), len(va_idx), len(te_idx)
+    split_label = f"block_spatial_{int(round((1-VAL_FRAC-TEST_FRAC)*100))}_{int(round(VAL_FRAC*100))}_{int(round(TEST_FRAC*100))}"
+    split_artifacts = _save_block_split_artifacts(
+        split_info, exp_dir, exp_name,
+        class_names=[CDL_CLASS_NAMES[c] for c in KEEP_CLASSES], log=log,
+    )
     test_s2_filtered = None
     test_idx_local   = None
 
@@ -1629,7 +1637,7 @@ def run_experiment(
     val_dl   = DataLoader(val_ds,       batch_size=bs, shuffle=False,   num_workers=_nw, pin_memory=True)
     test_dl  = DataLoader(test_ds,      batch_size=bs, shuffle=False,   num_workers=_nw, pin_memory=True) if test_ds is not None else None
     if n_test > 0:
-        log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test (same-area random split)")
+        log.info(f"  Patches: {n_train:,} train / {n_val:,} val / {n_test:,} test ({split_label})")
     else:
         log.info(f"  Patches: {n_train:,} train / {n_val:,} val  (no test split — TEST_FRAC=0)")
 
@@ -1719,7 +1727,9 @@ def run_experiment(
             "train_patches":  n_train,
             "val_patches":    n_val,
             "test_patches":   n_test,
-            "split":          "same_area_70_10_20",
+            "split":          split_label,
+            "block_size":     BLOCK_SIZE,
+            "n_blocks":       (split_info or {}).get("n_blocks"),
             "description":    description,
             "keep_classes":   str(KEEP_CLASSES),
             "model_params":   getattr(model, "_n_params", None),
@@ -1731,7 +1741,7 @@ def run_experiment(
             "mlflow.note.content",
             f"{description}. Arch={arch} ({cfg['encoder']}), {in_channels} input "
             f"channels, loss={loss}. Trained on {TRAIN_YEARS}, tested on {TEST_YEAR} "
-            f"(same-area 70/10/20 split: {n_train} train / {n_val} val / {n_test} test patches).",
+            f"({split_label}: {n_train} train / {n_val} val / {n_test} test patches).",
         )
 
 
@@ -2109,6 +2119,10 @@ def run_experiment(
             mlflow.set_tag(f"gdrive_{fname}", link)
         mlflow.log_artifact(str(hist_csv))
         mlflow.log_artifact(str(curve_path))
+        if split_artifacts is not None:
+            for p in split_artifacts.values():
+                if Path(p).exists():
+                    mlflow.log_artifact(str(p), artifact_path="split")
         if iou_csv.exists():
             mlflow.log_artifact(str(iou_csv))
         if cm_path.exists():
@@ -3077,8 +3091,10 @@ def main(
         MlflowClient().set_experiment_tag(
             experiment.experiment_id, "mlflow.note.content",
             "Segmentation training — 8-crop CalCROP21-style class selection "
-            "(>=1M px threshold), same-area 70/10/20 spatial split (train/val/test all "
-            "from the same study area, not split by year). Compares band-selection "
+            "(>=1M px threshold), block spatial split "
+            f"({int(round((1-VAL_FRAC-TEST_FRAC)*100))}/{int(round(VAL_FRAC*100))}/{int(round(TEST_FRAC*100))}; "
+            "block split groups whole grid cells per split to avoid patch-adjacency "
+            "leakage). Compares band-selection "
             "experiments (single-date / naive multi-temporal / GSI / RF direct-K) "
             f"across architectures. train_years={TRAIN_YEARS}, test_year={TEST_YEAR}.",
         )
