@@ -174,8 +174,10 @@ def _expand_grid_block(block: dict) -> list[dict]:
 
     if isinstance(block, dict) and "combos" in block:
         combos = block["combos"]
-        if not isinstance(combos, list) or not combos:
-            raise ValueError("--hp-grid 'combos' must be a non-empty list of dicts")
+        if not isinstance(combos, list):
+            raise ValueError("--hp-grid 'combos' must be a list of dicts")
+        if not combos:
+            return []
         for c in combos:
             bad = set(c) - valid
             if bad:
