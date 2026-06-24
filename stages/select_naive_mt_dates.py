@@ -46,7 +46,8 @@ def main():
     log.info(f"CDL: {args.cdl}")
 
     if args.force:
-        cache = s2_dir / "phenol_dates.json"
+        from crop_mapping_pipeline.config import PROCESSED_DIR
+        cache = PROCESSED_DIR / "phenol_dates.json"
         if cache.exists():
             cache.unlink()
             log.info(f"Removed cache → {cache}")

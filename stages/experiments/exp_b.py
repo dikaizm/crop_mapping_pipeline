@@ -12,7 +12,7 @@ _ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_ROOT.parent))
 
 from crop_mapping_pipeline.config import (
-    S2_BAND_NAMES, N_BANDS_PER_DATE, KEEP_CLASSES,
+    S2_BAND_NAMES, N_BANDS_PER_DATE, KEEP_CLASSES, PROCESSED_DIR,
 )
 from crop_mapping_pipeline.stages.experiments.exp_a import _mean_ndvi
 
@@ -53,7 +53,7 @@ def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None, phenol
     if NDVI cannot be computed (no s2_paths/cdl_path).
 
     If phenol_json is provided, reads/writes cache at that path instead of
-    the default <s2_dir>/phenol_dates.json.
+    the default PROCESSED_DIR/phenol_dates.json.
     """
     available_dates = sorted(local_date_to_idx.keys())
 
@@ -62,10 +62,7 @@ def _select_phenol_dates(local_date_to_idx, s2_paths=None, cdl_path=None, phenol
 
     ref_year = int(available_dates[0][:4])
 
-    cache_path = Path(phenol_json) if phenol_json else (
-        Path(s2_paths[0]).parent / "phenol_dates.json"
-        if s2_paths else None
-    )
+    cache_path = Path(phenol_json) if phenol_json else (PROCESSED_DIR / "phenol_dates.json")
     if cache_path and cache_path.exists():
         try:
             with open(cache_path) as f:
