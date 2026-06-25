@@ -22,7 +22,7 @@ from crop_mapping_pipeline.stages.losses.phenology         import (
     PhenologyAwareLoss, build_phenology,
 )
 from crop_mapping_pipeline.stages.losses.focal_tversky     import (
-    FocalCEPlusFocalTversky, FocalCELoss, FocalTverskyLoss,
+    FocalTverskyLoss,
     effective_number_weights, build_focal_tversky,
 )
 from crop_mapping_pipeline.stages.losses.dynamic_balanced  import (
