@@ -940,7 +940,7 @@ def _sample_per_band(s2_paths, n_samples_per_file=50_000, seed=42):
 
 
 def compute_per_band_percentiles(s2_paths, n_samples_per_file=50_000,
-                                  percentiles=(2.0, 98.0), seed=42):
+                                  percentiles=(3.0, 97.0), seed=42):
     """Compute (p_lo, p_hi) per S2 band. Default P2/P98 (ablation baseline).
 
     Returns: (lo, hi), each shape (N_BANDS_PER_DATE,) float32.
