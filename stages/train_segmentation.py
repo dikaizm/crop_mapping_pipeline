@@ -75,9 +75,7 @@ from crop_mapping_pipeline.config import (
 from crop_mapping_pipeline.utils.constants import USDA_CDL_COLORS
 from geoai.geoai.train import RasterPatchDataset, train_semantic_one_epoch
 from crop_mapping_pipeline.stages.losses import (
-    build_wce, build_phenology, build_focal_tversky,
-    build_dynamic_balanced, build_recall, build_boundary_weighted,
-    PhenologyAwareLoss,
+    build_wce, build_focal_tversky, build_dynamic_balanced,
 )
 from geoai.geoai.utils.device import get_device
 from crop_mapping_pipeline.models import DeepLabV3PlusCBAM, build_segformer
@@ -526,13 +524,7 @@ def validate_one_epoch(model, loader, criterion, device, num_classes):
         imgs, masks = imgs.to(device), masks.to(device)
         imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
         logits      = model(imgs)
-        
-        # Check if criterion is phenology-aware
-        if isinstance(criterion, PhenologyAwareLoss):
-            loss = criterion(logits, masks, imgs)
-        else:
-            loss = criterion(logits, masks)
-            
+        loss        = criterion(logits, masks)
         total_loss += loss.item()
         all_logits.append(logits.cpu())
         all_labels.append(masks.cpu())
@@ -1033,12 +1025,15 @@ def _channel_to_band_idx(dataset_band_indices):
     return np.asarray([bi % N_BANDS_PER_DATE for bi in dataset_band_indices], dtype=np.int64)
 
 
-def _per_channel_percentiles(band_indices, p1_per_band, p99_per_band):
-    """Expand (N_BANDS,) per-band stats to (n_ch,) per-channel stats via band lookup."""
+def _per_channel_percentiles(band_indices, plo_per_band, phi_per_band):
+    """Expand (N_BANDS,) per-band (lo, hi) stats to (n_ch,) per-channel via band lookup.
+
+    lo/hi are the norm_mode stats per band — for percentile mode that's P2/P98
+    """
     band_idx_per_ch = _channel_to_band_idx(band_indices)
     if band_idx_per_ch is None:
         raise ValueError("band_indices required for per-band percentile lookup")
-    return p1_per_band[band_idx_per_ch], p99_per_band[band_idx_per_ch]
+    return plo_per_band[band_idx_per_ch], phi_per_band[band_idx_per_ch]
 
 
 # ── In-memory dataset cache ───────────────────────────────────────────────────
@@ -1466,7 +1461,7 @@ def run_experiment(
     s2_processed,
     class_weights_tensor,
     class_counts=None,      # required for focal_tversky effective-number weights
-    loss="wce",             # "wce" | "phenology" | "focal_tversky" | "dynamic_balanced" | "recall"
+    loss="wce",             # "wce" | "focal_tversky" | "dynamic_balanced"
     force=False,
     skip_viz=False,
     no_preload=False,       # skip disk preload cache; use on-the-fly normalisation
@@ -1663,38 +1658,17 @@ def run_experiment(
         )
 
     # ── Loss function (named) ──────────────────────────────────────────────
-    if loss == "phenology":
-        criterion, red_idx, nir_idx = build_phenology(
-            class_weights_tensor.to(DEVICE), band_names_list
-        )
-        log.info(
-            f"  Loss=phenology — PhenologyAwareLoss "
-            f"(Red={band_names_list[red_idx]}, NIR={band_names_list[nir_idx]})"
-        )
-    elif loss == "focal_tversky":
+    if loss == "focal_tversky":
         criterion = build_focal_tversky(
             class_counts=class_counts,
-            beta=0.999, gamma_focal=2.0,
             tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
-            ce_weight=0.6, ft_weight=0.4,
         ).to(DEVICE)
-        log.info("  Loss=focal_tversky — FocalCE + FocalTversky (median-freq weights)")
+        log.info("  Loss=focal_tversky — Focal Tversky (median-freq weighted class-mean)")
     elif loss == "dynamic_balanced":
         criterion = build_dynamic_balanced(
             num_classes=NUM_CLASSES, beta=0.9999, fallback_weight=2.0,
         ).to(DEVICE)
         log.info("  Loss=dynamic_balanced — Dynamic Effective Class Balanced (per-batch, β=0.9999)")
-    elif loss == "recall":
-        criterion = build_recall(
-            num_classes=NUM_CLASSES, momentum=0.9, init_recall=0.0,
-        ).to(DEVICE)
-        log.info("  Loss=recall — RecallLoss (EMA recall weighting, momentum=0.9)")
-    elif loss == "boundary_weighted":
-        criterion = build_boundary_weighted(
-            num_classes=NUM_CLASSES, beta=0.9999, fallback_weight=2.0,
-            boundary_weight=3.0, dilation_kernel=5,
-        ).to(DEVICE)
-        log.info("  Loss=boundary_weighted — Dynamic Balanced + boundary upweighting (3×, dilation=5px)")
     else:
         criterion = build_wce(class_weights_tensor.to(DEVICE))
         log.info("  Loss=wce — WeightedCrossEntropy")
@@ -1769,11 +1743,7 @@ def run_experiment(
                 imgs        = torch.nan_to_num(imgs, nan=0.0, posinf=1.0, neginf=0.0)
                 optimizer.zero_grad()
                 logits = model(imgs)
-
-                if isinstance(criterion, PhenologyAwareLoss):
-                    loss = criterion(logits, masks, imgs)
-                else:
-                    loss = criterion(logits, masks)
+                loss   = criterion(logits, masks)
 
                 loss.backward()
                 if grad_clip and grad_clip > 0:
@@ -2185,7 +2155,7 @@ def _build_drive_service():
         raise FileNotFoundError(
             f"OAuth token not found: {GDRIVE_OAUTH_TOKEN}\n"
             "Generate it locally with:\n"
-            "  python stages/batch_process_v2.py --auth\n"
+            "  python stages/process_data_v6.py --auth\n"
             "Then copy to the server via scp."
         )
     with open(GDRIVE_OAUTH_TOKEN, "rb") as f:
@@ -2935,7 +2905,7 @@ def main(
             log.error(f"  {Path(p).name}  ({err})")
         raise RuntimeError(
             f"{len(corrupt)} corrupt S2 file(s) detected. "
-            "Re-download:  python stages/fetch_data_v2.py --processed --years <year> --overwrite"
+            "Re-download:  python stages/fetch_data_v6.py --folder-id FOLDER_ID --years <year> --overwrite"
         )
     if no_data:
         log.warning(f"Excluding {len(no_data)} date(s) below {MIN_VALID_FRAC_FILE*100:.0f}% valid pixels (high cloud / partial capture):")
@@ -3241,16 +3211,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--loss",
-        choices=["wce", "phenology", "focal_tversky", "dynamic_balanced", "recall",
-                 "boundary_weighted"],
+        choices=["wce", "focal_tversky", "dynamic_balanced"],
         default="wce",
         help=(
             "Loss function: wce (default, WeightedCrossEntropy), "
-            "phenology (NDVI-dormancy weighting), "
-            "focal_tversky (FocalCE+FocalTversky, median-freq weights), "
-            "dynamic_balanced (per-batch Cui+2019 weights), "
-            "recall (EMA per-class recall weighting), "
-            "boundary_weighted (dynamic_balanced + boundary pixel 3× upweight)"
+            "focal_tversky (Focal Tversky, median-freq weighted class-mean), "
+            "dynamic_balanced (per-batch Cui+2019 weights; thesis primary, DECB-CE)"
         ),
     )
     parser.add_argument("--force",      action="store_true", help="Re-run even if checkpoint exists")

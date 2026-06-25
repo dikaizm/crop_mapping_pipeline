@@ -1,24 +1,22 @@
-"""Focal CE + Focal Tversky loss (key: ``focal_tversky``).
+"""Focal Tversky loss (key: ``focal_tversky``).
 
-Designed for class imbalance AND class-prior shift between train and held-out
-areas (raw_v6 test_b has ~0% Rice while train has 14.6%).
+Region-level IoU-style loss for class imbalance, biased toward recall (α>β) so
+rare crop classes are not drowned out by abundant ones. Aligns with the mIoU
+evaluation metric.
 
 Components:
-  - Class weighting (default: Median-Frequency Balancing — Eigen & Fergus 2015):
-    w_c = median(f) / f_c. Moderate weighting; well-proven for satellite seg.
-    Alternatives: 'invsqrt' (1/√f) and 'effnum' (Cui+2019, adaptive β).
-  - Focal Cross-Entropy (Lin et al. 2017): (1-p_t)^γ modulator down-weights
-    well-classified abundant pixels, focuses learning on hard examples.
-  - Focal Tversky (Abraham & Khan 2018): region-level IoU loss biased
-    toward recall (α>β); aligns with mIoU evaluation metric.
-
-Compound: L = ce_weight · FocalCE + ft_weight · FocalTversky.
+  - Focal Tversky (Abraham & Khan 2018): per-class Tversky index
+    T_c = TP / (TP + α·FN + β·FP); loss = (1 - T_c)^γ. α weights false negatives,
+    β weights false positives — α>β favours recall. γ<1 focuses gradients on the
+    classes with the lowest Tversky index (hardest classes).
+  - Optional per-class weighting of the class-mean (Median-Frequency Balancing —
+    Eigen & Fergus 2015 — by default), so rare classes contribute more to the
+    aggregate loss. Pass class_counts to enable; omit for an unweighted mean.
 
 References:
-  - Lin et al. 2017 — Focal Loss for Dense Object Detection.
+  - Abraham & Khan 2018 — A Novel Focal Tversky Loss for Lesion Segmentation.
   - Eigen & Fergus 2015 — Predicting Depth, Surface Normals & Semantic Labels.
   - Cui et al. 2019 — Class-Balanced Loss Based on Effective Number of Samples.
-  - Abraham & Khan 2018 — A Novel Focal Tversky Loss for Lesion Segmentation.
 """
 
 import torch
@@ -72,52 +70,28 @@ def build_class_weights(class_counts, mode="median_freq", beta=None):
     raise ValueError(f"Unknown class-weight mode: {mode}")
 
 
-class FocalCELoss(nn.Module):
-    """Multi-class focal CE with per-class alpha (1-D weight tensor)."""
-
-    def __init__(self, alpha=None, gamma=2.0, ignore_index=-100):
-        super().__init__()
-        self.gamma        = gamma
-        self.ignore_index = ignore_index
-        # register as buffer so .to(device) moves it with the module
-        if alpha is not None:
-            self.register_buffer("alpha", alpha.float())
-        else:
-            self.alpha = None
-
-    def forward(self, logits, target):
-        ce = F.cross_entropy(
-            logits, target, weight=self.alpha,
-            ignore_index=self.ignore_index, reduction="none",
-        )
-        with torch.no_grad():
-            valid = target != self.ignore_index
-            t_safe = target.clamp(min=0)
-            p      = F.softmax(logits, dim=1)
-            pt     = p.gather(1, t_safe.unsqueeze(1)).squeeze(1)
-            pt     = pt.clamp(min=1e-7, max=1.0 - 1e-7)
-        mod = (1.0 - pt) ** self.gamma
-        loss = ce * mod
-        if valid.any():
-            return loss[valid].mean()
-        return loss.mean()
-
-
 class FocalTverskyLoss(nn.Module):
-    """Region-level Tversky with focal exponent. Skips background by default.
+    """Focal Tversky loss. Skips background by default.
 
     α weights FN, β weights FP — set α > β to favour recall on rare classes.
     γ < 1 focuses gradients on classes with low Tversky index.
+    class_weights (optional, 1-D, length C): per-class weight applied to the
+    class-mean so rare classes contribute more (registered as buffer → moves
+    with .to(device)).
     """
 
     def __init__(self, alpha=0.7, beta=0.3, gamma=0.75,
-                 ignore_background=True, smooth=1e-6):
+                 ignore_background=True, smooth=1e-6, class_weights=None):
         super().__init__()
         self.alpha             = alpha
         self.beta              = beta
         self.gamma             = gamma
         self.ignore_background = ignore_background
         self.smooth            = smooth
+        if class_weights is not None:
+            self.register_buffer("class_weights", class_weights.float())
+        else:
+            self.class_weights = None
 
     def forward(self, logits, target):
         C = logits.shape[1]
@@ -125,8 +99,8 @@ class FocalTverskyLoss(nn.Module):
         oh = F.one_hot(target.clamp(min=0), num_classes=C)           # (B, H, W, C)
         oh = oh.permute(0, 3, 1, 2).float()                           # (B, C, H, W)
 
-        classes = range(1, C) if self.ignore_background else range(C)
-        losses = []
+        classes = list(range(1, C) if self.ignore_background else range(C))
+        losses, weights = [], []
         for c in classes:
             pc = p[:, c]
             gc = oh[:, c]
@@ -135,41 +109,29 @@ class FocalTverskyLoss(nn.Module):
             fp = (pc * (1 - gc)).sum()
             t  = (tp + self.smooth) / (tp + self.alpha * fn + self.beta * fp + self.smooth)
             losses.append((1.0 - t).clamp(min=1e-7) ** self.gamma)
-        return torch.stack(losses).mean()
+            if self.class_weights is not None:
+                weights.append(self.class_weights[c])
 
-
-class FocalCEPlusFocalTversky(nn.Module):
-    """Compound loss: λ_ce · FocalCE + λ_ft · FocalTversky."""
-
-    def __init__(self, alpha=None, gamma_focal=2.0,
-                 tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
-                 ce_weight=0.6, ft_weight=0.4):
-        super().__init__()
-        self.focal_ce = FocalCELoss(alpha=alpha, gamma=gamma_focal)
-        self.focal_tv = FocalTverskyLoss(alpha=tv_alpha, beta=tv_beta, gamma=tv_gamma)
-        self.ce_w     = ce_weight
-        self.ft_w     = ft_weight
-
-    def forward(self, logits, target):
-        return self.ce_w * self.focal_ce(logits, target) \
-             + self.ft_w * self.focal_tv(logits, target)
+        loss = torch.stack(losses)
+        if self.class_weights is not None:
+            w = torch.stack(weights).to(loss)
+            return (loss * w).sum() / (w.sum() + 1e-12)
+        return loss.mean()
 
 
 def build_focal_tversky(class_weights_tensor=None, class_counts=None,
                         weight_mode="median_freq", beta=None,
-                        gamma_focal=2.0, tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75,
-                        ce_weight=0.6, ft_weight=0.4):
-    """Build the focal_tversky compound loss.
+                        tv_alpha=0.7, tv_beta=0.3, tv_gamma=0.75):
+    """Build the focal_tversky loss (pure Focal Tversky).
 
-    Pass class_counts (preferred — applies build_class_weights with weight_mode)
-    or a pre-computed class_weights_tensor (fallback).
+    Pass class_counts (preferred — derives per-class weights via build_class_weights
+    with weight_mode) or a pre-computed class_weights_tensor (fallback). Omit both
+    for an unweighted class-mean.
     """
     if class_counts is not None:
-        alpha = build_class_weights(class_counts, mode=weight_mode, beta=beta)
+        class_weights = build_class_weights(class_counts, mode=weight_mode, beta=beta)
     else:
-        alpha = class_weights_tensor.float() if class_weights_tensor is not None else None
-    return FocalCEPlusFocalTversky(
-        alpha=alpha, gamma_focal=gamma_focal,
-        tv_alpha=tv_alpha, tv_beta=tv_beta, tv_gamma=tv_gamma,
-        ce_weight=ce_weight, ft_weight=ft_weight,
+        class_weights = class_weights_tensor.float() if class_weights_tensor is not None else None
+    return FocalTverskyLoss(
+        alpha=tv_alpha, beta=tv_beta, gamma=tv_gamma, class_weights=class_weights,
     )
