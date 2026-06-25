@@ -138,8 +138,8 @@ TOP_K_PER_CROP  = 20     # top-K channels per crop before union
 # ── Training hyperparameters ───────────────────────────────────────────────────
 TRAIN_YEARS    = ["2024"]
 TEST_YEAR      = "2024"
-PATCH_SIZE     = 256
-STRIDE         = 256
+PATCH_SIZE     = 128
+STRIDE         = 128
 MIN_VALID_FRAC = 0.1
 BATCH_SIZE     = 8
 MAX_EPOCHS     = 150
@@ -154,7 +154,7 @@ SEED           = 42
 # each block assigned wholly to one split (train/val/test) via class-balanced
 # greedy stratification. Prevents patch-adjacency spatial leakage (no train patch
 # spatially adjacent to a val/test patch).
-BLOCK_SIZE = 1024          # px per block side = 4×4 patches (PATCH_SIZE=256)
+BLOCK_SIZE = 1024          # px per block side = 8×8 patches (PATCH_SIZE=128)
 # Per-split, per-crop minimum pixel fraction (of that crop's total) the repair pass
 # enforces, so no split gets a crop only as a token sliver. 0 disables (presence-only).
 MIN_CLASS_FRAC = 0.05
