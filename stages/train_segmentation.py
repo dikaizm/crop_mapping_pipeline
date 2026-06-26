@@ -1468,6 +1468,7 @@ def run_experiment(
     cache_only=False,       # build PreloadedDataset cache then exit without training
     norm_mode="percentile", # "percentile" | "minmax" | "zscore"
     skip_ndvi=False,        # skip NDVI GT-vs-pred disagreement analysis (CalCROP21 method)
+    no_aug=False,           # disable train-time geometric + spectral augmentation
 ):
     """band_indices: list[int] same for all years, or dict{yr: (idx, names)} per-year."""
     cfg           = ARCH_CFG[arch]
@@ -1624,7 +1625,7 @@ def run_experiment(
     # Band indices threaded through to enable per-band (vs per-channel) spectral
     # augmentation. For per-year dict, use the primary year's indices.
     _aug_bi = primary_idx_local if isinstance(band_indices, dict) else band_indices
-    aug_train_ds = AugmentedSubset(train_ds, band_indices=_aug_bi)
+    aug_train_ds = train_ds if no_aug else AugmentedSubset(train_ds, band_indices=_aug_bi)
     # In --eval-only with on-the-fly (no-preload) datasets, workers can't pickle open
     # rasterio handles under macOS spawn; use 0 workers (single test pass, speed is fine).
     _nw = 0 if eval_only else 4
@@ -2757,6 +2758,7 @@ def main(
     no_preload=False,
     cache_only=False,
     norm_mode="percentile",
+    no_aug=False,
     hp=None,
 ):
     global BATCH_SIZE, MAX_EPOCHS, HP_OVERRIDE, HP_TAG
@@ -3112,6 +3114,7 @@ def main(
                     no_preload=no_preload,
                     cache_only=cache_only,
                     norm_mode=norm_mode,
+                    no_aug=no_aug,
                     **extra_kw,
                 )
                 if result is not None:
@@ -3250,6 +3253,9 @@ if __name__ == "__main__":
              "configured folder id, upload runs automatically.")
     parser.add_argument("--no-upload-cache", action="store_true",
                         help="Disable the automatic preload-cache upload after --build-cache-only.")
+    parser.add_argument("--no-aug", action="store_true",
+                        help="Disable train-time augmentation (geometric + spectral). "
+                             "Useful for ablation or fast debug runs.")
     parser.add_argument("--data-dir", default=None, help="Override data/processed directory")
     parser.add_argument("--phenol-dates", default=None, help="Path to pre-computed phenol_dates.json for Exp B multi-temporal baseline")
     parser.add_argument("--shutdown", action="store_true", help="Stop the RunPod pod after training")
@@ -3407,6 +3413,7 @@ if __name__ == "__main__":
                 no_preload=args.no_preload,
                 cache_only=args.build_cache_only,
                 norm_mode=args.norm,
+                no_aug=args.no_aug,
                 hp=hp,
             )
 
