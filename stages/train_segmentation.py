@@ -1697,6 +1697,7 @@ def run_experiment(
             "lr_scheduler":   _sched_label,
             "loss":           loss,
             "norm_mode":      norm_mode,
+            "augmentation":   not no_aug,
             "train_years":    str(TRAIN_YEARS),
             "test_year":      TEST_YEAR,
             "train_patches":  n_train,
