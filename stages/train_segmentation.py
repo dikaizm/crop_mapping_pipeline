@@ -1676,7 +1676,8 @@ def run_experiment(
 
     # ── MLflow run (child — nested under parent created in main()) ────────────
 
-    with mlflow.start_run(run_name=exp_name, nested=True, log_system_metrics=True) as run:
+    _child_run_name = f"eval_{exp_name}" if eval_only else exp_name
+    with mlflow.start_run(run_name=_child_run_name, nested=True, log_system_metrics=True) as run:
         mlflow.log_params({
             "experiment":     exp_name,
             "architecture":   arch,
@@ -1944,17 +1945,41 @@ def run_experiment(
             log.info(f"  {'-'*38}")
             log.info(f"  {'mIoU':<20} {'':>6}  {test_r['miou']:>7.4f}")
 
-        # ── eval-only: write per-patch viz + metrics CSV, then stop ────────────
-        # (skips training-only artifacts: history/curve/seg-map regen/gdrive upload)
+        # ── eval-only: write full segmentation map + per-patch viz + metrics CSV ─
+        # (skips training-only artifacts: history/curve/gdrive upload)
         if eval_only:
+            # Full-scene segmentation map (same renderer as training finalize path)
+            if not skip_viz and primary_s2_filtered is not None:
+                log.info(f"  [--eval-only] Running full-image inference for {exp_name}...")
+                gt_map, _   = load_gt_remap(str(CDL_TRAIN))
+                pred_map, _ = run_full_inference(
+                    model, primary_s2_filtered, primary_idx_local,
+                    patch_size=PATCH_SIZE, stride=PATCH_SIZE,
+                    channel_stats=None, band_percentiles=band_percentiles,
+                    norm_mode=norm_mode,
+                )
+                seg_path = exp_dir / "test_segmentation_map.png"
+                rgb_img  = _load_rgb_for_viz(primary_s2_filtered, band_percentiles, downsample=4)
+                save_segmentation_map(
+                    pred_map, gt_map,
+                    title=f"Segmentation Map ({TEST_YEAR})",
+                    save_path=str(seg_path),
+                    rgb_img=rgb_img,
+                )
+                mlflow.log_artifact(str(seg_path))
+                del pred_map, gt_map
             if test_r is not None and test_dl is not None:
                 log.info(f"  [--eval-only] Saving per-patch test visualizations + metrics CSV for {exp_name}...")
-                save_test_patch_visualizations(
+                patch_dir = save_test_patch_visualizations(
                     test_dl, test_r["preds"], test_r["labels"],
                     s2_processed, test_ds, train_year_datasets_raw,
                     band_percentiles, exp_dir, exp_name,
                 )
-                log.info(f"  [--eval-only] Outputs written to {exp_dir}")
+                mlflow.log_artifacts(str(patch_dir), artifact_path="test_patches")
+                _metrics_csv = exp_dir / "test_patch_metrics.csv"
+                if _metrics_csv.exists():
+                    mlflow.log_artifact(str(_metrics_csv))
+                log.info(f"  [--eval-only] Outputs written to {exp_dir} + logged to MLflow")
             else:
                 log.warning("  [--eval-only] No test split available — nothing to write")
             _eval_run_id = run.info.run_id
@@ -2430,29 +2455,31 @@ def save_test_patch_visualizations(
                 "classes_present": "|".join(CLASS_LABELS[c] for c in present),
             })
 
-            fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+            fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5.6))
 
             axes[0].imshow(rgb)
-            axes[0].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=11, fontweight="bold")
+            axes[0].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=20, fontweight="bold")
             axes[0].axis("off")
 
             axes[1].imshow(gt,    cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
-            axes[1].set_title("Ground Truth",    fontsize=11, fontweight="bold")
+            axes[1].set_title("Ground Truth",    fontsize=20, fontweight="bold")
             axes[1].axis("off")
 
             axes[2].imshow(pred,  cmap=SEG_CMAP, norm=SEG_NORM, interpolation="nearest")
-            axes[2].set_title("Prediction",      fontsize=11, fontweight="bold")
+            axes[2].set_title("Prediction",      fontsize=20, fontweight="bold")
             axes[2].axis("off")
 
             axes[3].imshow(error, cmap=error_cmap, norm=error_norm, interpolation="nearest")
-            axes[3].set_title("Correct / Incorrect", fontsize=11, fontweight="bold")
+            axes[3].set_title("Correct / Incorrect", fontsize=20, fontweight="bold")
             axes[3].axis("off")
 
+            # tight panel spacing + title close above panels, legend below in one line
+            fig.subplots_adjust(left=0.005, right=0.995, top=0.86, bottom=0.14, wspace=0.03)
             fig.legend(handles=crop_legend + error_legend, loc="lower center",
-                       ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
-                       bbox_to_anchor=(0.5, -0.02), frameon=True)
-            plt.suptitle(f"{exp_name} — Test Patch {patch_idx:04d}", fontsize=12, y=1.02)
-            plt.tight_layout()
+                       ncol=len(crop_legend) + len(error_legend), fontsize=15,
+                       columnspacing=1.0, handletextpad=0.4,
+                       bbox_to_anchor=(0.5, 0.0), frameon=True)
+            fig.suptitle(f"Test Patch {patch_idx:04d}", fontsize=26, fontweight="bold", y=0.97)
             plt.savefig(str(patch_dir / f"patch_{patch_idx:04d}.png"), dpi=100, bbox_inches="tight")
             plt.close()
             patch_idx += 1
@@ -2532,25 +2559,25 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
     error_norm = BoundaryNorm([0, 1, 2, 3], error_cmap.N)
 
     n_panels = 4 if rgb_img is not None else 3
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 8))
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 8.5))
 
     panel = 0
     if rgb_img is not None:
         axes[panel].imshow(rgb_img)
-        axes[panel].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=12, fontweight="bold")
+        axes[panel].set_title("Median Composite\n(B4/B3/B2, 2024)", fontsize=22, fontweight="bold")
         axes[panel].axis("off")
         panel += 1
 
     axes[panel].imshow(gt_ds,   cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
-    axes[panel].set_title("Ground Truth (CDL)", fontsize=12, fontweight="bold")
+    axes[panel].set_title("Ground Truth (CDL)", fontsize=22, fontweight="bold")
     axes[panel].axis("off")
     panel += 1
     axes[panel].imshow(pred_ds, cmap=SEG_CMAP,   norm=SEG_NORM,   interpolation="nearest")
-    axes[panel].set_title("Prediction",         fontsize=12, fontweight="bold")
+    axes[panel].set_title("Prediction",         fontsize=22, fontweight="bold")
     axes[panel].axis("off")
     panel += 1
     axes[panel].imshow(error,   cmap=error_cmap, norm=error_norm, interpolation="nearest")
-    axes[panel].set_title("Correct / Incorrect", fontsize=12, fontweight="bold")
+    axes[panel].set_title("Correct / Incorrect", fontsize=22, fontweight="bold")
     axes[panel].axis("off")
 
     crop_patches = [mpatches.Patch(color=CROP_COLORS[i], label=CLASS_LABELS[i])
@@ -2560,11 +2587,12 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
         mpatches.Patch(color="#ee2222", label="Incorrect"),
         mpatches.Patch(color="#d0d0d0", label="Background"),
     ]
+    # no figure title; tight spacing, legend below in one line
+    fig.subplots_adjust(left=0.005, right=0.995, top=0.97, bottom=0.12, wspace=0.03)
     fig.legend(handles=crop_patches + error_patches, loc="lower center",
-               ncol=min(NUM_CLASSES + 2, 9), fontsize=9,
-               bbox_to_anchor=(0.5, -0.01), frameon=True)
-    plt.suptitle(title, fontsize=13, y=1.01)
-    plt.tight_layout()
+               ncol=len(crop_patches) + len(error_patches), fontsize=16,
+               columnspacing=1.0, handletextpad=0.4,
+               bbox_to_anchor=(0.5, 0.0), frameon=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     log.info(f"  Saved: {save_path}")
@@ -3077,6 +3105,8 @@ def main(
         if HP_TAG:
             _sel_sfx += f"_{HP_TAG}"
         parent_run_name = f"exp_{exp_key}{_sel_sfx}_{timestamp}"
+        if EVAL_ONLY_CKPT is not None:
+            parent_run_name = f"eval_{parent_run_name}"
         with mlflow.start_run(run_name=parent_run_name) as parent_run:
             mlflow.log_params({
                 "experiment":   f"exp_{exp_key}",
@@ -3352,11 +3382,9 @@ if __name__ == "__main__":
             log.error(f"Checkpoint not found: {ckpt_path}")
             sys.exit(1)
         EVAL_ONLY_CKPT = str(ckpt_path)
-        # Keep all MLflow logging local (do not pollute the tracking server with eval runs).
-        _eval_mlruns = Path(tempfile.mkdtemp(prefix="evalonly_mlruns_"))
-        mlflow.set_tracking_uri(f"file://{_eval_mlruns}")
-        log.info(f"--eval-only: MLflow → local {_eval_mlruns} (server untouched)")
-        log.info(f"--eval-only: evaluating {ckpt_path}")
+        # Eval runs log to the tracking server (run names prefixed "eval_"), with
+        # the full segmentation map, per-patch PNGs, and metrics CSV as artifacts.
+        log.info(f"--eval-only: evaluating {ckpt_path} (logged to MLflow as eval_* runs)")
 
     n_sel_modes = sum([bool(args.top_k), bool(args.percentile), bool(args.score_threshold)])
     if n_sel_modes > 1:
