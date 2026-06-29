@@ -166,8 +166,8 @@ WARMUP_EPOCHS  = 0         # linear-warmup epochs before polynomial decay (0 = n
 WARMUP_START_FACTOR = 0.1  # initial lr multiplier at epoch 0 during warmup
 
 ARCH_CFG = {
-    "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "resnet50"},
-    "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b2"},
+    "deeplabv3plus_cbam": {"lr": 1e-4, "weight_decay": 1e-4, "encoder": "mobilenet_v2"},
+    "segformer":          {"lr": 6e-5, "weight_decay": 1e-2, "encoder": "mit_b0"},
 }
 
 # ── Band scoring hyperparameters ───────────────────────────────────────────────
