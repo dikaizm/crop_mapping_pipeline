@@ -114,8 +114,8 @@ def _resolve_hp(cfg: dict) -> dict:
     batch_size=None → use the module BATCH_SIZE (CLI/config). grad_clip=0 → off.
     """
     o = HP_OVERRIDE or {}
-    optimizer = str(o.get("optimizer", "adamw")).lower()
-    scheduler = str(o.get("scheduler", "polynomial")).lower()
+    optimizer = str(o.get("optimizer", cfg.get("optimizer", "adamw"))).lower()
+    scheduler = str(o.get("scheduler", cfg.get("scheduler", "polynomial"))).lower()
     if optimizer not in _OPTIMIZERS:
         raise ValueError(f"--hp-grid optimizer '{optimizer}' invalid; choose {sorted(_OPTIMIZERS)}")
     if scheduler not in _SCHEDULERS:
@@ -123,11 +123,11 @@ def _resolve_hp(cfg: dict) -> dict:
     return {
         "lr":            float(o.get("lr",            cfg["lr"])),
         "weight_decay":  float(o.get("weight_decay",  cfg["weight_decay"])),
-        "warmup_epochs": int(o.get("warmup_epochs",   WARMUP_EPOCHS)),
-        "sched_power":   float(o.get("sched_power",    SCHED_POWER)),
+        "warmup_epochs": int(o.get("warmup_epochs",   cfg.get("warmup_epochs", WARMUP_EPOCHS))),
+        "sched_power":   float(o.get("sched_power",   cfg.get("sched_power", SCHED_POWER))),
         "scheduler":     scheduler,
         "optimizer":     optimizer,
-        "momentum":      float(o.get("momentum", 0.9)),   # SGD only
+        "momentum":      float(o.get("momentum", cfg.get("momentum", 0.9))),   # SGD only
         "grad_clip":     float(o.get("grad_clip", 0.0)),  # 0 = disabled
         "batch_size":    int(o["batch_size"]) if o.get("batch_size") else None,
     }
