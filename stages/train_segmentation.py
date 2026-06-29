@@ -2474,7 +2474,7 @@ def save_test_patch_visualizations(
             axes[3].axis("off")
 
             # tight panel spacing + title close above panels, legend below in one line
-            fig.subplots_adjust(left=0.005, right=0.995, top=0.86, bottom=0.14, wspace=0.03)
+            fig.subplots_adjust(left=0.005, right=0.995, top=0.86, bottom=0.14, wspace=0.005)
             fig.legend(handles=crop_legend + error_legend, loc="lower center",
                        ncol=len(crop_legend) + len(error_legend), fontsize=18,
                        columnspacing=0.8, handletextpad=0.35,
