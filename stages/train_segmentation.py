@@ -2476,8 +2476,8 @@ def save_test_patch_visualizations(
             # tight panel spacing + title close above panels, legend below in one line
             fig.subplots_adjust(left=0.005, right=0.995, top=0.86, bottom=0.14, wspace=0.03)
             fig.legend(handles=crop_legend + error_legend, loc="lower center",
-                       ncol=len(crop_legend) + len(error_legend), fontsize=15,
-                       columnspacing=1.0, handletextpad=0.4,
+                       ncol=len(crop_legend) + len(error_legend), fontsize=19,
+                       columnspacing=0.8, handletextpad=0.35,
                        bbox_to_anchor=(0.5, 0.0), frameon=True)
             fig.suptitle(f"Test Patch {patch_idx:04d}", fontsize=26, fontweight="bold", y=0.97)
             plt.savefig(str(patch_dir / f"patch_{patch_idx:04d}.png"), dpi=100, bbox_inches="tight")
@@ -2590,8 +2590,8 @@ def save_segmentation_map(pred_map, gt_map, title, save_path, downsample=4, rgb_
     # no figure title; tight spacing, legend below in one line
     fig.subplots_adjust(left=0.005, right=0.995, top=0.97, bottom=0.12, wspace=0.03)
     fig.legend(handles=crop_patches + error_patches, loc="lower center",
-               ncol=len(crop_patches) + len(error_patches), fontsize=16,
-               columnspacing=1.0, handletextpad=0.4,
+               ncol=len(crop_patches) + len(error_patches), fontsize=19,
+               columnspacing=0.8, handletextpad=0.35,
                bbox_to_anchor=(0.5, 0.0), frameon=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
