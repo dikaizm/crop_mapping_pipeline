@@ -92,6 +92,7 @@ DEVICE = "cpu" if os.environ.get("FORCE_CPU") else get_device()
 # all archs in the run; warmup_epochs/sched_power override config defaults.
 HP_OVERRIDE: dict | None = None   # {lr, weight_decay, warmup_epochs, sched_power}
 HP_TAG: str = ""                  # short run-name suffix, e.g. "lr1e-04_wd1e-02_wu5_pw0.9"
+SEED_TAG: str = ""                # seed suffix appended to run names when --seed-grid is used
 SESSION_LOG_PATH: str | None = None  # top-level session .log file (LOGS_DIR)
 # (run_id, per_run_log_path) captured per finished run; logs uploaded to MLflow
 # only AFTER the whole session ends (avoids HTTP errors from uploading the
@@ -2789,14 +2790,22 @@ def main(
     norm_mode="percentile",
     no_aug=False,
     hp=None,
+    seed=None,
 ):
-    global BATCH_SIZE, MAX_EPOCHS, HP_OVERRIDE, HP_TAG
+    global BATCH_SIZE, MAX_EPOCHS, HP_OVERRIDE, HP_TAG, SEED, SEED_TAG
     if batch_size:
         BATCH_SIZE = batch_size
         log.info(f"Batch size overridden: {BATCH_SIZE}")
     if epochs:
         MAX_EPOCHS = epochs
         log.info(f"Max epochs overridden: {MAX_EPOCHS}")
+
+    if seed is not None:
+        SEED = seed
+        SEED_TAG = f"seed{seed}"
+        log.info(f"Seed overridden: {SEED}")
+    else:
+        SEED_TAG = ""
 
     HP_OVERRIDE = hp or None
     HP_TAG = _hp_tag(hp) if hp else ""
@@ -3104,6 +3113,8 @@ def main(
                     else (f"_k{top_k}" if top_k else ""))
         if HP_TAG:
             _sel_sfx += f"_{HP_TAG}"
+        if SEED_TAG:
+            _sel_sfx += f"_{SEED_TAG}"
         parent_run_name = f"exp_{exp_key}{_sel_sfx}_{timestamp}"
         if EVAL_ONLY_CKPT is not None:
             parent_run_name = f"eval_{parent_run_name}"
@@ -3115,6 +3126,7 @@ def main(
                 "test_year":    TEST_YEAR,
                 "description":  cfg_entry.description,
                 "loss":         loss,
+                "seed":         SEED,
                 **({"top_k": top_k} if top_k else {}),
                 **({"percentile": percentile} if percentile is not None else {}),
                 **({f"hp_{k}": v for k, v in HP_OVERRIDE.items()} if HP_OVERRIDE else {}),
@@ -3340,6 +3352,13 @@ if __name__ == "__main__":
              "tagged with the combo. Combos run outermost, nesting with --top-k/--percentile "
              "sweeps. See configs/hp_grid_example.json.",
     )
+    parser.add_argument(
+        "--seed-grid", type=int, nargs="+", default=None, metavar="SEED",
+        help="Run the full experiment matrix once per seed for stability testing. "
+             "Each seed overrides config.SEED, tags run names with _seed{N}, and logs "
+             "'seed' as an MLflow param. The spatial block split is re-seeded each run "
+             "so splits differ across seeds. E.g. --seed-grid 42 123 456 789",
+    )
     args = parser.parse_args()
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3409,42 +3428,52 @@ if __name__ == "__main__":
         for i, (a, c) in enumerate(hp_combos):
             log.info(f"  [{i+1}/{len(hp_combos)}] arch={a or 'ALL'}  {c}")
 
-    for hp_arch, hp in hp_combos:
-        # Per-arch grid pinned to an arch excluded by --arch → skip.
-        if hp_arch is not None and args.arch and hp_arch not in args.arch:
-            log.info(f"Skip HP combo (arch {hp_arch} not in --arch {args.arch})")
-            continue
-        run_archs = [hp_arch] if hp_arch is not None else args.arch
-        if hp is not None:
-            log.info(f"{'#'*65}")
-            log.info(f"  HP combo: arch={hp_arch or 'ALL'}  {hp}")
-            log.info(f"{'#'*65}")
-        for mode, val in sweep:
-            if mode is not None:
-                log.info(f"{'='*65}")
-                mode_label = {"percentile": "Percentile", "top_k": "Top-K", "score_threshold": "Score-threshold"}.get(mode, mode)
-                log.info(f"  {mode_label} sweep: {mode}={val}")
-                log.info(f"{'='*65}")
-            main(
-                exps=args.exp,
-                archs=run_archs,
-                loss=args.loss,
-                force=args.force,
-                data_dir=args.data_dir,
-                phenol_dates=args.phenol_dates,
-                skip_viz=args.skip_viz,
-                skip_ndvi=(not args.ndvi) or args.skip_ndvi,
-                top_k=val if mode == "top_k" else None,
-                percentile=val if mode == "percentile" else None,
-                score_threshold=val if mode == "score_threshold" else None,
-                batch_size=args.batch_size,
-                epochs=args.epochs,
-                no_preload=args.no_preload,
-                cache_only=args.build_cache_only,
-                norm_mode=args.norm,
-                no_aug=args.no_aug,
-                hp=hp,
-            )
+    seed_list = args.seed_grid if args.seed_grid else [None]
+    if args.seed_grid:
+        log.info(f"Seed grid: {seed_list} ({len(seed_list)} seed(s))")
+
+    for seed_val in seed_list:
+        if seed_val is not None:
+            log.info(f"{'*'*65}")
+            log.info(f"  Seed: {seed_val}")
+            log.info(f"{'*'*65}")
+        for hp_arch, hp in hp_combos:
+            # Per-arch grid pinned to an arch excluded by --arch → skip.
+            if hp_arch is not None and args.arch and hp_arch not in args.arch:
+                log.info(f"Skip HP combo (arch {hp_arch} not in --arch {args.arch})")
+                continue
+            run_archs = [hp_arch] if hp_arch is not None else args.arch
+            if hp is not None:
+                log.info(f"{'#'*65}")
+                log.info(f"  HP combo: arch={hp_arch or 'ALL'}  {hp}")
+                log.info(f"{'#'*65}")
+            for mode, val in sweep:
+                if mode is not None:
+                    log.info(f"{'='*65}")
+                    mode_label = {"percentile": "Percentile", "top_k": "Top-K", "score_threshold": "Score-threshold"}.get(mode, mode)
+                    log.info(f"  {mode_label} sweep: {mode}={val}")
+                    log.info(f"{'='*65}")
+                main(
+                    exps=args.exp,
+                    archs=run_archs,
+                    loss=args.loss,
+                    force=args.force,
+                    data_dir=args.data_dir,
+                    phenol_dates=args.phenol_dates,
+                    skip_viz=args.skip_viz,
+                    skip_ndvi=(not args.ndvi) or args.skip_ndvi,
+                    top_k=val if mode == "top_k" else None,
+                    percentile=val if mode == "percentile" else None,
+                    score_threshold=val if mode == "score_threshold" else None,
+                    batch_size=args.batch_size,
+                    epochs=args.epochs,
+                    no_preload=args.no_preload,
+                    cache_only=args.build_cache_only,
+                    norm_mode=args.norm,
+                    no_aug=args.no_aug,
+                    hp=hp,
+                    seed=seed_val,
+                )
 
     # ── Upload all logs once, after the whole session finished ────────────────
     _flush_deferred_logs()
